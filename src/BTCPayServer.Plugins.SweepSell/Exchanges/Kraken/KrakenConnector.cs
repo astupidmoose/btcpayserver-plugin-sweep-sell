@@ -74,7 +74,7 @@ public class KrakenConnector(HttpClient http) : IExchangeConnector
 
     public async Task<IReadOnlyDictionary<string, decimal>> GetAvailableBalancesAsync(ExchangeCredentials credentials, CancellationToken cancellationToken)
     {
-        var result = (JObject)await PrivateAsync(credentials, "BalanceEx", [], cancellationToken);
+        var result = Expect<JObject>(await PrivateAsync(credentials, "BalanceEx", [], cancellationToken), "BalanceEx");
         var balances = new Dictionary<string, decimal>();
         foreach (var (asset, value) in result)
         {
@@ -94,26 +94,26 @@ public class KrakenConnector(HttpClient http) : IExchangeConnector
         var parameters = new List<KeyValuePair<string, string>>
         {
             new("asset", ToKraken(asset)),
-            new("method", method.Value<string>("method")!)
+            new("method", Text(method["method"])!)
         };
         // Kraken refuses "new" for methods that can't generate addresses; reuse the existing one there.
-        if (fresh && method.Value<bool?>("gen-address") == true)
+        if (fresh && IsTrue(method["gen-address"]))
             parameters.Add(new("new", "true"));
-        var result = (JArray)await PrivateAsync(credentials, "DepositAddresses", parameters, cancellationToken);
+        var result = Expect<JArray>(await PrivateAsync(credentials, "DepositAddresses", parameters, cancellationToken), "DepositAddresses");
         var now = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
         var usable = result.OfType<JObject>()
-            .Where(a => !string.IsNullOrEmpty(a.Value<string>("address")))
+            .Where(a => !string.IsNullOrEmpty(Text(a["address"])))
             // expiretm 0 means the address never expires.
-            .Where(a => long.TryParse(a.Value<string>("expiretm") ?? "0", NumberStyles.None, CultureInfo.InvariantCulture, out var expires) && (expires == 0 || expires > now))
+            .Where(a => long.TryParse(Text(a["expiretm"]) ?? "0", NumberStyles.None, CultureInfo.InvariantCulture, out var expires) && (expires == 0 || expires > now))
             .ToList();
         var entry = parameters.Any(p => p.Key == "new")
-            ? usable.FirstOrDefault(a => a.Value<bool?>("new") == true)
+            ? usable.FirstOrDefault(a => IsTrue(a["new"]))
               ?? throw new ExchangeException($"Kraken did not return the new {asset} deposit address it was asked for.")
             : usable.FirstOrDefault()
               ?? throw new ExchangeException($"Kraken returned no unexpired {asset} deposit address. Create one in Kraken first.");
         // Kraken returns a destination tag (XRP) or memo (e.g. XLM) beside the address when the asset needs one.
-        var tag = new[] { entry.Value<string>("tag"), entry.Value<string>("memo") }.FirstOrDefault(t => !string.IsNullOrEmpty(t));
-        return new DepositDestination(entry.Value<string>("address")!, tag);
+        var tag = new[] { Text(entry["tag"]), Text(entry["memo"]) }.FirstOrDefault(t => !string.IsNullOrEmpty(t));
+        return new DepositDestination(Text(entry["address"])!, tag);
     }
 
     public async Task<decimal> GetMinimumDepositAsync(ExchangeCredentials credentials, string asset, CancellationToken cancellationToken)
@@ -124,26 +124,28 @@ public class KrakenConnector(HttpClient http) : IExchangeConnector
 
     public async Task<decimal> GetPriceAsync(string baseAsset, string quoteAsset, CancellationToken cancellationToken)
     {
-        var result = (JObject)await PublicAsync("Ticker", Pair(baseAsset, quoteAsset), cancellationToken);
+        var result = Expect<JObject>(await PublicAsync("Ticker", Pair(baseAsset, quoteAsset), cancellationToken), "Ticker");
         var ticker = result.Properties().Select(p => p.Value).OfType<JObject>().FirstOrDefault()
                      ?? throw new ExchangeException($"Kraken has no {baseAsset}/{quoteAsset} market.");
-        var last = RequiredDecimal(ticker["c"]?[0], $"{baseAsset}/{quoteAsset} last price");
+        var last = RequiredDecimal(ticker["c"] is JArray { Count: > 0 } c ? c[0] : null, $"{baseAsset}/{quoteAsset} last price");
         return last > 0 ? last : throw new ExchangeException($"Kraken returned no price for {baseAsset}/{quoteAsset}.");
     }
 
     public async Task<MarketRules> GetMarketRulesAsync(string baseAsset, string quoteAsset, CancellationToken cancellationToken)
     {
-        var result = (JObject)await PublicAsync("AssetPairs", Pair(baseAsset, quoteAsset), cancellationToken);
+        var result = Expect<JObject>(await PublicAsync("AssetPairs", Pair(baseAsset, quoteAsset), cancellationToken), "AssetPairs");
         var pair = result.Properties().Select(p => p.Value).OfType<JObject>().FirstOrDefault()
                    ?? throw new ExchangeException($"Kraken has no {baseAsset}/{quoteAsset} market.");
         var market = $"{baseAsset}/{quoteAsset}";
-        var decimals = pair.Value<int?>("lot_decimals") ?? throw new ExchangeException($"Kraken sent no amount precision for {market}.");
+        var decimals = pair["lot_decimals"] is JValue { Type: JTokenType.Integer } lot
+            ? (long)lot
+            : throw new ExchangeException($"Kraken sent no amount precision for {market}.");
         if (decimals is < 0 or > MarketRules.MaxAmountDecimals)
             throw new ExchangeException($"Kraken sent an unsupported amount precision ({decimals}) for {market}.");
         return new MarketRules(baseAsset.ToUpperInvariant(), quoteAsset.ToUpperInvariant(),
             RequiredDecimal(pair["ordermin"], $"{market} minimum order"),
             RequiredDecimal(pair["costmin"], $"{market} minimum order cost"),
-            decimals);
+            (int)decimals);
     }
 
     public async Task<OrderResult> SellAtMarketAsync(ExchangeCredentials credentials, string baseAsset, string quoteAsset, decimal amount,
@@ -162,11 +164,11 @@ public class KrakenConnector(HttpClient http) : IExchangeConnector
         };
         if (validateOnly)
             parameters.Add(new("validate", "true"));
-        var result = (JObject)await PrivateAsync(credentials, "AddOrder", parameters, cancellationToken);
-        var ids = result["txid"] is JArray txids ? txids.Select(t => t.ToString()).Where(t => t.Length > 0).ToList() : [];
+        var result = Expect<JObject>(await PrivateAsync(credentials, "AddOrder", parameters, cancellationToken), "AddOrder");
+        var ids = result["txid"] is JArray txids ? txids.Select(t => Text(t) ?? "").Where(t => t.Length > 0).ToList() : [];
         if (!validateOnly && ids.Count == 0)
             throw new ExchangeException($"Kraken accepted the {baseAsset}/{quoteAsset} sell (client order {clientOrderId:D}) but returned no order ID. Check the order in Kraken before retrying.");
-        var description = result["descr"]?.Value<string>("order") ?? $"sell {amount} {baseAsset} for {quoteAsset} @ market";
+        var description = (result["descr"] is JObject descr ? Text(descr["order"]) : null) ?? $"sell {amount} {baseAsset} for {quoteAsset} @ market";
         return new OrderResult(!validateOnly, ids, description);
     }
 
@@ -220,10 +222,10 @@ public class KrakenConnector(HttpClient http) : IExchangeConnector
 
     async Task<JObject> DepositMethodAsync(ExchangeCredentials credentials, string asset, CancellationToken cancellationToken)
     {
-        var methods = ((JArray)await PrivateAsync(credentials, "DepositMethods", [new("asset", ToKraken(asset))], cancellationToken))
+        var methods = Expect<JArray>(await PrivateAsync(credentials, "DepositMethods", [new("asset", ToKraken(asset))], cancellationToken), "DepositMethods")
             .OfType<JObject>().ToList();
         if (OnChainMethods.TryGetValue(asset, out var name))
-            return methods.FirstOrDefault(m => string.Equals(m.Value<string>("method"), name, StringComparison.OrdinalIgnoreCase))
+            return methods.FirstOrDefault(m => string.Equals(Text(m["method"]), name, StringComparison.OrdinalIgnoreCase))
                    ?? throw new ExchangeException($"Kraken offers no {name} (on-chain) deposit method for {asset}.");
         // A coin we don't know the network of is only safe when Kraken offers exactly one way to deposit it.
         return methods.Count == 1
@@ -306,6 +308,18 @@ public class KrakenConnector(HttpClient http) : IExchangeConnector
     /// <summary>Identifies a key for locking without keeping the key itself in memory.</summary>
     static string KeyFingerprint(string apiKey) =>
         Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(apiKey)));
+
+    /// <summary>The result of a call in the shape the code expects; anything else fails as an exchange error, not a crash.</summary>
+    static T Expect<T>(JToken result, string method) where T : JToken =>
+        result as T ?? throw new ExchangeException($"Kraken sent an unexpected {method} response.");
+
+    /// <summary>A text or number field as text; null when missing or of another shape.</summary>
+    static string? Text(JToken? token) =>
+        token is JValue { Type: JTokenType.String or JTokenType.Integer or JTokenType.Float } value
+            ? Convert.ToString(value.Value, CultureInfo.InvariantCulture)
+            : null;
+
+    static bool IsTrue(JToken? token) => token is JValue { Type: JTokenType.Boolean, Value: true };
 
     /// <summary>A number Kraken must send; missing or malformed fails loudly instead of reading as zero.</summary>
     static decimal RequiredDecimal(JToken? token, string what)

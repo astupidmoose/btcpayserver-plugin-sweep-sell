@@ -61,6 +61,14 @@ public class SettingsTests
     }
 
     [Fact]
+    public void KeyWithoutAnExchangeIsNotSaved()
+    {
+        var settings = UISweepSellController.Apply(new SweepSellSettings(),
+            new SweepSellSettingsViewModel { ApiKey = "my-key", ApiSecret = "my-secret" }, Protector);
+        Assert.False(settings.HasCredentials);
+    }
+
+    [Fact]
     public void NewPairReplacesTheKey()
     {
         var settings = UISweepSellController.Apply(Saved(),

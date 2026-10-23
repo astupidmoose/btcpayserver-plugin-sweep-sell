@@ -42,6 +42,9 @@ public class UISweepSellController(SweepSellSettingsRepository repository, Secre
         var updated = Apply(saved, vm, protector);
         if (string.IsNullOrWhiteSpace(vm.ApiKey) != string.IsNullOrWhiteSpace(vm.ApiSecret))
             ModelState.AddModelError(nameof(vm.ApiSecret), "Enter both the API key and its private key.");
+        if (string.IsNullOrWhiteSpace(vm.ExchangeId) && !vm.ClearCredentials &&
+            (!string.IsNullOrWhiteSpace(vm.ApiKey) || !string.IsNullOrWhiteSpace(vm.ApiSecret)))
+            ModelState.AddModelError(nameof(vm.ExchangeId), "Pick the exchange this key belongs to.");
         if (!ModelState.IsValid)
             return View(SettingsView, ToViewModel(saved, vm));
 
@@ -121,8 +124,8 @@ public class UISweepSellController(SweepSellSettingsRepository repository, Secre
             updated.ProtectedApiKey = null;
             updated.ProtectedApiSecret = null;
         }
-        // "Remove" wins over anything typed (or autofilled) in the key fields.
-        if (!vm.ClearCredentials && key is not null && secret is not null)
+        // "Remove" wins over anything typed (or autofilled) in the key fields, and a key needs an exchange to belong to.
+        if (!vm.ClearCredentials && updated.ExchangeId is not null && key is not null && secret is not null)
         {
             updated.ProtectedApiKey = protector.Protect(key);
             updated.ProtectedApiSecret = protector.Protect(secret);

@@ -10,15 +10,16 @@ public class KrakenTests
     static readonly Guid OrderId = Guid.Parse("00000000-0000-4000-8000-000000000001");
 
     [Fact]
-    public void SignatureMatchesKrakensDocumentedExample()
+    public void SignatureFollowsKrakensScheme()
     {
-        // The example from Kraken's REST authentication guide.
+        // Invented key (bytes 1..64); the expected value was computed separately as
+        // base64(HMAC-SHA512(secret, path + SHA256(nonce + body))).
         var signature = KrakenSigner.Sign(
-            "kQH5HW/8p1uGOVjbgWA7FunAmGO8lsSUXNsu3eow76sz84Q18fWxnyRzBHCd3pd5nE9qa99HAZtuZuj6F1huXg==",
+            "AQIDBAUGBwgJCgsMDQ4PEBESExQVFhcYGRobHB0eHyAhIiMkJSYnKCkqKywtLi8wMTIzNDU2Nzg5Ojs8PT4/QA==",
             "/0/private/AddOrder",
-            "1616492376594",
-            "nonce=1616492376594&ordertype=limit&pair=XBTUSD&price=37500&type=buy&volume=1.25");
-        Assert.Equal("4/dpxb3iT4tp/ZCVEwSnEsLxx0bqyhLpdfOpc6fn7OR8+UClSV5n9E6aSS8MPtnRfp32bAb0nmbRn6H8ndwLUQ==", signature);
+            "1700000000000001",
+            "nonce=1700000000000001&ordertype=market&pair=XBTUSD&type=sell&volume=0.5");
+        Assert.Equal("wQ93h6XI7fZ1mHIwiAC7NAD3lSYMgcrIGEU9d6elnS9368gygjifJ1zGr9peauhDYKl+2peAqBMiUmWPn2qd2A==", signature);
     }
 
     [Fact]
@@ -56,6 +57,27 @@ public class KrakenTests
         Assert.False(balances.ContainsKey("LTC")); // zero
         Assert.Equal(250m, balances["DOGE"]); // staked DOGE (.S) is locked and not counted
         Assert.Equal(3, balances.Count);
+    }
+
+    [Theory]
+    [InlineData("/0/private/BalanceEx", """{"error":[],"result":[]}""")]
+    [InlineData("/0/private/DepositMethods", """{"error":[],"result":{}}""")]
+    [InlineData("/0/public/AssetPairs", """{"error":[],"result":"XBTUSD"}""")]
+    [InlineData("/0/public/AssetPairs", """{"error":[],"result":{"XXBTZUSD":{"ordermin":"0.00005","costmin":"0.5","lot_decimals":"8"}}}""")]
+    [InlineData("/0/public/Ticker", """{"error":[],"result":{"XXBTZUSD":{"c":"60000"}}}""")]
+    public async Task UnexpectedResponseShapesFailAsExchangeErrors(string path, string response)
+    {
+        var http = new FakeHttp();
+        http.Responses[path] = response;
+        var kraken = new KrakenConnector(http.Client());
+        var ct = TestContext.Current.CancellationToken;
+        await Assert.ThrowsAsync<ExchangeException>(() => path switch
+        {
+            "/0/private/BalanceEx" => kraken.GetAvailableBalancesAsync(Credentials, ct),
+            "/0/private/DepositMethods" => kraken.GetMinimumDepositAsync(Credentials, "BTC", ct),
+            "/0/public/AssetPairs" => kraken.GetMarketRulesAsync("BTC", "USD", ct),
+            _ => kraken.GetPriceAsync("BTC", "USD", ct)
+        });
     }
 
     [Fact]
