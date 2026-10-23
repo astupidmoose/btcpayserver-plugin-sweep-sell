@@ -399,6 +399,7 @@ public class KrakenTests
     [InlineData("""{"costmin":"0.5","lot_decimals":8}""")] // no ordermin
     [InlineData("""{"ordermin":"0.00005","costmin":"0.5"}""")] // no precision
     [InlineData("""{"ordermin":"0.00005","costmin":"0.5","lot_decimals":99}""")]
+    [InlineData("""{"ordermin":"0.00005","costmin":"0.5","lot_decimals":99999999999999999999999}""")]
     public async Task IncompleteMarketRulesFail(string pair)
     {
         var http = new FakeHttp();

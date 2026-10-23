@@ -140,11 +140,11 @@ public class KrakenConnector(HttpClient http) : IExchangeConnector
         var pair = result.Properties().Select(p => p.Value).OfType<JObject>().FirstOrDefault()
                    ?? throw new ExchangeException($"Kraken has no {baseAsset}/{quoteAsset} market.");
         var market = $"{baseAsset}/{quoteAsset}";
-        var decimals = pair["lot_decimals"] is JValue { Type: JTokenType.Integer } lot
-            ? (long)lot
-            : throw new ExchangeException($"Kraken sent no amount precision for {market}.");
-        if (decimals is < 0 or > MarketRules.MaxAmountDecimals)
-            throw new ExchangeException($"Kraken sent an unsupported amount precision ({decimals}) for {market}.");
+        if (pair["lot_decimals"] is not JValue { Type: JTokenType.Integer } lot)
+            throw new ExchangeException($"Kraken sent no amount precision for {market}.");
+        // Json.NET keeps integers too large for a long as BigInteger, so check the range before converting.
+        if (lot.Value is not long decimals || decimals is < 0 or > MarketRules.MaxAmountDecimals)
+            throw new ExchangeException($"Kraken sent an unsupported amount precision ({lot}) for {market}.");
         return new MarketRules(baseAsset.ToUpperInvariant(), quoteAsset.ToUpperInvariant(),
             RequiredDecimal(pair["ordermin"], $"{market} minimum order"),
             RequiredDecimal(pair["costmin"], $"{market} minimum order cost"),
