@@ -26,7 +26,7 @@ Adding an exchange means implementing `IExchangeConnector` (see `src/.../Exchang
 
 ## Your exchange key
 
-Create a key for this plugin only, with permission to query funds, get deposit addresses and create
+Create a key for this plugin only, with permission to query funds, deposit funds, query closed orders and create
 orders, and **without withdrawal permission**. The key is stored encrypted on your BTCPay server and
 never shown again after you save it. The settings page has a **Test the key** button, which checks
 each permission without trading.

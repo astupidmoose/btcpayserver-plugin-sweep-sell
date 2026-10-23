@@ -74,6 +74,10 @@ public class UISweepSellController(SweepSellSettingsRepository repository, Secre
         else
         {
             var check = await exchange.TestCredentialsAsync(credentials, cancellationToken);
+            // Exchange error texts carry no credentials; log them so failures show up in the server logs too.
+            foreach (var failed in check.Checks.Where(c => !c.Ok))
+                logger.LogWarning("Sweep & Sell key test failed for store {StoreId} on {Exchange}: {Permission}: {Error}",
+                    storeId, exchange.Id, failed.Permission, failed.Error);
             message = new StatusMessageModel
             {
                 Severity = check.AllOk ? StatusMessageModel.StatusSeverity.Success : StatusMessageModel.StatusSeverity.Error,

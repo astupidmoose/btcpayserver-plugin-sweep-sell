@@ -21,16 +21,43 @@ public sealed record DepositDestination(string Address, string? Tag)
     public bool RequiresTag => !string.IsNullOrEmpty(Tag);
 }
 
-public sealed record MarketRules(string BaseAsset, string QuoteAsset, decimal MinimumAmount, int AmountDecimals)
+public sealed record MarketRules(string BaseAsset, string QuoteAsset, decimal MinimumAmount, decimal MinimumCost, int AmountDecimals)
 {
-    /// <summary><paramref name="amount"/> rounded down to the market's precision, or 0 when that is below the minimum order.</summary>
-    public decimal Sellable(decimal amount)
+    /// <summary>Largest precision a decimal can scale by without overflow for realistic amounts.</summary>
+    public const int MaxAmountDecimals = 18;
+
+    /// <summary>
+    /// <paramref name="amount"/> rounded down to the market's precision, or 0 when that is below the minimum order
+    /// or its value at <paramref name="price"/> (in the quote asset) is below the minimum order cost.
+    /// </summary>
+    public decimal Sellable(decimal amount, decimal price)
     {
-        if (amount <= 0)
+        if (amount <= 0 || price <= 0)
             return 0;
-        var factor = (decimal)Math.Pow(10, AmountDecimals);
+        var factor = Factor();
         var rounded = Math.Floor(amount * factor) / factor;
-        return rounded >= MinimumAmount ? rounded : 0;
+        return rounded >= MinimumAmount && rounded * price >= MinimumCost ? rounded : 0;
+    }
+
+    /// <summary>The smallest amount this market accepts at <paramref name="price"/>, rounded up to its precision.</summary>
+    public decimal MinimumSellAmount(decimal price)
+    {
+        if (price <= 0)
+            throw new ExchangeException($"No valid price for {BaseAsset}/{QuoteAsset}.");
+        var factor = Factor();
+        var minimum = Math.Max(MinimumAmount, MinimumCost / price);
+        return Math.Ceiling(minimum * factor) / factor;
+    }
+
+    // Built in decimal, never double: amounts are money.
+    decimal Factor()
+    {
+        if (AmountDecimals is < 0 or > MaxAmountDecimals)
+            throw new ExchangeException($"Unsupported amount precision {AmountDecimals} for {BaseAsset}/{QuoteAsset}.");
+        var factor = 1m;
+        for (var i = 0; i < AmountDecimals; i++)
+            factor *= 10m;
+        return factor;
     }
 }
 

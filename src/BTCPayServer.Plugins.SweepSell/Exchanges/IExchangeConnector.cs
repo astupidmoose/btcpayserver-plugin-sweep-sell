@@ -1,4 +1,5 @@
 #nullable enable
+using System;
 using System.Collections.Generic;
 using System.Threading;
 using System.Threading.Tasks;
@@ -43,10 +44,13 @@ public interface IExchangeConnector
 
     /// <summary>
     /// Sells <paramref name="amount"/> of <paramref name="baseAsset"/> for <paramref name="quoteAsset"/> at market.
+    /// <paramref name="clientOrderId"/> is derived from the business fact (e.g. the invoice) and sent with the order,
+    /// so after a lost response the caller can find out whether the order exists before it ever retries.
     /// With <paramref name="validateOnly"/>, the exchange checks the order without placing it (dry run).
+    /// A placed order without an exchange order ID is an error, never a success.
     /// </summary>
     Task<OrderResult> SellAtMarketAsync(ExchangeCredentials credentials, string baseAsset, string quoteAsset, decimal amount,
-        bool validateOnly, CancellationToken cancellationToken);
+        Guid clientOrderId, bool validateOnly, CancellationToken cancellationToken);
 
     /// <summary>Tries each permission Sweep &amp; Sell uses, without moving funds.</summary>
     Task<CredentialsCheck> TestCredentialsAsync(ExchangeCredentials credentials, CancellationToken cancellationToken);

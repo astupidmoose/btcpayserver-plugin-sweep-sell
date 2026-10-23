@@ -36,8 +36,8 @@ public class KrakenConnector(HttpClient http) : IExchangeConnector
     public string Name => "Kraken";
 
     public string KeyPermissionsHelp =>
-        "In Kraken: Settings > API > Create key. Tick only Query Funds, Deposit Funds, Query Open Orders & Trades, " +
-        "Query Closed Orders & Trades and Create & Modify Orders. Never tick Withdraw Funds: Sweep & Sell never withdraws.";
+        "In Kraken: Settings > API > Create key. Tick only Query Funds, Deposit Funds, Query Closed Orders & Trades " +
+        "and Create & Modify Orders. Never tick Withdraw Funds: Sweep & Sell never withdraws.";
 
     /// <summary>Our ticker as Kraken's REST API takes it.</summary>
     public static string ToKraken(string asset) => asset.ToUpperInvariant() switch
@@ -65,7 +65,8 @@ public class KrakenConnector(HttpClient http) : IExchangeConnector
         {
             if (FromKrakenAsset(asset) is not { } ticker || value is not JObject entry)
                 continue;
-            var available = Decimal(entry["balance"]) - Decimal(entry["hold_trade"]);
+            // hold_trade is only sent when something is held; the balance itself is required.
+            var available = RequiredDecimal(entry["balance"], $"{asset} balance") - OptionalDecimal(entry["hold_trade"]);
             if (available > 0)
                 balances[ticker] = balances.GetValueOrDefault(ticker) + available;
         }
@@ -94,7 +95,7 @@ public class KrakenConnector(HttpClient http) : IExchangeConnector
     public async Task<decimal> GetMinimumDepositAsync(ExchangeCredentials credentials, string asset, CancellationToken cancellationToken)
     {
         var method = await DepositMethodAsync(credentials, asset, cancellationToken);
-        return Decimal(method["minimum"]);
+        return RequiredDecimal(method["minimum"], $"{asset} minimum deposit");
     }
 
     public async Task<decimal> GetPriceAsync(string baseAsset, string quoteAsset, CancellationToken cancellationToken)
@@ -102,7 +103,7 @@ public class KrakenConnector(HttpClient http) : IExchangeConnector
         var result = (JObject)await PublicAsync("Ticker", Pair(baseAsset, quoteAsset), cancellationToken);
         var ticker = result.Properties().Select(p => p.Value).OfType<JObject>().FirstOrDefault()
                      ?? throw new ExchangeException($"Kraken has no {baseAsset}/{quoteAsset} market.");
-        var last = Decimal(ticker["c"]?[0]);
+        var last = RequiredDecimal(ticker["c"]?[0], $"{baseAsset}/{quoteAsset} last price");
         return last > 0 ? last : throw new ExchangeException($"Kraken returned no price for {baseAsset}/{quoteAsset}.");
     }
 
@@ -111,12 +112,18 @@ public class KrakenConnector(HttpClient http) : IExchangeConnector
         var result = (JObject)await PublicAsync("AssetPairs", Pair(baseAsset, quoteAsset), cancellationToken);
         var pair = result.Properties().Select(p => p.Value).OfType<JObject>().FirstOrDefault()
                    ?? throw new ExchangeException($"Kraken has no {baseAsset}/{quoteAsset} market.");
+        var market = $"{baseAsset}/{quoteAsset}";
+        var decimals = pair.Value<int?>("lot_decimals") ?? throw new ExchangeException($"Kraken sent no amount precision for {market}.");
+        if (decimals is < 0 or > MarketRules.MaxAmountDecimals)
+            throw new ExchangeException($"Kraken sent an unsupported amount precision ({decimals}) for {market}.");
         return new MarketRules(baseAsset.ToUpperInvariant(), quoteAsset.ToUpperInvariant(),
-            Decimal(pair["ordermin"]), pair.Value<int?>("lot_decimals") ?? 8);
+            RequiredDecimal(pair["ordermin"], $"{market} minimum order"),
+            RequiredDecimal(pair["costmin"], $"{market} minimum order cost"),
+            decimals);
     }
 
     public async Task<OrderResult> SellAtMarketAsync(ExchangeCredentials credentials, string baseAsset, string quoteAsset, decimal amount,
-        bool validateOnly, CancellationToken cancellationToken)
+        Guid clientOrderId, bool validateOnly, CancellationToken cancellationToken)
     {
         if (amount <= 0)
             throw new ArgumentOutOfRangeException(nameof(amount), "The amount to sell must be positive.");
@@ -125,12 +132,16 @@ public class KrakenConnector(HttpClient http) : IExchangeConnector
             new("ordertype", "market"),
             new("type", "sell"),
             new("pair", Pair(baseAsset, quoteAsset)),
-            new("volume", amount.ToString(CultureInfo.InvariantCulture))
+            new("volume", amount.ToString(CultureInfo.InvariantCulture)),
+            // Kraken's client order ID (UUID form): the order can be looked up by it if the response is lost.
+            new("cl_ord_id", clientOrderId.ToString("D"))
         };
         if (validateOnly)
             parameters.Add(new("validate", "true"));
         var result = (JObject)await PrivateAsync(credentials, "AddOrder", parameters, cancellationToken);
-        var ids = result["txid"] is JArray txids ? txids.Select(t => t.ToString()).ToList() : [];
+        var ids = result["txid"] is JArray txids ? txids.Select(t => t.ToString()).Where(t => t.Length > 0).ToList() : [];
+        if (!validateOnly && ids.Count == 0)
+            throw new ExchangeException($"Kraken accepted the {baseAsset}/{quoteAsset} sell (client order {clientOrderId:D}) but returned no order ID. Check the order in Kraken before retrying.");
         var description = result["descr"]?.Value<string>("order") ?? $"sell {amount} {baseAsset} for {quoteAsset} @ market";
         return new OrderResult(!validateOnly, ids, description);
     }
@@ -140,7 +151,9 @@ public class KrakenConnector(HttpClient http) : IExchangeConnector
         var checks = new List<PermissionCheck>
         {
             await CheckAsync("Query Funds", () => PrivateAsync(credentials, "BalanceEx", [], cancellationToken)),
-            await CheckAsync("Deposit Funds", () => PrivateAsync(credentials, "DepositMethods", [new("asset", "XBT")], cancellationToken))
+            await CheckAsync("Deposit Funds", () => PrivateAsync(credentials, "DepositMethods", [new("asset", "XBT")], cancellationToken)),
+            // Used to look an order up by its client order ID after a lost response.
+            await CheckAsync("Query Closed Orders & Trades", () => PrivateAsync(credentials, "ClosedOrders", [], cancellationToken))
         };
         // A validate-only order checks the trading permission without trading.
         checks.Add(await CheckAsync("Create & Modify Orders", async () =>
@@ -149,7 +162,8 @@ public class KrakenConnector(HttpClient http) : IExchangeConnector
             return await PrivateAsync(credentials, "AddOrder",
             [
                 new("ordertype", "market"), new("type", "sell"), new("pair", Pair("BTC", "USD")),
-                new("volume", rules.MinimumAmount.ToString(CultureInfo.InvariantCulture)), new("validate", "true")
+                new("volume", rules.MinimumSellAmount(await GetPriceAsync("BTC", "USD", cancellationToken)).ToString(CultureInfo.InvariantCulture)),
+                new("validate", "true")
             ], cancellationToken);
         }));
         return new CredentialsCheck(checks);
@@ -249,7 +263,16 @@ public class KrakenConnector(HttpClient http) : IExchangeConnector
         }
     }
 
-    static decimal Decimal(JToken? token) =>
-        token is null || token.Type == JTokenType.Null ? 0 :
-        decimal.TryParse(token.ToString(), NumberStyles.Float, CultureInfo.InvariantCulture, out var d) ? d : 0;
+    /// <summary>A number Kraken must send; missing or malformed fails loudly instead of reading as zero.</summary>
+    static decimal RequiredDecimal(JToken? token, string what)
+    {
+        if (token is null || token.Type == JTokenType.Null ||
+            !decimal.TryParse(token.ToString(), NumberStyles.Float, CultureInfo.InvariantCulture, out var value) || value < 0)
+            throw new ExchangeException($"Kraken sent no valid {what}.");
+        return value;
+    }
+
+    /// <summary>A number Kraken may leave out when it is zero.</summary>
+    static decimal OptionalDecimal(JToken? token) =>
+        token is null || token.Type == JTokenType.Null ? 0 : RequiredDecimal(token, "amount");
 }
