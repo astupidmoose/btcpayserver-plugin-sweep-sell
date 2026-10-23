@@ -1,0 +1,47 @@
+# Threat model
+
+Sweep & Sell runs inside BTCPay Server. Per store, it can (1) sweep on-chain hot wallets to an exchange
+deposit address and other configured destinations, (2) sell on the exchange when invoices are paid, and
+(3) convert exchange balances into a target asset. This model covers the plugin, not BTCPay itself.
+
+## Assets
+
+| Asset | Where it lives | Impact if compromised |
+| --- | --- | --- |
+| Exchange API key and secret | Store setting, encrypted with BTCPay's data-protection key ring | Trading on the account; withdrawal if the user granted it against guidance |
+| Hot wallet funds | BTCPay's store wallets (the plugin only asks BTCPay to send) | Direct loss |
+| Sweep destinations (addresses, xpubs) | Store settings | Funds sent to an attacker |
+| Exchange balances | The user's exchange account | Bad trades, loss through slippage |
+| Activity log | Plugin storage | Leaks business volumes |
+
+## Trust boundaries
+
+- **Browser to BTCPay:** store owners change settings through BTCPay's authenticated UI. Only users with
+  `CanModifyStoreSettings` on the store reach the plugin's pages.
+- **BTCPay to the exchange:** HTTPS to the exchange's public API, authenticated per the exchange's
+  scheme. Exchange responses are untrusted input.
+- **BTCPay events to the plugin:** invoice and payment events come from inside the BTCPay process, not
+  from webhooks. There is no inbound endpoint that can trigger a sweep or sale.
+
+## Threats and mitigations
+
+Mitigations marked *(planned)* arrive with the feature that needs them; the rest are in place.
+
+| Threat | Mitigation |
+| --- | --- |
+| Database dump or backup reveals exchange keys | Keys encrypted with the data-protection key ring, which is stored apart from the database |
+| Keys leak through logs, pages, API or errors | Keys are write-only in the UI; `ExchangeCredentials.ToString()` hides them; never logged; stored in store settings, which BTCPay's API does not return |
+| Stolen exchange key used to withdraw | The plugin needs and requests no withdrawal permission; the setup guide says not to grant it |
+| Attacker changes a sweep destination | Settings need `CanModifyStoreSettings`; destination changes are written to the activity log *(planned)*; exchange deposit addresses are fetched from the exchange at send time, never typed in |
+| Forged or replayed trigger causes a sale | No external trigger exists; each sale is recorded under its invoice ID and never repeated *(planned)* |
+| Restart or retry sends or sells twice | Idempotency keys recorded before or atomically with each action *(planned)* |
+| Malicious or malformed exchange response (huge amount, wrong address) | Amounts checked against the store's own balances and daily caps; addresses validated for the coin's network before sending *(planned)* |
+| Deposit below the exchange minimum is lost | Minimum deposits read from the exchange; sweeps wait until the exchange's share clears it (connector call in place, sweep logic *(planned)*) |
+| Market order slips badly on a thin market | Daily caps, per-feature minimums, and dry run to observe before going live *(planned)* |
+| One store reads another's keys | Settings are keyed by store ID and only loaded for the authorized store |
+| Data-protection keys lost after a migration | Decryption failure reads as "no key saved", and the owner re-enters it; nothing crashes or leaks |
+
+## Out of scope
+
+Compromise of the BTCPay server host or its admin accounts, and of the exchange itself. With host access an
+attacker can already spend hot wallet funds.

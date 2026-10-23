@@ -1,0 +1,22 @@
+@using BTCPayServer.Abstractions.Contracts
+@using BTCPayServer.Plugins.SweepSell.Controllers
+@using BTCPayServer.Client
+@inject IScopeProvider ScopeProvider
+@{
+    var storeId = ScopeProvider.GetCurrentStoreId();
+    ViewContext.RouteData.Values.TryGetValue("Controller", out var controller);
+    var isActive = !string.IsNullOrEmpty(storeId) && controller?.ToString() is { Length: > 0 } name &&
+                   nameof(UISweepSellController).StartsWith(name, StringComparison.InvariantCultureIgnoreCase);
+}
+@if (!string.IsNullOrEmpty(storeId))
+{
+    <li class="nav-item" permission="@Policies.CanModifyStoreSettings">
+        <a class="nav-link @(isActive ? "active" : "")"
+           asp-area=""
+           asp-controller="UISweepSell"
+           asp-action="Settings"
+           asp-route-storeId="@storeId">
+            <span>Sweep &amp; Sell</span>
+        </a>
+    </li>
+}
