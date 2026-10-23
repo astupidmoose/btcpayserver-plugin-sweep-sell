@@ -170,12 +170,15 @@ public class KrakenTests
         await Assert.ThrowsAsync<ExchangeException>(() => kraken.GetDepositAddressAsync(Credentials, "BTC", fresh: true, TestContext.Current.CancellationToken));
     }
 
-    [Fact]
-    public async Task ExpiredAddressesAreNeverReturned()
+    [Theory]
+    [InlineData("""{"address":"DExpired","expiretm":"1000"}""")]
+    [InlineData("""{"address":"DNoExpiry"}""")] // no expiry information: not trusted
+    [InlineData("""{"address":"DNullExpiry","expiretm":null}""")]
+    public async Task ExpiredOrUndatedAddressesAreNeverReturned(string entry)
     {
         var http = new FakeHttp();
         http.Responses["/0/private/DepositMethods"] = """{"error":[],"result":[{"method":"Dogecoin","gen-address":false,"minimum":"50"}]}""";
-        http.Responses["/0/private/DepositAddresses"] = """{"error":[],"result":[{"address":"DExpired","expiretm":"1000"}]}""";
+        http.Responses["/0/private/DepositAddresses"] = """{"error":[],"result":[""" + entry + "]}";
         await Assert.ThrowsAsync<ExchangeException>(() =>
             new KrakenConnector(http.Client()).GetDepositAddressAsync(Credentials, "DOGE", fresh: false, TestContext.Current.CancellationToken));
     }

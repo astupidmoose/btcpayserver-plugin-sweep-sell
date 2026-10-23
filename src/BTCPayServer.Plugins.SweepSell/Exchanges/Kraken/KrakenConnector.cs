@@ -106,8 +106,8 @@ public class KrakenConnector(HttpClient http) : IExchangeConnector
         var now = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
         var usable = result.OfType<JObject>()
             .Where(a => !string.IsNullOrEmpty(Text(a["address"])))
-            // expiretm 0 means the address never expires.
-            .Where(a => long.TryParse(Text(a["expiretm"]) ?? "0", NumberStyles.None, CultureInfo.InvariantCulture, out var expires) && (expires == 0 || expires > now))
+            // expiretm 0 means the address never expires; an entry without one is not trusted.
+            .Where(a => long.TryParse(Text(a["expiretm"]), NumberStyles.None, CultureInfo.InvariantCulture, out var expires) && (expires == 0 || expires > now))
             .ToList();
         var entry = parameters.Any(p => p.Key == "new")
             ? usable.FirstOrDefault(a => IsTrue(a["new"]))
