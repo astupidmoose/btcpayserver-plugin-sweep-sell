@@ -48,6 +48,12 @@
                     <div class="form-text">@exchange.Name: @exchange.KeyPermissionsHelp</div>
                 }
             </div>
+            @if (Model.CredentialsUnreadable)
+            {
+                <div class="alert alert-warning" role="alert">
+                    The saved key can't be read on this server (its encryption keys changed, e.g. after a restore). Enter the API key and private key again.
+                </div>
+            }
             <div class="form-group">
                 <label asp-for="ApiKey" class="form-label"></label>
                 <input asp-for="ApiKey" type="password" class="form-control" autocomplete="off" spellcheck="false"

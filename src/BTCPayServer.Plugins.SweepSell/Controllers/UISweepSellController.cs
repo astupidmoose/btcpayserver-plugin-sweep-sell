@@ -1,4 +1,5 @@
 #nullable enable
+using System;
 using System.Collections.Generic;
 using System.ComponentModel.DataAnnotations;
 using System.Linq;
@@ -73,7 +74,18 @@ public class UISweepSellController(SweepSellSettingsRepository repository, Secre
         }
         else
         {
-            var check = await exchange.TestCredentialsAsync(credentials, cancellationToken);
+            CredentialsCheck check;
+            try
+            {
+                check = await exchange.TestCredentialsAsync(credentials, cancellationToken);
+            }
+            catch (Exception e) when (e is ExchangeException or System.Net.Http.HttpRequestException or TaskCanceledException &&
+                                      !cancellationToken.IsCancellationRequested)
+            {
+                // Exchange and network errors carry no credentials.
+                logger.LogWarning("Sweep & Sell key test for store {StoreId} on {Exchange} could not run: {Error}", storeId, exchange.Id, e.Message);
+                check = new CredentialsCheck([new PermissionCheck("Connection", false, e.Message)]);
+            }
             // Exchange error texts carry no credentials; log them so failures show up in the server logs too.
             foreach (var failed in check.Checks.Where(c => !c.Ok))
                 logger.LogWarning("Sweep & Sell key test failed for store {StoreId} on {Exchange}: {Permission}: {Error}",
@@ -109,7 +121,8 @@ public class UISweepSellController(SweepSellSettingsRepository repository, Secre
             updated.ProtectedApiKey = null;
             updated.ProtectedApiSecret = null;
         }
-        if (key is not null && secret is not null)
+        // "Remove" wins over anything typed (or autofilled) in the key fields.
+        if (!vm.ClearCredentials && key is not null && secret is not null)
         {
             updated.ProtectedApiKey = protector.Protect(key);
             updated.ProtectedApiSecret = protector.Protect(secret);
@@ -121,7 +134,9 @@ public class UISweepSellController(SweepSellSettingsRepository repository, Secre
     {
         Paused = posted?.Paused ?? settings.Paused,
         ExchangeId = posted?.ExchangeId ?? settings.ExchangeId,
-        HasCredentials = settings.HasCredentials,
+        // Saved but undecryptable (e.g. restored on a server with other data-protection keys) counts as not saved.
+        HasCredentials = protector.Credentials(settings) is not null,
+        CredentialsUnreadable = settings.HasCredentials && protector.Credentials(settings) is null,
         Exchanges = exchanges.All.Select(e => new ExchangeOption(e.Id, e.Name, e.KeyPermissionsHelp)).ToList()
     };
 
@@ -148,6 +163,8 @@ public class SweepSellSettingsViewModel
     public bool ClearCredentials { get; set; }
 
     public bool HasCredentials { get; set; }
+
+    public bool CredentialsUnreadable { get; set; }
 
     public List<ExchangeOption> Exchanges { get; set; } = [];
 }

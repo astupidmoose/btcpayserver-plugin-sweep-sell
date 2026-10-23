@@ -46,6 +46,14 @@ public class SettingsTests
     }
 
     [Fact]
+    public void RemoveWinsOverAutofilledKeyFields()
+    {
+        var settings = UISweepSellController.Apply(Saved(),
+            new SweepSellSettingsViewModel { ExchangeId = "kraken", ClearCredentials = true, ApiKey = "autofilled", ApiSecret = "autofilled" }, Protector);
+        Assert.False(settings.HasCredentials);
+    }
+
+    [Fact]
     public void SwitchingExchangeForgetsTheKey()
     {
         var settings = UISweepSellController.Apply(Saved(), new SweepSellSettingsViewModel { ExchangeId = "other" }, Protector);

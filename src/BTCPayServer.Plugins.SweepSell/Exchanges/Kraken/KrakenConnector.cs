@@ -47,13 +47,28 @@ public class KrakenConnector(HttpClient http) : IExchangeConnector
         var other => other
     };
 
-    /// <summary>Kraken's asset name as our ticker. Null for balances in Earn, staking or futures (suffixed ".F", ".S", ".M", ".B"...), which can't be sold.</summary>
+    /// <summary>
+    /// Kraken's asset name as our ticker. Kraken Rewards balances (".F") are spendable through the base asset, so they
+    /// count as it; other suffixed balances (staked ".S", ".M", ".B", ".P"...) are locked and give null.
+    /// </summary>
     public static string? FromKrakenAsset(string asset)
     {
-        if (asset.Contains('.'))
-            return null;
+        var dot = asset.IndexOf('.');
+        if (dot >= 0)
+        {
+            if (!asset[dot..].Equals(".F", StringComparison.OrdinalIgnoreCase))
+                return null;
+            asset = asset[..dot];
+        }
         return FromKraken.TryGetValue(asset, out var mapped) ? mapped : asset.ToUpperInvariant();
     }
+
+    // The deposit method of each coin's own on-chain network, by Kraken's method name. Sweeps send on-chain,
+    // so a Lightning or other-network method of the same asset must never be picked.
+    static readonly Dictionary<string, string> OnChainMethods = new(StringComparer.OrdinalIgnoreCase)
+    {
+        ["BTC"] = "Bitcoin", ["LTC"] = "Litecoin", ["DOGE"] = "Dogecoin", ["XMR"] = "Monero"
+    };
 
     public static string Pair(string baseAsset, string quoteAsset) => ToKraken(baseAsset) + ToKraken(quoteAsset);
 
@@ -85,8 +100,17 @@ public class KrakenConnector(HttpClient http) : IExchangeConnector
         if (fresh && method.Value<bool?>("gen-address") == true)
             parameters.Add(new("new", "true"));
         var result = (JArray)await PrivateAsync(credentials, "DepositAddresses", parameters, cancellationToken);
-        var entry = result.OfType<JObject>().FirstOrDefault(a => !string.IsNullOrEmpty(a.Value<string>("address")))
-                    ?? throw new ExchangeException($"Kraken returned no {asset} deposit address. Create one in Kraken first.");
+        var now = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
+        var usable = result.OfType<JObject>()
+            .Where(a => !string.IsNullOrEmpty(a.Value<string>("address")))
+            // expiretm 0 means the address never expires.
+            .Where(a => long.TryParse(a.Value<string>("expiretm") ?? "0", NumberStyles.None, CultureInfo.InvariantCulture, out var expires) && (expires == 0 || expires > now))
+            .ToList();
+        var entry = parameters.Any(p => p.Key == "new")
+            ? usable.FirstOrDefault(a => a.Value<bool?>("new") == true)
+              ?? throw new ExchangeException($"Kraken did not return the new {asset} deposit address it was asked for.")
+            : usable.FirstOrDefault()
+              ?? throw new ExchangeException($"Kraken returned no unexpired {asset} deposit address. Create one in Kraken first.");
         // Kraken returns a destination tag (XRP) or memo (e.g. XLM) beside the address when the asset needs one.
         var tag = new[] { entry.Value<string>("tag"), entry.Value<string>("memo") }.FirstOrDefault(t => !string.IsNullOrEmpty(t));
         return new DepositDestination(entry.Value<string>("address")!, tag);
@@ -150,47 +174,63 @@ public class KrakenConnector(HttpClient http) : IExchangeConnector
     {
         var checks = new List<PermissionCheck>
         {
-            await CheckAsync("Query Funds", () => PrivateAsync(credentials, "BalanceEx", [], cancellationToken)),
-            await CheckAsync("Deposit Funds", () => PrivateAsync(credentials, "DepositMethods", [new("asset", "XBT")], cancellationToken)),
+            await CheckAsync("Query Funds", () => PrivateAsync(credentials, "BalanceEx", [], cancellationToken), orderCheck: false, cancellationToken),
+            await CheckAsync("Deposit Funds", () => PrivateAsync(credentials, "DepositMethods", [new("asset", "XBT")], cancellationToken), orderCheck: false, cancellationToken),
             // Used to look an order up by its client order ID after a lost response.
-            await CheckAsync("Query Closed Orders & Trades", () => PrivateAsync(credentials, "ClosedOrders", [], cancellationToken))
+            await CheckAsync("Query Closed Orders & Trades", () => PrivateAsync(credentials, "ClosedOrders", [], cancellationToken), orderCheck: false, cancellationToken)
         };
-        // A validate-only order checks the trading permission without trading.
+        // A validate-only order checks the trading permission without trading. Twice the minimum leaves room for the
+        // price to move between the ticker and the order.
         checks.Add(await CheckAsync("Create & Modify Orders", async () =>
         {
             var rules = await GetMarketRulesAsync("BTC", "USD", cancellationToken);
+            var volume = rules.MinimumSellAmount(await GetPriceAsync("BTC", "USD", cancellationToken)) * 2;
             return await PrivateAsync(credentials, "AddOrder",
             [
                 new("ordertype", "market"), new("type", "sell"), new("pair", Pair("BTC", "USD")),
-                new("volume", rules.MinimumSellAmount(await GetPriceAsync("BTC", "USD", cancellationToken)).ToString(CultureInfo.InvariantCulture)),
+                new("volume", volume.ToString(CultureInfo.InvariantCulture)),
                 new("validate", "true")
             ], cancellationToken);
-        }));
+        }, orderCheck: true, cancellationToken));
         return new CredentialsCheck(checks);
     }
 
-    static async Task<PermissionCheck> CheckAsync(string permission, Func<Task<JToken>> call)
+    static async Task<PermissionCheck> CheckAsync(string permission, Func<Task<JToken>> call, bool orderCheck, CancellationToken cancellationToken)
     {
         try
         {
             await call();
             return new PermissionCheck(permission, true, null);
         }
+        catch (ExchangeException e) when (orderCheck && e.Message.Contains("EOrder:", StringComparison.Ordinal))
+        {
+            // Kraken only judges the order itself (funds, size, price) once the key is allowed to trade.
+            return new PermissionCheck(permission, true, null);
+        }
         catch (ExchangeException e)
         {
-            // Not enough funds still proves the key may trade.
-            return e.Message.Contains("EOrder:Insufficient funds", StringComparison.Ordinal)
-                ? new PermissionCheck(permission, true, null)
-                : new PermissionCheck(permission, false, e.Message);
+            return new PermissionCheck(permission, false, e.Message);
+        }
+        catch (Exception e) when (e is HttpRequestException or TaskCanceledException && !cancellationToken.IsCancellationRequested)
+        {
+            // Network failure or timeout: the permission is unknown, not missing.
+            return new PermissionCheck(permission, false, $"Could not reach Kraken ({e.GetType().Name}). Try again.");
         }
     }
 
     async Task<JObject> DepositMethodAsync(ExchangeCredentials credentials, string asset, CancellationToken cancellationToken)
     {
-        var methods = (JArray)await PrivateAsync(credentials, "DepositMethods", [new("asset", ToKraken(asset))], cancellationToken);
-        // Prefer the coin's own network, which Kraken lists first.
-        return methods.OfType<JObject>().FirstOrDefault()
-               ?? throw new ExchangeException($"Kraken offers no way to deposit {asset}.");
+        var methods = ((JArray)await PrivateAsync(credentials, "DepositMethods", [new("asset", ToKraken(asset))], cancellationToken))
+            .OfType<JObject>().ToList();
+        if (OnChainMethods.TryGetValue(asset, out var name))
+            return methods.FirstOrDefault(m => string.Equals(m.Value<string>("method"), name, StringComparison.OrdinalIgnoreCase))
+                   ?? throw new ExchangeException($"Kraken offers no {name} (on-chain) deposit method for {asset}.");
+        // A coin we don't know the network of is only safe when Kraken offers exactly one way to deposit it.
+        return methods.Count == 1
+            ? methods[0]
+            : throw new ExchangeException(methods.Count == 0
+                ? $"Kraken offers no way to deposit {asset}."
+                : $"Kraken offers several deposit networks for {asset}; Sweep & Sell doesn't know which one to use yet.");
     }
 
     async Task<JToken> PublicAsync(string method, string pair, CancellationToken cancellationToken)
@@ -202,7 +242,7 @@ public class KrakenConnector(HttpClient http) : IExchangeConnector
     async Task<JToken> PrivateAsync(ExchangeCredentials credentials, string method, IEnumerable<KeyValuePair<string, string>> parameters,
         CancellationToken cancellationToken)
     {
-        var keyLock = KeyLocks.GetOrAdd(credentials.ApiKey, _ => new SemaphoreSlim(1, 1));
+        var keyLock = KeyLocks.GetOrAdd(KeyFingerprint(credentials.ApiKey), _ => new SemaphoreSlim(1, 1));
         await keyLock.WaitAsync(cancellationToken);
         try
         {
@@ -262,6 +302,10 @@ public class KrakenConnector(HttpClient http) : IExchangeConnector
                 return next;
         }
     }
+
+    /// <summary>Identifies a key for locking without keeping the key itself in memory.</summary>
+    static string KeyFingerprint(string apiKey) =>
+        Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(apiKey)));
 
     /// <summary>A number Kraken must send; missing or malformed fails loudly instead of reading as zero.</summary>
     static decimal RequiredDecimal(JToken? token, string what)

@@ -46,14 +46,16 @@ public class KrakenTests
               "XXDG":{"balance":"250.0","hold_trade":"0"},
               "XLTC":{"balance":"0.0","hold_trade":"0"},
               "ZCAD":{"balance":"10.25","hold_trade":"0"},
-              "XBT.F":{"balance":"1.0","hold_trade":"0"}}}
+              "XBT.F":{"balance":"1.0","hold_trade":"0"},
+              "XXDG.S":{"balance":"500.0","hold_trade":"0"}}}
             """;
         var balances = await new KrakenConnector(http.Client()).GetAvailableBalancesAsync(Credentials, TestContext.Current.CancellationToken);
-        Assert.Equal(0.4m, balances["BTC"]);
+        Assert.Equal(1.4m, balances["BTC"]); // 0.4 spendable + 1.0 in Kraken Rewards (.F), which is spendable too
         Assert.Equal(250m, balances["DOGE"]);
         Assert.Equal(10.25m, balances["CAD"]);
         Assert.False(balances.ContainsKey("LTC")); // zero
-        Assert.Equal(3, balances.Count); // the Earn balance (XBT.F) is not spendable
+        Assert.Equal(250m, balances["DOGE"]); // staked DOGE (.S) is locked and not counted
+        Assert.Equal(3, balances.Count);
     }
 
     [Fact]
@@ -94,6 +96,85 @@ public class KrakenTests
         http.Responses["/0/private/DepositAddresses"] = """{"error":[],"result":[{"address":"DExampleAddress","expiretm":"0"}]}""";
         await new KrakenConnector(http.Client()).GetDepositAddressAsync(Credentials, "DOGE", fresh: true, TestContext.Current.CancellationToken);
         Assert.DoesNotContain("new=true", http.Sent.Last().Body);
+    }
+
+    [Fact]
+    public async Task OnChainMethodIsPickedEvenWhenLightningIsListedFirst()
+    {
+        var http = new FakeHttp();
+        http.Responses["/0/private/DepositMethods"] = """
+            {"error":[],"result":[
+              {"method":"Bitcoin Lightning","gen-address":false,"minimum":"0.00001"},
+              {"method":"Bitcoin","gen-address":true,"minimum":"0.0001"}]}
+            """;
+        Assert.Equal(0.0001m, await new KrakenConnector(http.Client()).GetMinimumDepositAsync(Credentials, "BTC", TestContext.Current.CancellationToken));
+    }
+
+    [Fact]
+    public async Task UnknownCoinWithSeveralNetworksIsRefused()
+    {
+        var http = new FakeHttp();
+        http.Responses["/0/private/DepositMethods"] = """{"error":[],"result":[{"method":"A","minimum":"1"},{"method":"B","minimum":"1"}]}""";
+        await Assert.ThrowsAsync<ExchangeException>(() =>
+            new KrakenConnector(http.Client()).GetMinimumDepositAsync(Credentials, "ABC", TestContext.Current.CancellationToken));
+    }
+
+    [Fact]
+    public async Task FreshRequestNeedsTheNewAddressAndSkipsExpiredOnes()
+    {
+        var http = new FakeHttp();
+        http.Responses["/0/private/DepositMethods"] = """{"error":[],"result":[{"method":"Bitcoin","gen-address":true,"minimum":"0.0001"}]}""";
+        http.Responses["/0/private/DepositAddresses"] = """
+            {"error":[],"result":[
+              {"address":"bc1qold","expiretm":"0"},
+              {"address":"bc1qexpired","expiretm":"1000","new":true},
+              {"address":"bc1qnew","expiretm":"0","new":true}]}
+            """;
+        var kraken = new KrakenConnector(http.Client());
+        Assert.Equal("bc1qnew", (await kraken.GetDepositAddressAsync(Credentials, "BTC", fresh: true, TestContext.Current.CancellationToken)).Address);
+
+        http.Responses["/0/private/DepositAddresses"] = """{"error":[],"result":[{"address":"bc1qold","expiretm":"0"}]}""";
+        await Assert.ThrowsAsync<ExchangeException>(() => kraken.GetDepositAddressAsync(Credentials, "BTC", fresh: true, TestContext.Current.CancellationToken));
+    }
+
+    [Fact]
+    public async Task ExpiredAddressesAreNeverReturned()
+    {
+        var http = new FakeHttp();
+        http.Responses["/0/private/DepositMethods"] = """{"error":[],"result":[{"method":"Dogecoin","gen-address":false,"minimum":"50"}]}""";
+        http.Responses["/0/private/DepositAddresses"] = """{"error":[],"result":[{"address":"DExpired","expiretm":"1000"}]}""";
+        await Assert.ThrowsAsync<ExchangeException>(() =>
+            new KrakenConnector(http.Client()).GetDepositAddressAsync(Credentials, "DOGE", fresh: false, TestContext.Current.CancellationToken));
+    }
+
+    [Fact]
+    public async Task OrderLevelRejectionStillProvesTradingPermission()
+    {
+        var http = new FakeHttp();
+        http.Responses["/0/private/BalanceEx"] = """{"error":[],"result":{}}""";
+        http.Responses["/0/private/DepositMethods"] = """{"error":[],"result":[]}""";
+        http.Responses["/0/private/ClosedOrders"] = """{"error":[],"result":{"closed":{},"count":0}}""";
+        http.Responses["/0/public/AssetPairs"] = """{"error":[],"result":{"XXBTZUSD":{"ordermin":"0.00005","costmin":"0.5","lot_decimals":8}}}""";
+        http.Responses["/0/public/Ticker"] = """{"error":[],"result":{"XXBTZUSD":{"c":["100000.0","0.01"]}}}""";
+        http.Responses["/0/private/AddOrder"] = """{"error":["EOrder:Cost minimum not met"]}""";
+        var check = await new KrakenConnector(http.Client()).TestCredentialsAsync(Credentials, TestContext.Current.CancellationToken);
+        Assert.True(check.AllOk);
+        Assert.Contains("volume=0.0001", http.Sent.Single(x => x.Request.RequestUri!.AbsolutePath == "/0/private/AddOrder").Body); // twice the minimum
+    }
+
+    [Fact]
+    public async Task UnreachableExchangeIsAFailedCheckNotACrash()
+    {
+        var kraken = new KrakenConnector(new HttpClient(new Unreachable()));
+        var check = await kraken.TestCredentialsAsync(Credentials, TestContext.Current.CancellationToken);
+        Assert.False(check.AllOk);
+        Assert.All(check.Checks, c => Assert.Contains("Could not reach Kraken", c.Error));
+    }
+
+    class Unreachable : HttpMessageHandler
+    {
+        protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken) =>
+            throw new HttpRequestException("Name or service not known");
     }
 
     [Fact]
