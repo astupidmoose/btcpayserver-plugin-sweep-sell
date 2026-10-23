@@ -12,6 +12,15 @@ public sealed record ExchangeCredentials(string ApiKey, string ApiSecret)
     public override string ToString() => "ExchangeCredentials { ApiKey = ***, ApiSecret = *** }";
 }
 
+/// <summary>
+/// A deposit address, plus the tag or memo some assets need (e.g. an XRP destination tag). A sender that
+/// cannot attach <see cref="Tag"/>, such as an on-chain wallet sweep, must refuse a destination that has one.
+/// </summary>
+public sealed record DepositDestination(string Address, string? Tag)
+{
+    public bool RequiresTag => !string.IsNullOrEmpty(Tag);
+}
+
 public sealed record MarketRules(string BaseAsset, string QuoteAsset, decimal MinimumAmount, int AmountDecimals)
 {
     /// <summary><paramref name="amount"/> rounded down to the market's precision, or 0 when that is below the minimum order.</summary>

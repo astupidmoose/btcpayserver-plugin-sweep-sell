@@ -36,6 +36,7 @@ Mitigations marked *(planned)* arrive with the feature that needs them; the rest
 | Forged or replayed trigger causes a sale | No external trigger exists; each sale is recorded under its invoice ID and never repeated *(planned)* |
 | Restart or retry sends or sells twice | Idempotency keys recorded before or atomically with each action *(planned)* |
 | Malicious or malformed exchange response (huge amount, wrong address) | Amounts checked against the store's own balances and daily caps; addresses validated for the coin's network before sending *(planned)* |
+| Deposit sent without a required tag or memo is not credited | Connectors return the tag with the address; sweeps refuse destinations that need one *(planned)* |
 | Deposit below the exchange minimum is lost | Minimum deposits read from the exchange; sweeps wait until the exchange's share clears it (connector call in place, sweep logic *(planned)*) |
 | Market order slips badly on a thin market | Daily caps, per-feature minimums, and dry run to observe before going live *(planned)* |
 | One store reads another's keys | Settings are keyed by store ID and only loaded for the authorized store |

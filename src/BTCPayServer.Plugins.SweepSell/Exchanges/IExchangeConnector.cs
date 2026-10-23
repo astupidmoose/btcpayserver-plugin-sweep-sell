@@ -23,8 +23,11 @@ public interface IExchangeConnector
     /// <summary>Spendable balances by asset: the total minus anything held by open orders. Zero balances are left out.</summary>
     Task<IReadOnlyDictionary<string, decimal>> GetAvailableBalancesAsync(ExchangeCredentials credentials, CancellationToken cancellationToken);
 
-    /// <summary>An address to deposit <paramref name="asset"/> to. With <paramref name="fresh"/>, a new one when the exchange allows it.</summary>
-    Task<string> GetDepositAddressAsync(ExchangeCredentials credentials, string asset, bool fresh, CancellationToken cancellationToken);
+    /// <summary>
+    /// Where to deposit <paramref name="asset"/>. With <paramref name="fresh"/>, a new address when the exchange allows it.
+    /// Some assets also need a tag or memo (<see cref="DepositDestination.Tag"/>); a deposit without it is not credited.
+    /// </summary>
+    Task<DepositDestination> GetDepositAddressAsync(ExchangeCredentials credentials, string asset, bool fresh, CancellationToken cancellationToken);
 
     /// <summary>
     /// The smallest deposit of <paramref name="asset"/> the exchange credits, or 0 when it has none.

@@ -76,8 +76,9 @@ public class KrakenTests
         http.Responses["/0/private/DepositMethods"] = """{"error":[],"result":[{"method":"Bitcoin","limit":false,"fee":"0","gen-address":true,"minimum":"0.0001"}]}""";
         http.Responses["/0/private/DepositAddresses"] = """{"error":[],"result":[{"address":"bc1qexampleaddress000000000000000000000000","expiretm":"0","new":true}]}""";
         var kraken = new KrakenConnector(http.Client());
-        var address = await kraken.GetDepositAddressAsync(Credentials, "BTC", fresh: true, TestContext.Current.CancellationToken);
-        Assert.Equal("bc1qexampleaddress000000000000000000000000", address);
+        var destination = await kraken.GetDepositAddressAsync(Credentials, "BTC", fresh: true, TestContext.Current.CancellationToken);
+        Assert.Equal("bc1qexampleaddress000000000000000000000000", destination.Address);
+        Assert.False(destination.RequiresTag);
         var body = http.Sent.Last().Body;
         Assert.Contains("asset=XBT", body);
         Assert.Contains("method=Bitcoin", body);
@@ -92,6 +93,62 @@ public class KrakenTests
         http.Responses["/0/private/DepositAddresses"] = """{"error":[],"result":[{"address":"DExampleAddress","expiretm":"0"}]}""";
         await new KrakenConnector(http.Client()).GetDepositAddressAsync(Credentials, "DOGE", fresh: true, TestContext.Current.CancellationToken);
         Assert.DoesNotContain("new=true", http.Sent.Last().Body);
+    }
+
+    [Fact]
+    public async Task DepositTagIsKeptWithTheAddress()
+    {
+        var http = new FakeHttp();
+        http.Responses["/0/private/DepositMethods"] = """{"error":[],"result":[{"method":"Ripple XRP","gen-address":false,"minimum":"1"}]}""";
+        http.Responses["/0/private/DepositAddresses"] = """{"error":[],"result":[{"address":"rExampleAddress","tag":"123456789","expiretm":"0"}]}""";
+        var destination = await new KrakenConnector(http.Client()).GetDepositAddressAsync(Credentials, "XRP", fresh: false, TestContext.Current.CancellationToken);
+        Assert.Equal("rExampleAddress", destination.Address);
+        Assert.Equal("123456789", destination.Tag);
+        Assert.True(destination.RequiresTag);
+    }
+
+    [Fact]
+    public async Task PrivateCallsWithTheSameKeyAreSentOneAtATime()
+    {
+        var http = new GatedHttp();
+        var kraken = new KrakenConnector(http.Client());
+        var key = new ExchangeCredentials("serialized-test-key", Credentials.ApiSecret);
+        var first = kraken.GetAvailableBalancesAsync(key, TestContext.Current.CancellationToken);
+        await http.FirstArrived.Task.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
+        var second = kraken.GetAvailableBalancesAsync(key, TestContext.Current.CancellationToken);
+        await Task.Delay(200, TestContext.Current.CancellationToken);
+        Assert.Single(http.Nonces); // the second call waits while the first is in flight
+        http.Release.SetResult();
+        await Task.WhenAll(first, second);
+        Assert.Equal(2, http.Nonces.Count);
+        Assert.True(http.Nonces[1] > http.Nonces[0]); // and reaches Kraken with the larger nonce
+    }
+
+    /// <summary>Holds the first request until released, recording each request's nonce as it arrives.</summary>
+    class GatedHttp : HttpMessageHandler
+    {
+        public List<long> Nonces { get; } = new();
+        public TaskCompletionSource FirstArrived { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public TaskCompletionSource Release { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
+        {
+            var body = await request.Content!.ReadAsStringAsync(cancellationToken);
+            int count;
+            lock (Nonces)
+            {
+                Nonces.Add(long.Parse(System.Web.HttpUtility.ParseQueryString(body)["nonce"]!));
+                count = Nonces.Count;
+            }
+            if (count == 1)
+            {
+                FirstArrived.SetResult();
+                await Release.Task;
+            }
+            return new HttpResponseMessage(System.Net.HttpStatusCode.OK) { Content = new StringContent("""{"error":[],"result":{}}""") };
+        }
+
+        public HttpClient Client() => new(this);
     }
 
     [Fact]

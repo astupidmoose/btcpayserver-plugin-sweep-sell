@@ -1,5 +1,6 @@
 #nullable enable
 using System;
+using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Globalization;
 using System.Linq;
@@ -26,6 +27,10 @@ public class KrakenConnector(HttpClient http) : IExchangeConnector
     };
 
     static long _lastNonce;
+    // Kraken rejects a nonce lower than one it has already seen for the key, so private calls with the same
+    // key run one at a time, from taking the nonce until the response arrives; otherwise a later nonce can
+    // overtake an earlier one on the wire and fail it with "EAPI:Invalid nonce".
+    static readonly ConcurrentDictionary<string, SemaphoreSlim> KeyLocks = new();
 
     public string Id => "kraken";
     public string Name => "Kraken";
@@ -67,7 +72,7 @@ public class KrakenConnector(HttpClient http) : IExchangeConnector
         return balances;
     }
 
-    public async Task<string> GetDepositAddressAsync(ExchangeCredentials credentials, string asset, bool fresh, CancellationToken cancellationToken)
+    public async Task<DepositDestination> GetDepositAddressAsync(ExchangeCredentials credentials, string asset, bool fresh, CancellationToken cancellationToken)
     {
         var method = await DepositMethodAsync(credentials, asset, cancellationToken);
         var parameters = new List<KeyValuePair<string, string>>
@@ -79,8 +84,11 @@ public class KrakenConnector(HttpClient http) : IExchangeConnector
         if (fresh && method.Value<bool?>("gen-address") == true)
             parameters.Add(new("new", "true"));
         var result = (JArray)await PrivateAsync(credentials, "DepositAddresses", parameters, cancellationToken);
-        var address = result.OfType<JObject>().Select(a => a.Value<string>("address")).FirstOrDefault(a => !string.IsNullOrEmpty(a));
-        return address ?? throw new ExchangeException($"Kraken returned no {asset} deposit address. Create one in Kraken first.");
+        var entry = result.OfType<JObject>().FirstOrDefault(a => !string.IsNullOrEmpty(a.Value<string>("address")))
+                    ?? throw new ExchangeException($"Kraken returned no {asset} deposit address. Create one in Kraken first.");
+        // Kraken returns a destination tag (XRP) or memo (e.g. XLM) beside the address when the asset needs one.
+        var tag = new[] { entry.Value<string>("tag"), entry.Value<string>("memo") }.FirstOrDefault(t => !string.IsNullOrEmpty(t));
+        return new DepositDestination(entry.Value<string>("address")!, tag);
     }
 
     public async Task<decimal> GetMinimumDepositAsync(ExchangeCredentials credentials, string asset, CancellationToken cancellationToken)
@@ -178,6 +186,21 @@ public class KrakenConnector(HttpClient http) : IExchangeConnector
     }
 
     async Task<JToken> PrivateAsync(ExchangeCredentials credentials, string method, IEnumerable<KeyValuePair<string, string>> parameters,
+        CancellationToken cancellationToken)
+    {
+        var keyLock = KeyLocks.GetOrAdd(credentials.ApiKey, _ => new SemaphoreSlim(1, 1));
+        await keyLock.WaitAsync(cancellationToken);
+        try
+        {
+            return await PrivateLockedAsync(credentials, method, parameters, cancellationToken);
+        }
+        finally
+        {
+            keyLock.Release();
+        }
+    }
+
+    async Task<JToken> PrivateLockedAsync(ExchangeCredentials credentials, string method, IEnumerable<KeyValuePair<string, string>> parameters,
         CancellationToken cancellationToken)
     {
         var path = $"/0/private/{method}";
