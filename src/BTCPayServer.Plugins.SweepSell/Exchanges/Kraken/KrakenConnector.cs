@@ -36,8 +36,8 @@ public class KrakenConnector(HttpClient http) : IExchangeConnector
     public string Name => "Kraken";
 
     public string KeyPermissionsHelp =>
-        "In Kraken: Settings > API > Create key. Tick only Query Funds, Deposit Funds, Query Closed Orders & Trades " +
-        "and Create & Modify Orders. Never tick Withdraw Funds: Sweep & Sell never withdraws.";
+        "In Kraken: Settings > API > Create key. Tick only Query Funds, Deposit Funds, Query Open Orders & Trades, " +
+        "Query Closed Orders & Trades and Create & Modify Orders. Never tick Withdraw Funds: Sweep & Sell never withdraws.";
 
     /// <summary>Our ticker as Kraken's REST API takes it.</summary>
     public static string ToKraken(string asset) => asset.ToUpperInvariant() switch
@@ -175,13 +175,44 @@ public class KrakenConnector(HttpClient http) : IExchangeConnector
         return new OrderResult(!validateOnly, ids, description);
     }
 
+    public async Task<OrderLookup?> FindOrderAsync(ExchangeCredentials credentials, Guid clientOrderId, CancellationToken cancellationToken)
+    {
+        // Kraken filters both lists by client order ID; open first, since a closed lookup can't see a resting order.
+        var id = clientOrderId.ToString("D");
+        var open = Expect<JObject>(await PrivateAsync(credentials, "OpenOrders", [new("cl_ord_id", id)], cancellationToken), "OpenOrders");
+        var closed = Expect<JObject>(await PrivateAsync(credentials, "ClosedOrders", [new("cl_ord_id", id)], cancellationToken), "ClosedOrders");
+        var orders = Orders(open, "open", id).Select(o => (o.Id, o.Order, Open: true))
+            .Concat(Orders(closed, "closed", id).Select(o => (o.Id, o.Order, Open: false)))
+            .ToList();
+        if (orders.Count == 0)
+            return null;
+        return new OrderLookup(orders.Select(o => o.Id).ToList(), orders.Any(o => o.Open),
+            orders.Sum(o => RequiredDecimal(o.Order["vol_exec"], $"executed amount of order {o.Id}")));
+    }
+
+    static IEnumerable<(string Id, JObject Order)> Orders(JObject result, string list, string clientOrderId)
+    {
+        if (result[list] is not JObject orders)
+            throw new ExchangeException($"Kraken sent an unexpected {list} orders list.");
+        foreach (var (id, value) in orders)
+        {
+            if (value is not JObject order)
+                throw new ExchangeException($"Kraken sent an unexpected entry for order {id}.");
+            // Kraken already filtered by client order ID; an entry that names another one is not ours.
+            if (Text(order["cl_ord_id"]) is { } other && !string.Equals(other, clientOrderId, StringComparison.OrdinalIgnoreCase))
+                continue;
+            yield return (id, order);
+        }
+    }
+
     public async Task<CredentialsCheck> TestCredentialsAsync(ExchangeCredentials credentials, CancellationToken cancellationToken)
     {
         var checks = new List<PermissionCheck>
         {
             await CheckAsync("Query Funds", () => PrivateAsync(credentials, "BalanceEx", [], cancellationToken), orderCheck: false, cancellationToken),
             await CheckAsync("Deposit Funds", () => PrivateAsync(credentials, "DepositMethods", [new("asset", "XBT")], cancellationToken), orderCheck: false, cancellationToken),
-            // Used to look an order up by its client order ID after a lost response.
+            // Both are used to look an order up by its client order ID after a lost response.
+            await CheckAsync("Query Open Orders & Trades", () => PrivateAsync(credentials, "OpenOrders", [], cancellationToken), orderCheck: false, cancellationToken),
             await CheckAsync("Query Closed Orders & Trades", () => PrivateAsync(credentials, "ClosedOrders", [], cancellationToken), orderCheck: false, cancellationToken)
         };
         // A validate-only order checks the trading permission without trading. Twice the minimum leaves room for the
@@ -296,7 +327,9 @@ public class KrakenConnector(HttpClient http) : IExchangeConnector
         {
             throw new ExchangeException($"Kraken answered HTTP {(int)response.StatusCode} without JSON.");
         }
-        if (json["error"] is JArray { Count: > 0 } errors)
+        if (json["error"] is not JArray errors)
+            throw new ExchangeException($"Kraken answered HTTP {(int)response.StatusCode} without an error list.");
+        if (errors.Count > 0)
             throw new ExchangeException("Kraken: " + string.Join("; ", errors.Select(e => e.ToString())));
         return json["result"] ?? throw new ExchangeException($"Kraken answered HTTP {(int)response.StatusCode} without a result.");
     }

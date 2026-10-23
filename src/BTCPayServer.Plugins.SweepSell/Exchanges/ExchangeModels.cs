@@ -63,6 +63,12 @@ public sealed record MarketRules(string BaseAsset, string QuoteAsset, decimal Mi
 
 public sealed record OrderResult(bool Placed, IReadOnlyList<string> OrderIds, string Description);
 
+/// <summary>
+/// What the exchange knows about the orders sent with one client order ID. <see cref="Open"/> means some of it can
+/// still fill; <see cref="ExecutedAmount"/> is what has filled so far, in the base asset.
+/// </summary>
+public sealed record OrderLookup(IReadOnlyList<string> OrderIds, bool Open, decimal ExecutedAmount);
+
 public sealed record PermissionCheck(string Permission, bool Ok, string? Error);
 
 public sealed record CredentialsCheck(IReadOnlyList<PermissionCheck> Checks)

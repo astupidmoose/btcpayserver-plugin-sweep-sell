@@ -92,6 +92,50 @@ public class KrakenTests
     }
 
     [Fact]
+    public async Task FindOrderLooksUpOpenAndClosedOrdersByClientOrderId()
+    {
+        var http = new FakeHttp();
+        var kraken = new KrakenConnector(http.Client());
+        var ct = TestContext.Current.CancellationToken;
+        http.Responses["/0/private/OpenOrders"] = """{"error":[],"result":{"open":{}}}""";
+        http.Responses["/0/private/ClosedOrders"] = """{"error":[],"result":{"closed":{},"count":0}}""";
+        Assert.Null(await kraken.FindOrderAsync(Credentials, OrderId, ct));
+        Assert.All(http.Sent, s => Assert.Contains("cl_ord_id=" + OrderId.ToString("D"), s.Body));
+
+        // Filled after the response was lost: a retry must not happen.
+        http.Responses["/0/private/ClosedOrders"] = $$$"""
+            {"error":[],"result":{"closed":{
+              "OAAAAA-BBBBB-CCCCCC":{"cl_ord_id":"{{{OrderId:D}}}","status":"closed","vol_exec":"0.25000000"},
+              "OXXXXX-YYYYY-ZZZZZZ":{"cl_ord_id":"00000000-0000-4000-8000-000000000099","status":"closed","vol_exec":"9"}},"count":2}}
+            """;
+        var found = await kraken.FindOrderAsync(Credentials, OrderId, ct);
+        Assert.NotNull(found);
+        Assert.Equal(["OAAAAA-BBBBB-CCCCCC"], found.OrderIds);
+        Assert.False(found.Open);
+        Assert.Equal(0.25m, found.ExecutedAmount);
+
+        http.Responses["/0/private/OpenOrders"] = """{"error":[],"result":{"open":{"ODDDDD-EEEEE-FFFFFF":{"status":"open","vol_exec":"0"}}}}""";
+        Assert.True((await kraken.FindOrderAsync(Credentials, OrderId, ct))!.Open);
+
+        http.Responses["/0/private/OpenOrders"] = """{"error":[],"result":{}}""";
+        await Assert.ThrowsAsync<ExchangeException>(() => kraken.FindOrderAsync(Credentials, OrderId, ct));
+    }
+
+    [Theory]
+    [InlineData("""{"error":"EAPI:Invalid key","result":{}}""")]
+    [InlineData("""{"error":null,"result":{}}""")]
+    [InlineData("""{"result":{}}""")]
+    public async Task MalformedErrorListsFail(string response)
+    {
+        var http = new FakeHttp();
+        http.Responses["/0/private/BalanceEx"] = response;
+        var kraken = new KrakenConnector(http.Client());
+        await Assert.ThrowsAsync<ExchangeException>(() => kraken.GetAvailableBalancesAsync(Credentials, TestContext.Current.CancellationToken));
+        var check = await kraken.TestCredentialsAsync(Credentials, TestContext.Current.CancellationToken);
+        Assert.False(check.Checks.Single(c => c.Permission == "Query Funds").Ok);
+    }
+
+    [Fact]
     public async Task PrivateCallsAreSignedAndNeverCarryTheSecret()
     {
         var http = new FakeHttp();
@@ -189,6 +233,7 @@ public class KrakenTests
         var http = new FakeHttp();
         http.Responses["/0/private/BalanceEx"] = """{"error":[],"result":{}}""";
         http.Responses["/0/private/DepositMethods"] = """{"error":[],"result":[]}""";
+        http.Responses["/0/private/OpenOrders"] = """{"error":[],"result":{"open":{}}}""";
         http.Responses["/0/private/ClosedOrders"] = """{"error":[],"result":{"closed":{},"count":0}}""";
         http.Responses["/0/public/AssetPairs"] = """{"error":[],"result":{"XXBTZUSD":{"ordermin":"0.00005","costmin":"0.5","lot_decimals":8}}}""";
         http.Responses["/0/public/Ticker"] = """{"error":[],"result":{"XXBTZUSD":{"c":["100000.0","0.01"]}}}""";
@@ -334,6 +379,7 @@ public class KrakenTests
         var http = new FakeHttp();
         http.Responses["/0/private/BalanceEx"] = """{"error":[],"result":{}}""";
         http.Responses["/0/private/DepositMethods"] = """{"error":["EGeneral:Permission denied"]}""";
+        http.Responses["/0/private/OpenOrders"] = """{"error":[],"result":{"open":{}}}""";
         http.Responses["/0/private/ClosedOrders"] = """{"error":[],"result":{"closed":{},"count":0}}""";
         http.Responses["/0/public/AssetPairs"] = """{"error":[],"result":{"XXBTZUSD":{"ordermin":"0.00005","costmin":"0.5","lot_decimals":8}}}""";
         http.Responses["/0/public/Ticker"] = """{"error":[],"result":{"XXBTZUSD":{"c":["100000.0","0.01"]}}}""";
@@ -342,6 +388,7 @@ public class KrakenTests
         Assert.False(check.AllOk);
         Assert.True(check.Checks.Single(c => c.Permission == "Query Funds").Ok);
         Assert.False(check.Checks.Single(c => c.Permission == "Deposit Funds").Ok);
+        Assert.True(check.Checks.Single(c => c.Permission == "Query Open Orders & Trades").Ok);
         Assert.True(check.Checks.Single(c => c.Permission == "Query Closed Orders & Trades").Ok);
         Assert.True(check.Checks.Single(c => c.Permission == "Create & Modify Orders").Ok);
         Assert.All(http.Sent.Where(s => s.Request.RequestUri!.AbsolutePath == "/0/private/AddOrder"), s => Assert.Contains("validate=true", s.Body));

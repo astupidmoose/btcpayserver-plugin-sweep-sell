@@ -45,12 +45,19 @@ public interface IExchangeConnector
     /// <summary>
     /// Sells <paramref name="amount"/> of <paramref name="baseAsset"/> for <paramref name="quoteAsset"/> at market.
     /// <paramref name="clientOrderId"/> is derived from the business fact (e.g. the invoice) and sent with the order,
-    /// so after a lost response the caller can find out whether the order exists before it ever retries.
+    /// so after a lost response <see cref="FindOrderAsync"/> tells whether the order exists. Exchanges may only enforce
+    /// a client order ID's uniqueness among open orders, so a caller must look the order up before it ever retries.
     /// With <paramref name="validateOnly"/>, the exchange checks the order without placing it (dry run).
     /// A placed order without an exchange order ID is an error, never a success.
     /// </summary>
     Task<OrderResult> SellAtMarketAsync(ExchangeCredentials credentials, string baseAsset, string quoteAsset, decimal amount,
         Guid clientOrderId, bool validateOnly, CancellationToken cancellationToken);
+
+    /// <summary>
+    /// The open and closed orders placed with <paramref name="clientOrderId"/>, or null when the exchange has none.
+    /// A retry is only safe when this returns null.
+    /// </summary>
+    Task<OrderLookup?> FindOrderAsync(ExchangeCredentials credentials, Guid clientOrderId, CancellationToken cancellationToken);
 
     /// <summary>Tries each permission Sweep &amp; Sell uses, without moving funds.</summary>
     Task<CredentialsCheck> TestCredentialsAsync(ExchangeCredentials credentials, CancellationToken cancellationToken);

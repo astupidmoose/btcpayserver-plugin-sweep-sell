@@ -1,4 +1,6 @@
 using BTCPayServer.Plugins.SweepSell.Controllers;
+using BTCPayServer.Plugins.SweepSell.Exchanges;
+using BTCPayServer.Plugins.SweepSell.Exchanges.Kraken;
 using BTCPayServer.Plugins.SweepSell.Settings;
 using Microsoft.AspNetCore.DataProtection;
 using Newtonsoft.Json;
@@ -58,6 +60,23 @@ public class SettingsTests
     {
         var settings = UISweepSellController.Apply(Saved(), new SweepSellSettingsViewModel { ExchangeId = "other" }, Protector);
         Assert.False(settings.HasCredentials);
+    }
+
+    static readonly ExchangeRegistry Exchanges = new([new KrakenConnector(new HttpClient())]);
+
+    [Fact]
+    public void RemoveWorksWhenOnlyOneKeyFieldWasAutofilled()
+    {
+        Assert.Empty(UISweepSellController.Validate(
+            new SweepSellSettingsViewModel { ExchangeId = "kraken", ClearCredentials = true, ApiKey = "autofilled" }, Exchanges));
+        Assert.Single(UISweepSellController.Validate(new SweepSellSettingsViewModel { ExchangeId = "kraken", ApiKey = "only-one" }, Exchanges));
+    }
+
+    [Fact]
+    public void KeyNeedsAnExchange()
+    {
+        var errors = UISweepSellController.Validate(new SweepSellSettingsViewModel { ApiKey = "my-key", ApiSecret = "my-secret" }, Exchanges);
+        Assert.Equal(nameof(SweepSellSettingsViewModel.ExchangeId), Assert.Single(errors).Field);
     }
 
     [Fact]

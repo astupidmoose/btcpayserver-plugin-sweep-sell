@@ -36,15 +36,9 @@ public class UISweepSellController(SweepSellSettingsRepository repository, Secre
     public async Task<IActionResult> Settings(string storeId, SweepSellSettingsViewModel vm)
     {
         var saved = await repository.GetAsync(storeId);
-        var exchange = exchanges.Find(vm.ExchangeId);
-        if (!string.IsNullOrEmpty(vm.ExchangeId) && exchange is null)
-            ModelState.AddModelError(nameof(vm.ExchangeId), "Pick an exchange from the list.");
+        foreach (var (field, error) in Validate(vm, exchanges))
+            ModelState.AddModelError(field, error);
         var updated = Apply(saved, vm, protector);
-        if (string.IsNullOrWhiteSpace(vm.ApiKey) != string.IsNullOrWhiteSpace(vm.ApiSecret))
-            ModelState.AddModelError(nameof(vm.ApiSecret), "Enter both the API key and its private key.");
-        if (string.IsNullOrWhiteSpace(vm.ExchangeId) && !vm.ClearCredentials &&
-            (!string.IsNullOrWhiteSpace(vm.ApiKey) || !string.IsNullOrWhiteSpace(vm.ApiSecret)))
-            ModelState.AddModelError(nameof(vm.ExchangeId), "Pick the exchange this key belongs to.");
         if (!ModelState.IsValid)
             return View(SettingsView, ToViewModel(saved, vm));
 
@@ -101,6 +95,21 @@ public class UISweepSellController(SweepSellSettingsRepository repository, Secre
         }
         TempData.SetStatusMessageModel(message);
         return RedirectToAction(nameof(Settings), new { storeId });
+    }
+
+    /// <summary>Form errors, by field. Removing the key never depends on what was typed (or autofilled) in the key fields.</summary>
+    public static IEnumerable<(string Field, string Error)> Validate(SweepSellSettingsViewModel vm, ExchangeRegistry exchanges)
+    {
+        if (!string.IsNullOrEmpty(vm.ExchangeId) && exchanges.Find(vm.ExchangeId) is null)
+            yield return (nameof(vm.ExchangeId), "Pick an exchange from the list.");
+        if (vm.ClearCredentials)
+            yield break;
+        var key = !string.IsNullOrWhiteSpace(vm.ApiKey);
+        var secret = !string.IsNullOrWhiteSpace(vm.ApiSecret);
+        if (key != secret)
+            yield return (nameof(vm.ApiSecret), "Enter both the API key and its private key.");
+        if ((key || secret) && string.IsNullOrWhiteSpace(vm.ExchangeId))
+            yield return (nameof(vm.ExchangeId), "Pick the exchange this key belongs to.");
     }
 
     /// <summary>
