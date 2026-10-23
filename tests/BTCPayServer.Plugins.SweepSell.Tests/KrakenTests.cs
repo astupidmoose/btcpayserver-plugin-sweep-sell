@@ -61,6 +61,7 @@ public class KrakenTests
 
     [Theory]
     [InlineData("/0/private/BalanceEx", """{"error":[],"result":[]}""")]
+    [InlineData("/0/private/BalanceEx", """{"error":[],"result":{"XXBT":"0.5"}}""")]
     [InlineData("/0/private/DepositMethods", """{"error":[],"result":{}}""")]
     [InlineData("/0/public/AssetPairs", """{"error":[],"result":"XBTUSD"}""")]
     [InlineData("/0/public/AssetPairs", """{"error":[],"result":{"XXBTZUSD":{"ordermin":"0.00005","costmin":"0.5","lot_decimals":"8"}}}""")]
@@ -78,6 +79,16 @@ public class KrakenTests
             "/0/public/AssetPairs" => kraken.GetMarketRulesAsync("BTC", "USD", ct),
             _ => kraken.GetPriceAsync("BTC", "USD", ct)
         });
+    }
+
+    [Fact]
+    public async Task NumericAmountsKeepEveryDigit()
+    {
+        var http = new FakeHttp();
+        // More significant digits than a double holds.
+        http.Responses["/0/private/BalanceEx"] = """{"error":[],"result":{"XXBT":{"balance":1234567.123456789012345678,"hold_trade":0}}}""";
+        var balances = await new KrakenConnector(http.Client()).GetAvailableBalancesAsync(Credentials, TestContext.Current.CancellationToken);
+        Assert.Equal(1234567.123456789012345678m, balances["BTC"]);
     }
 
     [Fact]

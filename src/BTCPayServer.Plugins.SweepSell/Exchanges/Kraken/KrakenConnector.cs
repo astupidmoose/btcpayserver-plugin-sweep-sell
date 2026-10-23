@@ -78,8 +78,11 @@ public class KrakenConnector(HttpClient http) : IExchangeConnector
         var balances = new Dictionary<string, decimal>();
         foreach (var (asset, value) in result)
         {
-            if (FromKrakenAsset(asset) is not { } ticker || value is not JObject entry)
+            // Locked suffixes (staked, bonded) map to no ticker and are skipped on purpose.
+            if (FromKrakenAsset(asset) is not { } ticker)
                 continue;
+            if (value is not JObject entry)
+                throw new ExchangeException($"Kraken sent an unexpected {asset} balance entry.");
             // hold_trade is only sent when something is held; the balance itself is required.
             var available = RequiredDecimal(entry["balance"], $"{asset} balance") - OptionalDecimal(entry["hold_trade"]);
             if (available > 0)
@@ -281,7 +284,13 @@ public class KrakenConnector(HttpClient http) : IExchangeConnector
         JObject json;
         try
         {
-            json = JObject.Parse(text);
+            // Amounts may come as JSON numbers; read them as decimals so they never pass through double.
+            using var reader = new Newtonsoft.Json.JsonTextReader(new System.IO.StringReader(text))
+            {
+                FloatParseHandling = Newtonsoft.Json.FloatParseHandling.Decimal,
+                DateParseHandling = Newtonsoft.Json.DateParseHandling.None
+            };
+            json = JObject.Load(reader);
         }
         catch (Newtonsoft.Json.JsonException)
         {
