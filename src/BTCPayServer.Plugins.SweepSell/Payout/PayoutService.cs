@@ -271,6 +271,18 @@ public class PayoutService(IPayoutRepository payouts, ISweepSellRepository repos
                     "The settings changed during the run (paused, payout or its options changed, or another key); nothing was withdrawn.");
                 return;
             }
+            // Read again right before sending, so every withdrawal that could be confused with this one is already known.
+            try
+            {
+                var before = await connector.GetRecentWithdrawalsAsync(credentials, asset, pending.SentAt - MatchBefore - TimeSpan.FromMinutes(1), cancellationToken);
+                pending.SeenBefore = recent.Concat(before).Where(r => r.RequestedAt >= pending.SentAt - MatchBefore - TimeSpan.FromMinutes(1))
+                    .Select(r => r.Reference).Distinct().ToList();
+            }
+            catch (Exception e) when (IsRecordedFailure(e, cancellationToken))
+            {
+                Record(storeId, state, asset, ActivityOutcome.Failed, $"Could not read recent {asset} withdrawals from {connector.Name} before withdrawing: {e.Message}. Nothing was withdrawn.");
+                return;
+            }
             state.Pending.Add(pending);
             await payouts.SaveStateAsync(storeId, state);
             try
@@ -362,7 +374,7 @@ public class PayoutService(IPayoutRepository payouts, ISweepSellRepository repos
     /// report either what left the account or what arrived).
     /// </summary>
     public static bool Matches(WithdrawalRecord record, PendingWithdrawal pending, PayoutState state) =>
-        !state.Known.Contains(record.Reference) &&
+        !state.Known.Contains(record.Reference) && !pending.SeenBefore.Contains(record.Reference) &&
         (record.Destination is null || record.Destination == pending.Destination) &&
         record.RequestedAt >= pending.SentAt - MatchBefore && record.RequestedAt <= pending.SentAt + MatchAfter &&
         (record.Amount == pending.Amount || record.Amount == pending.NetAmount || record.Amount + record.Fee == pending.Amount);

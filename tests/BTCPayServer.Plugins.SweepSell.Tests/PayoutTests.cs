@@ -269,6 +269,26 @@ public class PayoutTests
     }
 
     [Fact]
+    public async Task AnEarlierWithdrawalIsNeverMistakenForALostOne()
+    {
+        Configure();
+        _exchange.Balance = 500m;
+        // A withdrawal of the same amount to the same destination a minute earlier, made by hand, that failed.
+        _exchange.Records.Add(new WithdrawalRecord("HAND-1", "test-bank", 499m, 1m, Start - TimeSpan.FromMinutes(1), WithdrawalStatus.Failed));
+        _exchange.LoseResponse = true; // and this one's response is lost before Kraken lists it
+        _exchange.OnWithdraw = () => _exchange.Records.RemoveAt(_exchange.Records.Count - 1);
+        await Service().RunAsync(StoreId, Ct);
+        var pending = Assert.Single(State.Pending);
+        Assert.Contains("HAND-1", pending.SeenBefore);
+
+        _exchange.LoseResponse = false;
+        _exchange.OnWithdraw = null;
+        await Service().RunAsync(StoreId, Ct);
+        Assert.Single(State.Pending); // still unknown: never matched to the earlier one, so nothing is sent again
+        Assert.Single(_exchange.Withdrawals);
+    }
+
+    [Fact]
     public async Task SeveralMatchingWithdrawalsNeedTheOwner()
     {
         Configure();
@@ -298,6 +318,10 @@ public class PayoutTests
         Assert.False(PayoutService.Matches(record with { RequestedAt = Start + TimeSpan.FromHours(2) }, pending, state));
         state.Remember("R1");
         Assert.False(PayoutService.Matches(record, pending, state));
+        Assert.False(PayoutService.Matches(record with { Reference = "R0" }, new PendingWithdrawal
+        {
+            Destination = "test-bank", Amount = 100m, NetAmount = 99m, Fee = 1m, SentAt = Start, SeenBefore = ["R0"]
+        }, new PayoutState())); // listed before it was sent
     }
 
     [Fact]
@@ -426,6 +450,7 @@ public class PayoutTests
         public Exception? WithdrawError { get; set; }
         public bool LoseResponse { get; set; }
         public Action? OnQuote { get; set; }
+        public Action? OnWithdraw { get; set; }
 
         public void Settle()
         {
@@ -461,6 +486,7 @@ public class PayoutTests
             var reference = $"REF-{Withdrawals.Count}";
             Balance -= amount;
             Records.Add(new WithdrawalRecord(reference, destination, amount - Fee, Fee, clock.GetUtcNow(), WithdrawalStatus.InProgress));
+            OnWithdraw?.Invoke();
             if (LoseResponse)
                 throw new HttpRequestException("The response was lost");
             return Task.FromResult(reference);

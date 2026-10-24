@@ -94,4 +94,10 @@ public class PendingWithdrawal
     public decimal Fee { get; set; }
 
     public DateTimeOffset SentAt { get; set; }
+
+    /// <summary>
+    /// The exchange's withdrawals already listed just before this one was sent, which can never be it: an earlier withdrawal
+    /// of the same amount and destination must not be mistaken for it when the response is lost.
+    /// </summary>
+    public List<string> SeenBefore { get; set; } = [];
 }
