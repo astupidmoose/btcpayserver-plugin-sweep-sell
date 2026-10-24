@@ -21,7 +21,9 @@ public enum TransactionStatus
     /// <summary>Neither in the node's mempool nor in a block, as far as the wallet knows.</summary>
     Unknown,
     Unconfirmed,
-    Confirmed
+    Confirmed,
+    /// <summary>Replaced by a conflicting transaction that spends the same coins: it won't confirm.</summary>
+    Replaced
 }
 
 /// <summary>What to sweep. <see cref="Amount"/> null sweeps everything; less leaves change in the wallet.</summary>

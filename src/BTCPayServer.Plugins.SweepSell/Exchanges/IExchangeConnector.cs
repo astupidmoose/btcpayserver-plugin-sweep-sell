@@ -64,10 +64,11 @@ public interface IExchangeConnector
     Task<OrderLookup?> FindOrderAsync(ExchangeCredentials credentials, Guid clientOrderId, CancellationToken cancellationToken);
 
     /// <summary>
-    /// The exchange's record of an on-chain deposit of <paramref name="asset"/> sent in transaction <paramref name="txid"/>,
-    /// or null when it has none (yet).
+    /// The exchange's record of an on-chain deposit of <paramref name="asset"/> sent in transaction <paramref name="txid"/>
+    /// at <paramref name="since"/> or later, or null when it has none (yet). Looks through every deposit since then, however many.
     /// </summary>
-    Task<DepositStatus?> FindDepositAsync(ExchangeCredentials credentials, string asset, string txid, CancellationToken cancellationToken);
+    Task<DepositStatus?> FindDepositAsync(ExchangeCredentials credentials, string asset, string txid, DateTimeOffset since,
+        CancellationToken cancellationToken);
 
     /// <summary>Tries each permission Sweep &amp; Sell uses, without moving funds.</summary>
     Task<CredentialsCheck> TestCredentialsAsync(ExchangeCredentials credentials, CancellationToken cancellationToken);

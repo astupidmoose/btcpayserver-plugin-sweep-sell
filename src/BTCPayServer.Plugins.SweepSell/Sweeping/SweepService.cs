@@ -189,8 +189,11 @@ public class SweepService(ISweepSellRepository repository, SecretProtector prote
             // A store sharing this wallet may have a sweep whose broadcast isn't settled; its coins must not be spent again here.
             if (await OtherStorePendingAsync(storeId, wallet) is { } otherStore)
             {
+                // The other store is named in the server log only: this store's users may not be allowed to see it.
+                logger.LogInformation("Sweep & Sell sweep of store {StoreId} waits for store {OtherStoreId}'s unsettled sweep from the shared {CryptoCode} wallet",
+                    storeId, otherStore, code);
                 Record(storeId, state, code, ActivityOutcome.Waiting,
-                    $"Another store using this {code} wallet ({otherStore}) has a sweep that isn't settled yet. Waiting for it.");
+                    $"Another store using this {code} wallet has a sweep that isn't settled yet. Waiting for it.");
                 return;
             }
             var balance = await wallets.GetBalanceAsync(wallet, rule.IncludeUnconfirmed, cancellationToken);
@@ -326,7 +329,17 @@ public class SweepService(ISweepSellRepository repository, SecretProtector prote
     {
         var code = pending.CryptoCode;
         var what = Describe(code, pending.ToExchange, pending.ExchangeId ?? "the exchange", pending.ExchangeAddress, pending.ToCold, pending.ColdAddress, pending.Fee);
-        if (await wallets.GetStatusAsync(code, pending.Txid, cancellationToken) != TransactionStatus.Unknown)
+        var status = await wallets.GetStatusAsync(code, pending.Txid, cancellationToken);
+        if (status == TransactionStatus.Replaced)
+        {
+            // Another transaction spent the same coins, so this one won't confirm. Rebroadcasting can't help, and whether the
+            // other one paid the same destinations isn't known: the owner checks and removes it.
+            Record(storeId, state, code, ActivityOutcome.Failed,
+                $"The earlier sweep of {Amount(pending.Spent)} {code} ({pending.Txid}) was replaced by another transaction spending the same coins, so it won't confirm. " +
+                "Check the wallet's transactions, then remove it under Pending sweeps. Nothing more is swept until then.");
+            return false;
+        }
+        if (status != TransactionStatus.Unknown)
         {
             Sent(storeId, state, pending, what);
             return true;
@@ -452,7 +465,7 @@ public class SweepService(ISweepSellRepository repository, SecretProtector prote
                     {
                         try
                         {
-                            status = await exchange.FindDepositAsync(credentials, awaiting.Asset, awaiting.Txid, cancellationToken);
+                            status = await exchange.FindDepositAsync(credentials, awaiting.Asset, awaiting.Txid, awaiting.SentAt, cancellationToken);
                         }
                         catch (Exception e) when (IsRecordedFailure(e, cancellationToken))
                         {
@@ -471,7 +484,7 @@ public class SweepService(ISweepSellRepository repository, SecretProtector prote
                         case DepositState.Failed:
                             state.Awaiting.Remove(awaiting);
                             Record(storeId, state, awaiting.Asset, ActivityOutcome.Failed,
-                                $"{exchange!.Name} reports the {Amount(awaiting.Amount)} {awaiting.Asset} deposit ({awaiting.Txid}) as failed. Contact {exchange.Name} about it.");
+                                $"{exchange!.Name} reports the {Amount(awaiting.Amount)} {awaiting.Asset} deposit ({awaiting.Txid}) as failed or being returned. Contact {exchange.Name} about it.");
                             break;
                         default:
                             if (now - awaiting.SentAt >= DepositWatchLimit)

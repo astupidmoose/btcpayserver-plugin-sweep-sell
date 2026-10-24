@@ -125,22 +125,50 @@ public class KrakenConnector(HttpClient http, TimeProvider? clock = null) : IExc
         return new DepositDestination(Text(entry["address"])!, tag);
     }
 
-    public async Task<DepositStatus?> FindDepositAsync(ExchangeCredentials credentials, string asset, string txid, CancellationToken cancellationToken)
+    /// <summary>Most pages of deposits read to find one (newest first), so a busy account can't make a lookup run forever.</summary>
+    public const int MaxDepositPages = 20;
+
+    public async Task<DepositStatus?> FindDepositAsync(ExchangeCredentials credentials, string asset, string txid, DateTimeOffset since,
+        CancellationToken cancellationToken)
     {
         if (string.IsNullOrWhiteSpace(txid))
             throw new ArgumentException("A transaction ID is needed.", nameof(txid));
-        var method = await DepositMethodAsync(credentials, asset, cancellationToken);
-        var result = Expect<JArray>(await PrivateAsync(credentials, "DepositStatus",
-            [new("asset", ToKraken(asset)), new("method", Text(method["method"])!)], cancellationToken), "DepositStatus");
-        var entry = result.OfType<JObject>().FirstOrDefault(d => string.Equals(Text(d["txid"]), txid, StringComparison.OrdinalIgnoreCase));
-        if (entry is null)
-            return null;
-        var amount = RequiredDecimal(entry["amount"], $"{asset} deposit amount");
-        // "Success" is credited, unless Kraken holds it (status-prop "onhold"); "Failure" won't be credited.
-        var state = Text(entry["status"]) switch
+        var method = Text((await DepositMethodAsync(credentials, asset, cancellationToken))["method"])!;
+        // Kraken lists deposits newest first, a page at a time: follow the pages back to when the sweep was sent.
+        // An hour of slack covers a difference between our clock and Kraken's.
+        var start = since.AddHours(-1).ToUnixTimeSeconds().ToString(CultureInfo.InvariantCulture);
+        var cursor = "true";
+        for (var page = 0; page < MaxDepositPages; page++)
         {
-            "Success" when !string.Equals(Text(entry["status-prop"]), "onhold", StringComparison.OrdinalIgnoreCase) => DepositState.Credited,
-            "Failure" => DepositState.Failed,
+            var result = await PrivateAsync(credentials, "DepositStatus",
+                [new("asset", ToKraken(asset)), new("method", method), new("start", start), new("cursor", cursor)], cancellationToken);
+            var (deposits, next) = result switch
+            {
+                JArray list => (list, null),
+                JObject paged when paged["deposit"] is JArray list => (list, Text(paged["next_cursor"])),
+                _ => throw new ExchangeException("Kraken sent an unexpected DepositStatus response.")
+            };
+            var entry = deposits.OfType<JObject>().FirstOrDefault(d => string.Equals(Text(d["txid"]), txid, StringComparison.OrdinalIgnoreCase));
+            if (entry is not null)
+                return Deposit(entry, asset);
+            if (deposits.Count == 0 || string.IsNullOrEmpty(next) || next == cursor)
+                return null;
+            cursor = next;
+        }
+        return null;
+    }
+
+    static DepositStatus Deposit(JObject entry, string asset)
+    {
+        var amount = RequiredDecimal(entry["amount"], $"{asset} deposit amount");
+        var prop = Text(entry["status-prop"]);
+        // Only a plain "Success" is credited. "Failure", or a deposit Kraken is sending back ("return"), won't be; on hold
+        // or any other status property isn't credited yet.
+        var state = (Text(entry["status"]), prop) switch
+        {
+            ("Failure", _) => DepositState.Failed,
+            (_, "return") => DepositState.Failed,
+            ("Success", null or "") => DepositState.Credited,
             _ => DepositState.Pending
         };
         return new DepositStatus(state, amount);

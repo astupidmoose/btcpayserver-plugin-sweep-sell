@@ -373,6 +373,23 @@ public class SettingsTests
     }
 
     [Fact]
+    public void ResumingWhileSweepingIsOnIsASweepChange()
+    {
+        var saved = Sweeping();
+        saved.Paused = true;
+        var resumed = Sweeping();
+        (resumed.ProtectedApiKey, resumed.ProtectedApiSecret) = (saved.ProtectedApiKey, saved.ProtectedApiSecret);
+        Assert.True(UISweepSellController.ChangesSweeps(saved, resumed));
+        // Pausing never needs wallet permissions, and resuming with sweeping off doesn't let anything be swept.
+        Assert.False(UISweepSellController.ChangesSweeps(resumed, saved));
+        var off = Sweeping(enabled: false);
+        off.Paused = true;
+        var offResumed = Sweeping(enabled: false);
+        (offResumed.ProtectedApiKey, offResumed.ProtectedApiSecret) = (off.ProtectedApiKey, off.ProtectedApiSecret);
+        Assert.False(UISweepSellController.ChangesSweeps(off, offResumed));
+    }
+
+    [Fact]
     public void KeyChangesWhileSweepingIsOffAreNotSweepChanges()
     {
         var saved = Sweeping(enabled: false);

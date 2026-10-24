@@ -92,7 +92,7 @@ public enum DepositState
     Pending,
     /// <summary>Credited: the amount can be traded.</summary>
     Credited,
-    /// <summary>The exchange won't credit it; the owner has to sort it out with the exchange.</summary>
+    /// <summary>The exchange won't credit it (failed, or being returned); the owner has to sort it out with the exchange.</summary>
     Failed
 }
 

@@ -310,6 +310,26 @@ public class SweepServiceTests
         Assert.Single(_wallets.Built);
         var other = _repository.SweepStates[second];
         Assert.Contains("Another store using this BTC wallet", other.Activity[0].Message);
+        Assert.DoesNotContain(_storeId, other.Activity[0].Message.Replace(second, "")); // the other store isn't named to this one's users
+    }
+
+    [Fact]
+    public async Task ReplacedSweepIsNeitherCountedNorRebroadcast()
+    {
+        Configure(rule: r => r.DailyCap = 5m);
+        _wallets.BroadcastResults.Enqueue(() => throw new HttpRequestException("timeout"));
+        var service = Service();
+        await service.RunAsync(_storeId, wait: false, Ct);
+        var pending = Assert.Single(State.Pending);
+
+        _wallets.Statuses[pending.Txid] = TransactionStatus.Replaced;
+        await service.RunAsync(_storeId, wait: false, Ct);
+        Assert.Single(_wallets.Broadcasts);
+        Assert.Single(_wallets.Built);
+        Assert.Single(State.Pending);
+        Assert.Empty(State.Awaiting);
+        Assert.Equal(0m, State.Swept.On(_clock.GetUtcNow(), "BTC"));
+        Assert.Contains("was replaced by another transaction", State.Activity[0].Message);
     }
 
     [Fact]
@@ -462,6 +482,7 @@ public class SweepServiceTests
         await service.WatchDepositsAsync(Ct);
         Assert.Single(State.Awaiting); // not seen by the exchange yet
         Assert.Empty(_exchange.Orders);
+        Assert.Equal(awaiting.SentAt, _exchange.DepositSearchesSince.Single()); // deposits are searched back to the sweep
 
         _exchange.Deposits[awaiting.Txid] = new DepositStatus(DepositState.Credited, 0.9999m);
         _exchange.Balances["BTC"] = 0.9999m;

@@ -136,7 +136,13 @@ public class BtcPayStoreWallets(StoreRepository stores, PaymentMethodHandlerDict
     {
         var network = Network(cryptoCode);
         var tx = await explorers.GetExplorerClient(network).GetTransactionAsync(uint256.Parse(txid), cancellationToken);
-        return tx is null ? TransactionStatus.Unknown : tx.Confirmations > 0 ? TransactionStatus.Confirmed : TransactionStatus.Unconfirmed;
+        return tx switch
+        {
+            null => TransactionStatus.Unknown,
+            { Confirmations: > 0 } => TransactionStatus.Confirmed,
+            { ReplacedBy: not null } => TransactionStatus.Replaced,
+            _ => TransactionStatus.Unconfirmed
+        };
     }
 
     BTCPayNetwork Network(string cryptoCode) =>

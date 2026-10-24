@@ -48,11 +48,13 @@ public class UISweepSellController(ISweepSellRepository repository, SecretProtec
         (await authorization.AuthorizeAsync(User, storeId, WalletPolicies.CanBroadcastWalletTransactions)).Succeeded;
 
     /// <summary>
-    /// Whether a save changes what sweeps do: any sweep setting, or the exchange or key while sweeping is (or becomes) on,
-    /// since sweeps send to that exchange account.
+    /// Whether a save changes what sweeps do: any sweep setting, the exchange or key while sweeping is (or becomes) on, since
+    /// sweeps send to that exchange account, or lifting the pause while sweeping is on, which lets sweeps run again.
+    /// Pausing is never a change: anyone who may change the settings may stop sweeps.
     /// </summary>
     public static bool ChangesSweeps(SweepSellSettings saved, SweepSellSettings updated) =>
-        !SameSweeps(saved.Sweep, updated.Sweep) || (saved.Sweep.Enabled || updated.Sweep.Enabled) && KeyChanges(saved, updated);
+        !SameSweeps(saved.Sweep, updated.Sweep) || (saved.Sweep.Enabled || updated.Sweep.Enabled) && KeyChanges(saved, updated) ||
+        saved.Paused && !updated.Paused && updated.Sweep.Enabled;
 
     static bool SameSweeps(SweepSettings a, SweepSettings b)
     {
