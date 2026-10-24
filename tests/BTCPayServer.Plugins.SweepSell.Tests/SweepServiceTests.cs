@@ -505,6 +505,67 @@ public class SweepServiceTests
         Assert.Empty(_wallets.Built);
     }
 
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task PausedOrOffStoreStillLooksForItsUnsettledSweep(bool pause)
+    {
+        Configure();
+        _wallets.BroadcastResults.Enqueue(() => throw new HttpRequestException("timeout"));
+        var service = Service();
+        await service.RunAsync(_storeId, wait: false, Ct);
+        var pending = Assert.Single(State.Pending);
+        if (pause)
+            _repository.Settings[_storeId].Paused = true;
+        else
+            _repository.Settings[_storeId].Sweep.Enabled = false;
+
+        Assert.Equal(pause ? SweepRunResult.Paused : SweepRunResult.Disabled, await service.RunAsync(_storeId, wait: false, Ct));
+        Assert.Single(_wallets.Broadcasts); // never rebroadcast while paused or off
+        Assert.Single(State.Pending);
+
+        // The scheduled run still picks the store up, and finds the sweep once it is on the network.
+        _wallets.Statuses[pending.Txid] = TransactionStatus.Unconfirmed;
+        _clock.Advance(TimeSpan.FromDays(1));
+        await service.RunDueAsync(Ct);
+        Assert.Empty(State.Pending);
+        Assert.Equal(pending.Txid, Assert.Single(State.Awaiting).Txid);
+        Assert.Single(_wallets.Built);
+        Assert.Single(_wallets.Broadcasts);
+    }
+
+    [Fact]
+    public async Task WalletReplacedDuringTheRunStopsTheBroadcast()
+    {
+        Configure();
+        _wallets.OnBuild = () =>
+        {
+            _wallets.Keys[$"{_storeId}:BTC"] = "another-wallet";
+            return Task.CompletedTask;
+        };
+        await Service().RunAsync(_storeId, wait: false, Ct);
+        Assert.Single(_wallets.Built);
+        Assert.Empty(_wallets.Broadcasts);
+        Assert.Empty(State.Pending);
+        Assert.Contains("wallet was changed or removed during the run", State.Activity[0].Message);
+    }
+
+    [Fact]
+    public async Task PendingSweepFromAReplacedWalletIsNotRebroadcast()
+    {
+        Configure();
+        _wallets.BroadcastResults.Enqueue(() => throw new HttpRequestException("timeout"));
+        var service = Service();
+        await service.RunAsync(_storeId, wait: false, Ct);
+        Assert.Single(State.Pending);
+
+        _wallets.Keys[$"{_storeId}:BTC"] = "another-wallet";
+        await service.RunAsync(_storeId, wait: false, Ct);
+        Assert.Single(_wallets.Broadcasts);
+        Assert.Single(State.Pending);
+        Assert.Contains("a wallet this store no longer uses", State.Activity[0].Message);
+    }
+
     [Fact]
     public async Task NoKeyMeansNowhereToSweep()
     {

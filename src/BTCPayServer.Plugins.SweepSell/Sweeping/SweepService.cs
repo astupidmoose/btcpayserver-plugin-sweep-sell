@@ -49,9 +49,10 @@ public class SweepService(ISweepSellRepository repository, SecretProtector prote
         var due = new List<string>();
         foreach (var (storeId, settings) in await repository.GetAllAsync())
         {
-            if (settings.Paused || !settings.Sweep.Enabled)
-                continue;
             var state = await repository.GetSweepStateAsync(storeId);
+            // Paused or off, a store is still run while it has unsettled sweeps: they are looked for, never rebroadcast.
+            if ((settings.Paused || !settings.Sweep.Enabled) && state.Pending.Count == 0)
+                continue;
             var interval = TimeSpan.FromMinutes(Math.Clamp(settings.Sweep.IntervalMinutes, SweepSettings.MinIntervalMinutes, SweepSettings.MaxIntervalMinutes));
             if (state.LastRun is not { } last || clock.GetUtcNow() - last >= interval)
                 due.Add(storeId);
@@ -90,8 +91,9 @@ public class SweepService(ISweepSellRepository repository, SecretProtector prote
     }
 
     /// <summary>
-    /// Sweeps every enabled coin of the store. With <paramref name="wait"/>, waits for a run in progress instead of
-    /// returning <see cref="SweepRunResult.Busy"/>, so a new transaction is never missed.
+    /// Sweeps every enabled coin of the store. Paused or off, it only looks for its unsettled sweeps, never rebroadcasting
+    /// them. With <paramref name="wait"/>, waits for a run in progress instead of returning <see cref="SweepRunResult.Busy"/>,
+    /// so a new transaction is never missed.
     /// </summary>
     public async Task<SweepRunResult> RunAsync(string storeId, bool wait, CancellationToken cancellationToken)
     {
@@ -103,15 +105,17 @@ public class SweepService(ISweepSellRepository repository, SecretProtector prote
         try
         {
             var settings = await repository.GetAsync(storeId);
-            if (settings.Paused)
-                return SweepRunResult.Paused;
-            if (!settings.Sweep.Enabled)
-                return SweepRunResult.Disabled;
+            var result = settings.Paused ? SweepRunResult.Paused : !settings.Sweep.Enabled ? SweepRunResult.Disabled : SweepRunResult.Ran;
             var state = await repository.GetSweepStateAsync(storeId);
+            if (result != SweepRunResult.Ran && state.Pending.Count == 0)
+                return result;
             state.LastRun = clock.GetUtcNow();
             try
             {
-                await RunAsync(storeId, settings, state, cancellationToken);
+                if (result == SweepRunResult.Ran)
+                    await RunAsync(storeId, settings, state, cancellationToken);
+                else
+                    await SettleAsync(storeId, state, state.Pending.ToList(), cancellationToken); // paused or off: nothing is built or rebroadcast
             }
             catch (Exception e) when (!cancellationToken.IsCancellationRequested)
             {
@@ -123,7 +127,7 @@ public class SweepService(ISweepSellRepository repository, SecretProtector prote
             {
                 await repository.SaveSweepStateAsync(storeId, state);
             }
-            return SweepRunResult.Ran;
+            return result;
         }
         finally
         {
@@ -154,7 +158,14 @@ public class SweepService(ISweepSellRepository repository, SecretProtector prote
         }
         // A sweep whose broadcast wasn't confirmed is still looked for after its rule is turned off or removed: it may be on the
         // network, with a deposit to watch, and it holds back other stores sharing the wallet. It is never rebroadcast then.
-        foreach (var pending in state.Pending.Where(p => !enabled.Any(r => string.Equals(r.CryptoCode, p.CryptoCode, StringComparison.OrdinalIgnoreCase))).ToList())
+        await SettleAsync(storeId, state,
+            state.Pending.Where(p => !enabled.Any(r => string.Equals(r.CryptoCode, p.CryptoCode, StringComparison.OrdinalIgnoreCase))).ToList(), cancellationToken);
+    }
+
+    /// <summary>Looks for each of <paramref name="pendings"/> under its wallet's lock, without building anything new.</summary>
+    async Task SettleAsync(string storeId, SweepState state, IReadOnlyList<PendingSweep> pendings, CancellationToken cancellationToken)
+    {
+        foreach (var pending in pendings)
         {
             var walletKey = pending.WalletKey ?? (await wallets.GetWalletAsync(storeId, pending.CryptoCode, cancellationToken))?.Key;
             if (walletKey is null)
@@ -314,6 +325,13 @@ public class SweepService(ISweepSellRepository repository, SecretProtector prote
                         "The settings changed during the run (paused, sweeping or its options changed, or another key); nothing was broadcast this run.");
                     return;
                 }
+                // The store's wallet can be removed or replaced in BTCPay meanwhile: funds only leave the wallet it still uses.
+                if (await wallets.GetWalletAsync(storeId, code, cancellationToken) is not { IsHot: true } current || current.Key != wallet.Key)
+                {
+                    Record(storeId, state, code, ActivityOutcome.Waiting,
+                        $"The store's {code} wallet was changed or removed during the run; nothing was broadcast.");
+                    return;
+                }
                 var pending = new PendingSweep
                 {
                     CryptoCode = code,
@@ -400,6 +418,13 @@ public class SweepService(ISweepSellRepository repository, SecretProtector prote
             {
                 Record(storeId, state, code, ActivityOutcome.Waiting,
                     $"The earlier sweep of {Amount(pending.Spent)} {code} ({pending.Txid}) isn't on the network, and sweeping (or its {code} rule) is paused, off or in dry run, so it isn't rebroadcast. " +
+                    "Nothing more is swept until it is found or removed under Pending sweeps.");
+                return false;
+            }
+            if (await wallets.GetWalletAsync(storeId, code, cancellationToken) is not { IsHot: true } wallet || wallet.Key != pending.WalletKey)
+            {
+                Record(storeId, state, code, ActivityOutcome.Waiting,
+                    $"The earlier sweep of {Amount(pending.Spent)} {code} ({pending.Txid}) isn't on the network, and it spends from a wallet this store no longer uses, so it isn't rebroadcast. " +
                     "Nothing more is swept until it is found or removed under Pending sweeps.");
                 return false;
             }
