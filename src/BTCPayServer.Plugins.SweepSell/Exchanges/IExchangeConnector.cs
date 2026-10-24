@@ -36,21 +36,25 @@ public interface IExchangeConnector
     /// </summary>
     Task<decimal> GetMinimumDepositAsync(ExchangeCredentials credentials, string asset, CancellationToken cancellationToken);
 
-    /// <summary>The last traded price of one <paramref name="baseAsset"/> in <paramref name="quoteAsset"/>.</summary>
-    Task<decimal> GetPriceAsync(string baseAsset, string quoteAsset, CancellationToken cancellationToken);
+    /// <summary>Last trade, best bid and 24-hour average price of one <paramref name="baseAsset"/> in <paramref name="quoteAsset"/>.</summary>
+    Task<MarketPrice> GetPriceAsync(string baseAsset, string quoteAsset, CancellationToken cancellationToken);
 
-    /// <summary>Minimum order and amount precision of a market.</summary>
+    /// <summary>Minimum order, amount precision and price precision of a market.</summary>
     Task<MarketRules> GetMarketRulesAsync(string baseAsset, string quoteAsset, CancellationToken cancellationToken);
 
     /// <summary>
-    /// Sells <paramref name="amount"/> of <paramref name="baseAsset"/> for <paramref name="quoteAsset"/> at market.
+    /// Sells up to <paramref name="amount"/> of <paramref name="baseAsset"/> for <paramref name="quoteAsset"/> right away, at
+    /// <paramref name="limitPrice"/> or better (an immediate-or-cancel limit order): whatever can't fill at that price is
+    /// cancelled, never left on the book or sold lower. Never an unpriced market order.
     /// <paramref name="clientOrderId"/> is derived from the business fact (e.g. the invoice) and sent with the order,
     /// so after a lost response <see cref="FindOrderAsync"/> tells whether the order exists. Exchanges may only enforce
     /// a client order ID's uniqueness among open orders, so a caller must look the order up before it ever retries.
+    /// A live order must be unable to execute later than a minute after the call (e.g. with the exchange's order deadline),
+    /// so an order still unlisted after the caller's grace period was never placed.
     /// With <paramref name="validateOnly"/>, the exchange checks the order without placing it (dry run).
     /// A placed order without an exchange order ID is an error, never a success.
     /// </summary>
-    Task<OrderResult> SellAtMarketAsync(ExchangeCredentials credentials, string baseAsset, string quoteAsset, decimal amount,
+    Task<OrderResult> SellAsync(ExchangeCredentials credentials, string baseAsset, string quoteAsset, decimal amount, decimal limitPrice,
         Guid clientOrderId, bool validateOnly, CancellationToken cancellationToken);
 
     /// <summary>

@@ -43,6 +43,9 @@ dotnet test --project tests/BTCPayServer.Plugins.SweepSell.Tests
 8. **Amounts are `decimal`,** rounded down to the market's precision. Never `double` for money.
 9. **Store isolation.** A store's settings, keys and wallets are only reachable by users with
    `CanModifyStoreSettings` on that store.
+10. **Every sale has a price floor.** Never send an unpriced market order. Sells are
+    immediate-or-cancel limit orders at a floor derived from a reference price one trade can't move
+    (e.g. the 24-hour average), and money-moving features offer a daily cap.
 
 ## Working on a change
 

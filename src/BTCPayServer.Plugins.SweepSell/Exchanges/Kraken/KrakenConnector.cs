@@ -12,7 +12,7 @@ using Newtonsoft.Json.Linq;
 namespace BTCPayServer.Plugins.SweepSell.Exchanges.Kraken;
 
 /// <summary>Kraken over its REST API (https://docs.kraken.com/api/). Read balances, get deposit addresses, sell at market.</summary>
-public class KrakenConnector(HttpClient http) : IExchangeConnector
+public class KrakenConnector(HttpClient http, TimeProvider? clock = null) : IExchangeConnector
 {
     public const string HttpClientName = "SweepSell.Kraken";
     static readonly Uri BaseUri = new("https://api.kraken.com");
@@ -25,6 +25,12 @@ public class KrakenConnector(HttpClient http) : IExchangeConnector
         ["XETC"] = "ETC", ["XZEC"] = "ZEC", ["XMLN"] = "MLN", ["XREP"] = "REP",
         ["ZCAD"] = "CAD", ["ZUSD"] = "USD", ["ZEUR"] = "EUR", ["ZGBP"] = "GBP", ["ZJPY"] = "JPY", ["ZAUD"] = "AUD", ["ZCHF"] = "CHF"
     };
+
+    /// <summary>
+    /// How long Kraken's matching engine may still accept an order after it was sent (its <c>deadline</c>, which it
+    /// allows up to 60 seconds ahead). Well inside the time a caller waits before treating an unlisted order as never placed.
+    /// </summary>
+    public static readonly TimeSpan OrderDeadline = TimeSpan.FromSeconds(30);
 
     static long _lastNonce;
     // Kraken rejects a nonce lower than one it has already seen for the key, so private calls with the same
@@ -125,14 +131,22 @@ public class KrakenConnector(HttpClient http) : IExchangeConnector
         return RequiredDecimal(method["minimum"], $"{asset} minimum deposit");
     }
 
-    public async Task<decimal> GetPriceAsync(string baseAsset, string quoteAsset, CancellationToken cancellationToken)
+    public async Task<MarketPrice> GetPriceAsync(string baseAsset, string quoteAsset, CancellationToken cancellationToken)
     {
         var result = Expect<JObject>(await PublicAsync("Ticker", Pair(baseAsset, quoteAsset), cancellationToken), "Ticker");
         var ticker = result.Properties().Select(p => p.Value).OfType<JObject>().FirstOrDefault()
                      ?? throw new ExchangeException($"Kraken has no {baseAsset}/{quoteAsset} market.");
-        var last = RequiredDecimal(ticker["c"] is JArray { Count: > 0 } c ? c[0] : null, $"{baseAsset}/{quoteAsset} last price");
-        return last > 0 ? last : throw new ExchangeException($"Kraken returned no price for {baseAsset}/{quoteAsset}.");
+        var market = $"{baseAsset}/{quoteAsset}";
+        // c: [last price, volume]; b: [best bid, ...]; p: [average today, average last 24 hours].
+        var last = RequiredDecimal(Element(ticker["c"], 0), $"{market} last price");
+        var bid = RequiredDecimal(Element(ticker["b"], 0), $"{market} best bid");
+        var average = RequiredDecimal(Element(ticker["p"], 1), $"{market} 24-hour average price");
+        if (last <= 0 || average <= 0)
+            throw new ExchangeException($"Kraken returned no price for {market}.");
+        return new MarketPrice(last, bid, average);
     }
+
+    static JToken? Element(JToken? token, int index) => token is JArray array && array.Count > index ? array[index] : null;
 
     public async Task<MarketRules> GetMarketRulesAsync(string baseAsset, string quoteAsset, CancellationToken cancellationToken)
     {
@@ -145,25 +159,38 @@ public class KrakenConnector(HttpClient http) : IExchangeConnector
         // Json.NET keeps integers too large for a long as BigInteger, so check the range before converting.
         if (lot.Value is not long decimals || decimals is < 0 or > MarketRules.MaxAmountDecimals)
             throw new ExchangeException($"Kraken sent an unsupported amount precision ({lot}) for {market}.");
+        if (pair["pair_decimals"] is not JValue { Type: JTokenType.Integer } pricePrecision)
+            throw new ExchangeException($"Kraken sent no price precision for {market}.");
+        if (pricePrecision.Value is not long priceDecimals || priceDecimals is < 0 or > MarketRules.MaxAmountDecimals)
+            throw new ExchangeException($"Kraken sent an unsupported price precision ({pricePrecision}) for {market}.");
         return new MarketRules(baseAsset.ToUpperInvariant(), quoteAsset.ToUpperInvariant(),
             RequiredDecimal(pair["ordermin"], $"{market} minimum order"),
             RequiredDecimal(pair["costmin"], $"{market} minimum order cost"),
-            (int)decimals);
+            (int)decimals,
+            (int)priceDecimals);
     }
 
-    public async Task<OrderResult> SellAtMarketAsync(ExchangeCredentials credentials, string baseAsset, string quoteAsset, decimal amount,
-        Guid clientOrderId, bool validateOnly, CancellationToken cancellationToken)
+    public async Task<OrderResult> SellAsync(ExchangeCredentials credentials, string baseAsset, string quoteAsset, decimal amount,
+        decimal limitPrice, Guid clientOrderId, bool validateOnly, CancellationToken cancellationToken)
     {
         if (amount <= 0)
             throw new ArgumentOutOfRangeException(nameof(amount), "The amount to sell must be positive.");
+        if (limitPrice <= 0)
+            throw new ArgumentOutOfRangeException(nameof(limitPrice), "The limit price must be positive.");
         var parameters = new List<KeyValuePair<string, string>>
         {
-            new("ordertype", "market"),
+            // Immediate-or-cancel limit: fills now at the limit or better, and cancels the rest instead of selling lower.
+            new("ordertype", "limit"),
             new("type", "sell"),
             new("pair", Pair(baseAsset, quoteAsset)),
             new("volume", amount.ToString(CultureInfo.InvariantCulture)),
+            new("price", limitPrice.ToString(CultureInfo.InvariantCulture)),
+            new("timeinforce", "IOC"),
             // Kraken's client order ID (UUID form): the order can be looked up by it if the response is lost.
-            new("cl_ord_id", clientOrderId.ToString("D"))
+            new("cl_ord_id", clientOrderId.ToString("D")),
+            // A request delayed in transit or a queue is rejected after this instead of executing later, so an order that
+            // isn't listed after a caller's grace period can never still go through.
+            new("deadline", (clock ?? TimeProvider.System).GetUtcNow().Add(OrderDeadline).UtcDateTime.ToString("yyyy-MM-dd'T'HH:mm:ss'Z'", CultureInfo.InvariantCulture))
         };
         if (validateOnly)
             parameters.Add(new("validate", "true"));
@@ -178,7 +205,7 @@ public class KrakenConnector(HttpClient http) : IExchangeConnector
         };
         if (!validateOnly && ids.Count == 0)
             throw new ExchangeException($"Kraken accepted the {baseAsset}/{quoteAsset} sell (client order {clientOrderId:D}) but returned no order ID. Check the order in Kraken before retrying.");
-        var description = (result["descr"] is JObject descr ? Text(descr["order"]) : null) ?? $"sell {amount} {baseAsset} for {quoteAsset} @ market";
+        var description = (result["descr"] is JObject descr ? Text(descr["order"]) : null) ?? $"sell {amount} {baseAsset} for {quoteAsset} @ limit {limitPrice} (immediate or cancel)";
         return new OrderResult(!validateOnly, ids, description);
     }
 
@@ -226,16 +253,20 @@ public class KrakenConnector(HttpClient http) : IExchangeConnector
             await CheckAsync("Query Open Orders & Trades", () => PrivateAsync(credentials, "OpenOrders", [], cancellationToken), orderCheck: false, cancellationToken),
             await CheckAsync("Query Closed Orders & Trades", () => PrivateAsync(credentials, "ClosedOrders", [], cancellationToken), orderCheck: false, cancellationToken)
         };
-        // A validate-only order checks the trading permission without trading. Twice the minimum leaves room for the
-        // price to move between the ticker and the order.
+        // A validate-only order checks the trading permission without trading. It is also priced at twice the market
+        // and immediate-or-cancel, so it could never fill even if it were placed. Twice the minimum amount leaves room
+        // for the price to move between the ticker and the order.
         checks.Add(await CheckAsync("Create & Modify Orders", async () =>
         {
             var rules = await GetMarketRulesAsync("BTC", "USD", cancellationToken);
-            var volume = rules.MinimumSellAmount(await GetPriceAsync("BTC", "USD", cancellationToken)) * 2;
+            var last = (await GetPriceAsync("BTC", "USD", cancellationToken)).Last;
+            var volume = rules.MinimumSellAmount(last) * 2;
             return await PrivateAsync(credentials, "AddOrder",
             [
-                new("ordertype", "market"), new("type", "sell"), new("pair", Pair("BTC", "USD")),
+                new("ordertype", "limit"), new("type", "sell"), new("pair", Pair("BTC", "USD")),
                 new("volume", volume.ToString(CultureInfo.InvariantCulture)),
+                new("price", rules.LimitPriceAtLeast(last * 2).ToString(CultureInfo.InvariantCulture)),
+                new("timeinforce", "IOC"),
                 new("validate", "true")
             ], cancellationToken);
         }, orderCheck: true, cancellationToken));
@@ -341,9 +372,21 @@ public class KrakenConnector(HttpClient http) : IExchangeConnector
         if (json["error"] is not JArray errors)
             throw new ExchangeException($"Kraken answered HTTP {(int)response.StatusCode} without an error list.");
         if (errors.Count > 0)
-            throw new ExchangeException("Kraken: " + string.Join("; ", errors.Select(e => e.ToString())));
+        {
+            var texts = errors.Select(e => e.ToString()).ToList();
+            throw new ExchangeException("Kraken: " + string.Join("; ", texts), rejected: response.IsSuccessStatusCode && texts.All(IsRejection));
+        }
         return json["result"] ?? throw new ExchangeException($"Kraken answered HTTP {(int)response.StatusCode} without a result.");
     }
+
+    // Errors Kraken returns when it refused a request without acting on it. EService errors and EGeneral:Internal error
+    // can come after an order was accepted, and anything unlisted is unknown, so those never count as refusals.
+    static readonly string[] RejectionPrefixes = ["EOrder:", "EAPI:", "EQuery:", "EGeneral:Invalid arguments", "EGeneral:Permission denied"];
+
+    static bool IsRejection(string error) =>
+        RejectionPrefixes.Any(p => error.StartsWith(p, StringComparison.Ordinal)) &&
+        // A duplicate means an order with that ID already exists.
+        !error.Contains("duplicate", StringComparison.OrdinalIgnoreCase);
 
     /// <summary>Kraken wants every nonce of a key larger than the last; microseconds, never repeated in this process.</summary>
     static long NextNonce()

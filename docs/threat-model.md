@@ -23,6 +23,12 @@ deposit address and other configured destinations, (2) sell on the exchange when
 - **BTCPay events to the plugin:** invoice and payment events come from inside the BTCPay process, not
   from webhooks. There is no inbound endpoint that can trigger a sweep or sale.
 
+## Assumptions
+
+- **One BTCPay Server process per database.** BTCPay Server is deployed as a single process, and the
+  plugin's per-store job locks live in that process. Two processes sharing one database could run a
+  store's jobs twice; that setup is not supported.
+
 ## Threats and mitigations
 
 Mitigations marked *(planned)* arrive with the feature that needs them; the rest are in place.
@@ -34,12 +40,12 @@ Mitigations marked *(planned)* arrive with the feature that needs them; the rest
 | Stolen exchange key used to withdraw | The plugin needs and requests no withdrawal permission; the setup guide says not to grant it |
 | Attacker changes a sweep destination | Settings need `CanModifyStoreSettings`; destination changes are written to the activity log *(planned)*; exchange deposit addresses are fetched from the exchange at send time, never typed in |
 | Forged or replayed trigger causes a sale | No external trigger exists; each sale is recorded under its invoice ID and never repeated *(planned)* |
-| Restart or retry sends or sells twice | Idempotency keys recorded before or atomically with each action *(planned)* |
-| Lost order response followed by a blind retry sells twice | Orders carry a client order ID derived from the business fact; `FindOrderAsync` looks up open and closed orders by it, and a retry is only allowed when it finds none (lookup in place, retry logic *(planned)*) |
+| Restart or retry sends or sells twice | Convert saves each live order as pending (with its client order ID) before sending it, and a store runs one job at a time; sweeps and hedges *(planned)* |
+| Lost order response followed by a blind retry sells twice | Orders carry a client order ID derived from the business fact; `FindOrderAsync` looks up open and closed orders by it. Convert sells nothing more while any pending order is unresolved, and only treats an order as never placed when the exchange still has no record of it after a grace period; live orders carry the exchange's order deadline (30 seconds on Kraken), well inside that period, so a delayed request can't execute after it. Each pending order remembers the exchange and key fingerprint it was sent with: it is never looked up on another account, and while orders are pending only that exchange and key can be saved (checked under the store's job lock, so a run can't send an order in between; removing the key always can, without waiting). An order is dropped from pending only when the exchange shows it closed (a fill with no amount is not counted as a sale), definitively refused it, or still has no record of it after the grace period (an order the exchange confirmed with an order ID is never treated as unplaced, and one still open after placing stays pending, so its final fill is counted before anything more sells); the owner can remove a pending order by hand after checking the exchange. Hedge *(planned)* |
 | Malicious or malformed exchange response (huge amount, wrong address) | Amounts checked against the store's own balances and daily caps; addresses validated for the coin's network before sending *(planned)* |
 | Deposit sent without a required tag or memo is not credited | Connectors return the tag with the address; sweeps refuse destinations that need one *(planned)* |
 | Deposit below the exchange minimum is lost | Minimum deposits read from the exchange; sweeps wait until the exchange's share clears it (connector call in place, sweep logic *(planned)*) |
-| Market order slips badly on a thin market | Daily caps, per-feature minimums, and dry run to observe before going live *(planned)* |
+| Sale fills far below value on a thin or manipulated market | No unpriced market orders: sells are immediate-or-cancel limits at a floor set a configurable percentage (default 2%) below the exchange's 24-hour average price, which a single trade can't drag down; when the best bid is below the floor, nothing is sent. Optional daily cap on value sold, kept per target asset and counted pessimistically when a fill is unknown (an order removed by hand counts in full). Dry run to observe before going live. In place for convert; sweeps and hedges *(planned)* |
 | One store reads another's keys | Settings are keyed by store ID and only loaded for the authorized store |
 | Data-protection keys lost after a migration | Decryption failure reads as "no key saved", and the owner re-enters it; nothing crashes or leaks |
 
