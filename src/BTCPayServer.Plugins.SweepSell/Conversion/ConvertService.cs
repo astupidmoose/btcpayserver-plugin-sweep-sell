@@ -209,8 +209,7 @@ public class ConvertService(ISweepSellRepository repository, SecretProtector pro
                 Asset = asset,
                 TargetAsset = target,
                 Amount = amount,
-                ReferencePrice = reference,
-                SentAt = clock.GetUtcNow()
+                ReferencePrice = reference
             };
             OrderResult result;
             // Settings saves take the same lock, so a pause, a new key or other changes saved during the run apply before
@@ -225,6 +224,8 @@ public class ConvertService(ISweepSellRepository repository, SecretProtector pro
                         "The settings changed during the run (paused, conversion or its options changed, or another key); nothing more is sent this run.");
                     return;
                 }
+                // Stamped once the lock is held, just before sending: the fill's day and the lookup grace count from here.
+                pending.SentAt = clock.GetUtcNow();
                 state.Pending.Add(pending);
                 await repository.SaveConvertStateAsync(storeId, state);
                 try
@@ -289,7 +290,7 @@ public class ConvertService(ISweepSellRepository repository, SecretProtector pro
             }
             else
             {
-                state.AddSold(pending.SentAt, target, fill.ExecutedAmount * reference);
+                state.AddSold(PendingOrders.CountedAt(pending, clock.GetUtcNow()), target, fill.ExecutedAmount * reference);
                 Record(storeId, state, asset, ActivityOutcome.Sold,
                     $"Sold {Amount(fill.ExecutedAmount)} of {Amount(amount)} {asset} for {target} at {Amount(limitPrice)} or better ({orders}).");
             }
@@ -300,8 +301,8 @@ public class ConvertService(ISweepSellRepository repository, SecretProtector pro
     Task<bool> ReconcileAsync(string storeId, ConvertState state, IExchangeConnector exchange, ExchangeCredentials credentials,
         CancellationToken cancellationToken) =>
         PendingOrders.ReconcileAsync(state.Pending, exchange, credentials, clock.GetUtcNow(),
-            // Counted on the day it was sent: an immediate-or-cancel order fills when it arrives, however late it is found.
-            (order, executed) => state.AddSold(order.SentAt, order.TargetAsset, executed * order.ReferencePrice),
+            // Counted when it last could have filled, however late it is found.
+            (order, executed) => state.AddSold(PendingOrders.CountedAt(order, clock.GetUtcNow()), order.TargetAsset, executed * order.ReferencePrice),
             (asset, outcome, message) => Record(storeId, state, asset, outcome, message),
             e => IsRecordedFailure(e, cancellationToken), cancellationToken);
 

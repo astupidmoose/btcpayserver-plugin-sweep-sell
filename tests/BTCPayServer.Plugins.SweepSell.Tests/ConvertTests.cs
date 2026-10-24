@@ -606,6 +606,24 @@ public class ConvertTests
     }
 
     [Fact]
+    public async Task FillOfAnOrderSentJustBeforeMidnightCountsOnTheNewDay()
+    {
+        Configure(assets: "DOGE");
+        _repository.Settings[StoreId].Convert.DailyCap = 0.3m;
+        _clock.Advance(TimeSpan.FromHours(24) - TimeSpan.FromSeconds(30)); // 23:59:30 UTC
+        var id = Guid.NewGuid();
+        var pending = Pending(id);
+        pending.ReferencePrice = 0.001m;
+        _repository.States[StoreId] = new ConvertState { Pending = [pending] };
+        _exchange.Found[id] = new OrderLookup(["OLATE0-NIGHT-ORDER1"], Open: false, ExecutedAmount: 300m);
+        _clock.Advance(TimeSpan.FromMinutes(5)); // found after midnight: it may have filled after it, so today's cap is used
+        _exchange.Balances["DOGE"] = 300m;
+        await Service().RunAsync(StoreId, Ct);
+        Assert.Empty(_exchange.Orders);
+        Assert.Equal(0.3m, State.SoldOn(_clock.GetUtcNow(), "BTC"));
+    }
+
+    [Fact]
     public void EarlierDaysSalesNeverCountAgainstALaterDay()
     {
         var state = new ConvertState();

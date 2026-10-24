@@ -22,6 +22,17 @@ public static class PendingOrders
     /// </summary>
     public static readonly TimeSpan Grace = TimeSpan.FromMinutes(5);
 
+    /// <summary>The longest after it is sent that a live order can still execute (see <see cref="IExchangeConnector.SellAsync"/>).</summary>
+    public static readonly TimeSpan MaxExecutionDelay = TimeSpan.FromMinutes(1);
+
+    /// <summary>
+    /// When a fill of <paramref name="order"/>, found at <paramref name="now"/>, counts against the daily cap: the latest
+    /// it could have executed. An order sent just before midnight may have filled after it, so it counts on the new day;
+    /// one found days later still counts on the day it was sent, not against today's cap.
+    /// </summary>
+    public static DateTimeOffset CountedAt(PendingOrder order, DateTimeOffset now) =>
+        order.SentAt + MaxExecutionDelay < now ? order.SentAt + MaxExecutionDelay : now;
+
     /// <summary>
     /// Looks up every order in <paramref name="pending"/>, removing the settled ones. <paramref name="filled"/> is called
     /// with what each closed order sold (never zero). True when none is left, so selling may continue.

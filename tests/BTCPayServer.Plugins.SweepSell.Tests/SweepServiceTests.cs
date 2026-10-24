@@ -905,6 +905,45 @@ public class SweepServiceTests
     }
 
     [Fact]
+    public async Task KeysWaitingForASlotStillCoalesce()
+    {
+        var runs = new List<string>();
+        var first = new TaskCompletionSource();
+        var release = new TaskCompletionSource();
+        var queue = new CoalescingQueue(async (key, _) =>
+        {
+            lock (runs)
+                runs.Add(key);
+            if (key == "A")
+            {
+                first.TrySetResult();
+                await release.Task;
+            }
+        }, NullLogger.Instance);
+        using var cts = CancellationTokenSource.CreateLinkedTokenSource(Ct);
+        var running = queue.RunAsync(cts.Token);
+
+        queue.Signal("A");
+        await first.Task;
+        queue.Signal("B");
+        await Task.Delay(50, Ct); // B is read and waits for the only slot
+        queue.Signal("B");
+        queue.Signal("B");
+        release.SetResult();
+        while (true)
+        {
+            lock (runs)
+                if (runs.Count >= 2)
+                    break;
+            await Task.Delay(10, Ct);
+        }
+        await Task.Delay(50, Ct);
+        await cts.CancelAsync();
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => running);
+        Assert.Equal(["A", "B"], runs);
+    }
+
+    [Fact]
     public async Task DifferentKeysRunSideBySideButAKeyNeverRunsTwiceAtOnce()
     {
         var runs = new List<string>();

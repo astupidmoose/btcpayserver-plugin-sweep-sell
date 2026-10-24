@@ -41,10 +41,11 @@ public sealed class CoalescingQueue(Func<string, CancellationToken, Task> work, 
         {
             await foreach (var key in _keys.Reader.ReadAllAsync(cancellationToken))
             {
+                // A slot first: when the key's earlier work is the one finishing, it then runs again straight away, in order.
+                // Until then the key stays queued, so signals while it waits for a slot still coalesce into this one run.
+                await slots.WaitAsync(cancellationToken);
                 // Removed before the work starts: a signal during the work queues the key again.
                 _queued.TryRemove(key, out _);
-                // A slot first: when the key's earlier work is the one finishing, it then runs again straight away, in order.
-                await slots.WaitAsync(cancellationToken);
                 lock (_running)
                 {
                     if (!_running.Add(key))

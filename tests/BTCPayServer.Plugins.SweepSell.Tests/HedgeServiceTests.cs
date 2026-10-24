@@ -575,6 +575,29 @@ public class HedgeServiceTests
         Assert.Equal(0.1m, State.Invoices["gbp"].Remaining);
     }
 
+    [Fact]
+    public async Task AFillFoundLaterOfAnOrderSentJustBeforeMidnightCountsOnTheNewDay()
+    {
+        Configure(hedge: h => h.DailyCap = 0.1m);
+        Invoice("inv-1", 0.1m);
+        _clock.Advance(TimeSpan.FromHours(12) - TimeSpan.FromSeconds(30)); // 23:59:30 UTC
+        _exchange.FillUnknown = true;
+        _exchange.OnSell = () => throw new HttpRequestException("timeout");
+        var service = Service();
+        await service.OnInvoiceAsync("inv-1", Ct);
+        var pending = Assert.Single(State.Pending);
+
+        // It filled, possibly after midnight; the next run finds out on the new day.
+        _exchange.OnSell = null;
+        _exchange.FillUnknown = false;
+        _exchange.Found[pending.ClientOrderId] = new OrderLookup(["OAAAAA-BBBBB-CCCCCC"], Open: false, ExecutedAmount: 0.1m);
+        _clock.Advance(TimeSpan.FromMinutes(5));
+        Invoice("inv-2", 0.1m);
+        await service.OnInvoiceAsync("inv-2", Ct);
+        Assert.Single(_exchange.Orders); // today's cap is used by the late fill
+        Assert.Equal(0.1m, State.Sold.On(_clock.GetUtcNow(), "BTC"));
+    }
+
     [Theory]
     [InlineData("pause")]
     [InlineData("live")]

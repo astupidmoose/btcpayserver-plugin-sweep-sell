@@ -194,7 +194,7 @@ public class HedgeService(ISweepSellRepository repository, SecretProtector prote
         }
 
         if (!await PendingOrders.ReconcileAsync(state.Pending, exchange, credentials, now,
-                (order, executed) => Sold(state, order, order.SentAt, executed),
+                (order, executed) => Sold(state, order, PendingOrders.CountedAt(order, clock.GetUtcNow()), executed),
                 (asset, outcome, message) => Record(storeId, state, asset, outcome, message),
                 e => IsRecordedFailure(e, cancellationToken), cancellationToken))
             return;
@@ -367,7 +367,6 @@ public class HedgeService(ISweepSellRepository repository, SecretProtector prote
                 TargetAsset = market,
                 Amount = amount,
                 ReferencePrice = reference,
-                SentAt = clock.GetUtcNow(),
                 HedgeEnabledSince = hedge.EnabledSince
             };
             OrderResult result;
@@ -383,6 +382,8 @@ public class HedgeService(ISweepSellRepository repository, SecretProtector prote
                     return;
                 }
                 // Saved before sending: if the response is lost or the server stops, the next run looks the order up first.
+                // Stamped once the lock is held, just before sending: the fill's day and the lookup grace count from here.
+                pending.SentAt = clock.GetUtcNow();
                 state.Pending.Add(pending);
                 await repository.SaveHedgeStateAsync(storeId, state);
                 try
@@ -442,9 +443,9 @@ public class HedgeService(ISweepSellRepository repository, SecretProtector prote
                     $"No buyer for BTC at {Amount(limitPrice)} {market} or better; nothing was sold ({orders}). Trying again on the next run.");
                 continue;
             }
-            // On the day the fill is known, not the day the order was sent: if the wait crossed midnight, the order may have
-            // filled on the new day, and counting it on the old one would let the next market use the new day's whole cap.
-            Sold(state, pending, clock.GetUtcNow(), fill.ExecutedAmount);
+            // When it last could have filled: if the send crossed midnight, the order may have filled on the new day, and
+            // counting it on the old one would let the next market use the new day's whole cap.
+            Sold(state, pending, PendingOrders.CountedAt(pending, clock.GetUtcNow()), fill.ExecutedAmount);
             available -= fill.ExecutedAmount;
             Record(storeId, state, Asset, ActivityOutcome.Sold,
                 $"Sold {Amount(fill.ExecutedAmount)} of {Amount(amount)} BTC for {market} at {Amount(limitPrice)} or better ({orders}).");
