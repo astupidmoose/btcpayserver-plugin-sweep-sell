@@ -316,6 +316,53 @@ public class SweepServiceTests
         Assert.Empty(State.Pending);
     }
 
+    [Theory]
+    [InlineData("cold")]
+    [InlineData("cap")]
+    public async Task PendingSweepIsNotRebroadcastUnderAChangedRule(string change)
+    {
+        Configure();
+        _wallets.BroadcastResults.Enqueue(() => throw new HttpRequestException("timeout"));
+        var service = Service();
+        await service.RunAsync(_storeId, wait: false, Ct);
+        Assert.Single(State.Pending);
+
+        var rule = _repository.Settings[_storeId].Sweep.Rules[0];
+        if (change == "cold")
+            (rule.ColdPercent, rule.ColdDestination) = (10, "cold-address");
+        else
+            rule.DailyCap = 0.5m;
+        await service.RunAsync(_storeId, wait: false, Ct);
+        Assert.Single(_wallets.Broadcasts);
+        Assert.Single(State.Pending);
+        Assert.Contains("rule changed since it was signed", State.Activity[0].Message);
+
+        (rule.ColdPercent, rule.ColdDestination, rule.DailyCap) = (0, null, 0); // put back
+        await service.RunAsync(_storeId, wait: false, Ct);
+        Assert.Equal(2, _wallets.Broadcasts.Count);
+        Assert.Empty(State.Pending);
+    }
+
+    [Fact]
+    public async Task PendingSweepIsStillLookedForWithoutAnExchangeKey()
+    {
+        Configure();
+        _wallets.BroadcastResults.Enqueue(() => throw new HttpRequestException("timeout"));
+        var service = Service();
+        await service.RunAsync(_storeId, wait: false, Ct);
+        var pending = Assert.Single(State.Pending);
+
+        _repository.Settings[_storeId].ProtectedApiKey = null;
+        await service.RunAsync(_storeId, wait: false, Ct);
+        Assert.Single(_wallets.Broadcasts); // not rebroadcast without the key it was signed for
+        Assert.Single(State.Pending);
+
+        _wallets.Statuses[pending.Txid] = TransactionStatus.Unconfirmed;
+        await service.RunAsync(_storeId, wait: false, Ct);
+        Assert.Empty(State.Pending);
+        Assert.Equal(pending.Txid, Assert.Single(State.Awaiting).Txid);
+    }
+
     [Fact]
     public async Task FirstBroadcastRefusedSendsNothing()
     {

@@ -644,6 +644,9 @@ public class KrakenTests
     [Theory]
     [InlineData("""{"error":[],"result":{}}""")]
     [InlineData("""{"error":[],"result":[{"txid":"00000000000000000000000000000000000000000000000000000000000000ab","status":"Success"}]}""")] // no amount
+    [InlineData("""{"error":[],"result":["not a deposit"]}""")]
+    [InlineData("""{"error":[],"result":[{"amount":"1","status":"Success"}]}""")] // no transaction ID
+    [InlineData("""{"error":[],"result":[{"txid":7,"amount":"1","status":"Success"}]}""")]
     public async Task FindDepositRejectsUnexpectedShapes(string response)
     {
         var http = new FakeHttp();

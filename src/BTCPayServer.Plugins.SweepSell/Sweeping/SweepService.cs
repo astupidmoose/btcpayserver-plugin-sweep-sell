@@ -142,6 +142,8 @@ public class SweepService(ISweepSellRepository repository, SecretProtector prote
         if (exchange is null || credentials is null)
         {
             Record(storeId, state, null, ActivityOutcome.Failed, "No exchange key is saved (or it can't be read), so there is nowhere to sweep to. Save one above.");
+            // Earlier sweeps are still looked for; without the key they were signed for, none is rebroadcast.
+            await SettleAsync(storeId, state, state.Pending.ToList(), cancellationToken);
             return;
         }
         var enabled = settings.Sweep.Rules.Where(r => r.Enabled).ToList();
@@ -340,6 +342,7 @@ public class SweepService(ISweepSellRepository repository, SecretProtector prote
                     Hex = sweep.Hex,
                     ExchangeId = exchange.Id,
                     KeyFingerprint = credentials.Fingerprint(),
+                    Rule = RuleSnapshot(rule),
                     ExchangeAddress = deposit.Address,
                     ToExchange = sweep.Amounts.ToExchange,
                     ColdAddress = coldAddress,
@@ -420,6 +423,15 @@ public class SweepService(ISweepSellRepository repository, SecretProtector prote
                 Record(storeId, state, code, ActivityOutcome.Waiting,
                     $"The earlier sweep of {Amount(pending.Spent)} {code} ({pending.Txid}) isn't on the network, and sweeping (or its {code} rule) is paused, off or in dry run, so it isn't rebroadcast. " +
                     "Nothing more is swept until it is found or removed under Pending sweeps.");
+                return false;
+            }
+            if (current.Sweep.Rules.FirstOrDefault(r => r.Enabled && string.Equals(r.CryptoCode, code, StringComparison.OrdinalIgnoreCase)) is not { } rule ||
+                RuleSnapshot(rule) != pending.Rule)
+            {
+                // Its outputs and amount follow the rule it was signed under: a new cold wallet, share or cap must not be bypassed.
+                Record(storeId, state, code, ActivityOutcome.Waiting,
+                    $"The earlier sweep of {Amount(pending.Spent)} {code} ({pending.Txid}) isn't on the network, and the {code} rule changed since it was signed, so it isn't rebroadcast. " +
+                    "Put the rule back, or remove it under Pending sweeps. Nothing more is swept until then.");
                 return false;
             }
             if (current.ExchangeId != pending.ExchangeId || protector.Credentials(current)?.Fingerprint() is not { } key || key != pending.KeyFingerprint)
@@ -521,6 +533,8 @@ public class SweepService(ISweepSellRepository repository, SecretProtector prote
         }
         return null;
     }
+
+    static string RuleSnapshot(SweepRule rule) => Newtonsoft.Json.JsonConvert.SerializeObject(rule);
 
     static SemaphoreSlim WalletLock(string cryptoCode, string walletKey) =>
         WalletLocks.GetOrAdd($"{cryptoCode.ToUpperInvariant()}:{walletKey}", _ => new SemaphoreSlim(1, 1));

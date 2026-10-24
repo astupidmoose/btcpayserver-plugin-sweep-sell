@@ -56,6 +56,9 @@ public class PendingSweep
 
     public string? ExchangeId { get; set; }
 
+    /// <summary>The coin's sweep rule as it was when the sweep was signed: a changed rule is never applied to it by a rebroadcast.</summary>
+    public string? Rule { get; set; }
+
     /// <summary>The exchange key it was signed for: only that account's deposit address may get it on a rebroadcast.</summary>
     public string? KeyFingerprint { get; set; }
 

@@ -148,7 +148,10 @@ public class KrakenConnector(HttpClient http, TimeProvider? clock = null) : IExc
                 JObject paged when paged["deposit"] is JArray list => (list, Text(paged["next_cursor"])),
                 _ => throw new ExchangeException("Kraken sent an unexpected DepositStatus response.")
             };
-            var entry = deposits.OfType<JObject>().FirstOrDefault(d => string.Equals(Text(d["txid"]), txid, StringComparison.OrdinalIgnoreCase));
+            // Every entry is checked: one that can't be read could be the deposit, so it is never taken as "not there".
+            if (deposits.Any(d => d is not JObject o || o["txid"]?.Type != JTokenType.String || string.IsNullOrWhiteSpace(Text(o["txid"]))))
+                throw new ExchangeException("Kraken sent a deposit without a usable transaction ID.");
+            var entry = deposits.Cast<JObject>().FirstOrDefault(d => string.Equals(Text(d["txid"]), txid, StringComparison.OrdinalIgnoreCase));
             if (entry is not null)
                 return Deposit(entry, asset);
             if (deposits.Count == 0 || string.IsNullOrEmpty(next) || next == cursor)
