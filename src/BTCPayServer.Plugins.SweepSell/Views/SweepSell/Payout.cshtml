@@ -150,9 +150,10 @@
         {
             <h5 class="mt-3">Pending withdrawals</h5>
             <p class="text-warning">
-                These withdrawals got no clear answer from the exchange. Each run looks for them in the exchange's withdrawals; nothing more
-                is withdrawn until they are found, and they are never sent again automatically. Remove one only after checking in your
-                exchange whether it went through.
+                The exchange doesn't list these withdrawals yet: either it gave no clear answer, or it accepted the withdrawal (with the
+                reference shown) but hasn't listed it, for example while it waits for approval. Each run looks for them in the exchange's
+                withdrawals; nothing more is withdrawn until they are found, and they are never sent again automatically. Remove one only
+                after checking in your exchange whether it went through.
             </p>
             <div class="table-responsive">
                 <table class="table">
@@ -164,7 +165,7 @@
                         {
                             <tr>
                                 <td class="text-nowrap">@pending.SentAt.ToString("u")</td>
-                                <td>@pending.Amount @pending.Asset to "@pending.Destination"</td>
+                                <td>@pending.Amount @pending.Asset to "@pending.Destination"@(pending.Reference is null ? "" : $" (accepted as {pending.Reference})")</td>
                                 <td>
                                     <form method="post" asp-action="RemovePending" asp-route-storeId="@storeId" asp-route-id="@pending.Id">
                                         <button type="submit" class="btn btn-sm btn-outline-danger">Remove</button>

@@ -308,10 +308,13 @@ public class PayoutService(IPayoutRepository payouts, ISweepSellRepository repos
         {
             gate.Release();
         }
-        state.Pending.Remove(pending);
+        // Accepted isn't done: an account that needs withdrawals approved returns a reference before the request is listed or
+        // final. It stays pending, counted in full, until the exchange lists it, so nothing more is sent before then.
+        pending.Reference = reference;
         state.Remember(reference);
         state.AddWithdrawn(pending.SentAt, asset, pending.Amount);
-        Record(storeId, state, asset, ActivityOutcome.Sent, $"Withdrew {description} ({reference}).");
+        Record(storeId, state, asset, ActivityOutcome.Sent,
+            $"Withdrew {description} ({reference}). Payout continues once {connector.Name} lists it among its withdrawals.");
     }
 
     /// <summary>Looks for every pending withdrawal in the exchange's list. True when none is left, so payout may continue.</summary>
@@ -329,6 +332,25 @@ public class PayoutService(IPayoutRepository payouts, ISweepSellRepository repos
                     $"{Capitalize(what)} was sent with a different payout key or asset, so it can't be looked up with these settings. Put them back, or " +
                     "check your exchange's withdrawals yourself and remove it under Pending withdrawals. Nothing is withdrawn until then.");
                 return false;
+            }
+            if (pending.Reference is not null)
+            {
+                var listed = recent.FirstOrDefault(r => r.Reference == pending.Reference);
+                if (listed is null)
+                {
+                    var hint = clock.GetUtcNow() - pending.SentAt < PendingGrace ? "Checking again on the next run." :
+                        "If it needs approval on the exchange, approve or decline it there. If you've checked it is gone, remove it under Pending withdrawals.";
+                    Record(storeId, state, pending.Asset, ActivityOutcome.Waiting,
+                        $"{connector.Name} accepted {what} ({pending.Reference}) but doesn't list it yet. Nothing more is withdrawn until it does. {hint}");
+                    continue;
+                }
+                state.Pending.Remove(pending);
+                // Already counted when it was accepted, and left counted even if it failed: the cap is never exceeded.
+                Record(storeId, state, pending.Asset, listed.Status == WithdrawalStatus.Failed ? ActivityOutcome.Failed : ActivityOutcome.Sent,
+                    listed.Status == WithdrawalStatus.Failed
+                        ? $"{connector.Name} lists {what} ({listed.Reference}) as failed or cancelled, so nothing left the account. It still counts against that day's cap. Payout resumes."
+                        : $"{connector.Name} lists {what} ({listed.Reference}, {listed.Status}).");
+                continue;
             }
             var matches = recent.Where(r => Matches(r, pending, state)).ToList();
             if (matches.Count == 1)
@@ -380,8 +402,9 @@ public class PayoutService(IPayoutRepository payouts, ISweepSellRepository repos
         (record.Amount == pending.Amount || record.Amount == pending.NetAmount || record.Amount + record.Fee == pending.Amount);
 
     /// <summary>
-    /// Drops a pending withdrawal the owner has checked on the exchange themselves. Its full amount counts against today's
-    /// cap. Waits for a running payout job of the store. False when there is no such withdrawal.
+    /// Drops a pending withdrawal the owner has checked on the exchange themselves. One whose response was lost counts in
+    /// full against today's cap; one the exchange accepted was counted then. Waits for a running payout job of the store.
+    /// False when there is no such withdrawal.
     /// </summary>
     public Task<bool> RemovePendingAsync(string storeId, Guid id, CancellationToken cancellationToken) =>
         WithStoreLockAsync(storeId, async () =>
@@ -391,16 +414,24 @@ public class PayoutService(IPayoutRepository payouts, ISweepSellRepository repos
             if (pending is null)
                 return false;
             state.Pending.Remove(pending);
-            // Whether it went through isn't known here, so it counts in full (today, the day of removal): the cap is never exceeded.
-            state.AddWithdrawn(clock.GetUtcNow(), pending.Asset, pending.Amount);
-            Record(storeId, state, pending.Asset, ActivityOutcome.Failed,
-                $"The pending withdrawal of {Amount(pending.Amount)} {pending.Asset} to \"{pending.Destination}\" (sent {pending.SentAt:u}) was removed by hand. " +
-                "Its full amount counts against today's cap, since whether it went through isn't known. Payout resumes.");
+            var what = $"The pending withdrawal of {Amount(pending.Amount)} {pending.Asset} to \"{pending.Destination}\" (sent {pending.SentAt:u})";
+            if (pending.Reference is not null)
+            {
+                // Counted when the exchange accepted it.
+                Record(storeId, state, pending.Asset, ActivityOutcome.Failed,
+                    $"{what} ({pending.Reference}) was removed by hand. It already counts against the cap of the day it was sent. Payout resumes.");
+            }
+            else
+            {
+                // Whether it went through isn't known here, so it counts in full (today, the day of removal): the cap is never exceeded.
+                state.AddWithdrawn(clock.GetUtcNow(), pending.Asset, pending.Amount);
+                Record(storeId, state, pending.Asset, ActivityOutcome.Failed,
+                    $"{what} was removed by hand. Its full amount counts against today's cap, since whether it went through isn't known. Payout resumes.");
+            }
             await payouts.SaveStateAsync(storeId, state);
             return true;
         }, cancellationToken);
 
-    /// <summary>Writes a change of where payouts go (exchange, key, asset or destination) to the payout activity.</summary>
     /// <summary>
     /// Saves payout settings with the record of what changed in one step, under the store's payout lock and then its settings
     /// lock (the order a run takes them in). <paramref name="decide"/> gets the saved settings and returns the new ones, or

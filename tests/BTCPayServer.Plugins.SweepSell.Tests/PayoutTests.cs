@@ -62,13 +62,84 @@ public class PayoutTests
 
         var withdrawal = Assert.Single(_exchange.Withdrawals);
         Assert.Equal(("USD", "test-bank", 300.45m, 2m), withdrawal); // rounded down, the amount to keep left, fee capped
-        Assert.Empty(State.Pending);
+        Assert.Equal("REF-1", Assert.Single(State.Pending).Reference); // accepted, but not done until the exchange lists it
         Assert.Equal(300.45m, State.WithdrawnOn(_clock.GetUtcNow(), "USD"));
         Assert.Equal(["REF-1"], State.Known);
         var sent = State.Activity[0];
         Assert.Equal(ActivityOutcome.Sent, sent.Outcome);
         Assert.Contains("REF-1", sent.Message);
         Assert.Contains("\"test-bank\"", sent.Message);
+
+        // The next run finds it listed and counts it only once.
+        _clock.Advance(TimeSpan.FromHours(1));
+        await Service().RunAsync(StoreId, Ct);
+        Assert.Empty(State.Pending);
+        Assert.Contains(State.Activity, a => a.Outcome == ActivityOutcome.Sent && a.Message.Contains("lists the earlier withdrawal") && a.Message.Contains("REF-1"));
+        Assert.Equal(300.45m, State.WithdrawnOn(_clock.GetUtcNow(), "USD"));
+    }
+
+    [Fact]
+    public async Task AnAcceptedWithdrawalStaysPendingUntilTheExchangeListsIt()
+    {
+        // An account that needs withdrawals approved returns a reference but lists the request only once it is approved.
+        Configure(minimum: 10m);
+        _exchange.Balance = 300m;
+        _exchange.AwaitApproval = true;
+        await Service().RunAsync(StoreId, Ct);
+        var pending = Assert.Single(State.Pending);
+        Assert.Equal("REF-1", pending.Reference);
+        Assert.Equal(300m, State.WithdrawnOn(_clock.GetUtcNow(), "USD"));
+
+        _exchange.Balance = 200m;
+        _clock.Advance(TimeSpan.FromMinutes(1));
+        await Service().RunAsync(StoreId, Ct);
+        Assert.Single(_exchange.Withdrawals); // nothing more while it isn't listed
+        Assert.Equal(ActivityOutcome.Waiting, State.Activity[0].Outcome);
+        Assert.Contains("doesn't list it yet", State.Activity[0].Message);
+
+        _clock.Advance(PayoutService.PendingGrace);
+        await Service().RunAsync(StoreId, Ct);
+        Assert.Single(_exchange.Withdrawals); // never treated as lost, and never matched by amount
+        Assert.Single(State.Pending);
+        Assert.Equal(ActivityOutcome.Waiting, State.Activity[0].Outcome);
+        Assert.Contains("approve or decline it there", State.Activity[0].Message);
+
+        // Approved and paid out: listed, so payout resumes in the same run, still counting the first one once.
+        _exchange.Unlisted.Clear();
+        _exchange.AwaitApproval = false;
+        _exchange.Settle();
+        await Service().RunAsync(StoreId, Ct);
+        Assert.Equal(2, _exchange.Withdrawals.Count);
+        Assert.Equal(500m, State.WithdrawnOn(_clock.GetUtcNow(), "USD"));
+    }
+
+    [Fact]
+    public async Task AnAcceptedWithdrawalThatFailsStaysCounted()
+    {
+        Configure(minimum: 10m, cap: 400m);
+        _exchange.Balance = 300m;
+        await Service().RunAsync(StoreId, Ct);
+        _exchange.Records[0] = _exchange.Records[0] with { Status = WithdrawalStatus.Failed };
+        _exchange.Balance = 300m; // returned
+        _clock.Advance(TimeSpan.FromMinutes(1));
+        await Service().RunAsync(StoreId, Ct);
+        Assert.Contains(State.Activity, a => a.Outcome == ActivityOutcome.Failed && a.Message.Contains("still counts against that day's cap"));
+        Assert.Equal(100m, _exchange.Withdrawals[1].Amount); // what the cap had left
+        Assert.Equal(400m, State.WithdrawnOn(_clock.GetUtcNow(), "USD"));
+    }
+
+    [Fact]
+    public async Task RemovingAnAcceptedWithdrawalDoesntCountItTwice()
+    {
+        Configure(minimum: 10m);
+        _exchange.Balance = 300m;
+        _exchange.AwaitApproval = true;
+        await Service().RunAsync(StoreId, Ct);
+        var pending = Assert.Single(State.Pending);
+        Assert.True(await Service().RemovePendingAsync(StoreId, pending.Id, Ct));
+        Assert.Empty(State.Pending);
+        Assert.Equal(300m, State.WithdrawnOn(_clock.GetUtcNow(), "USD"));
+        Assert.Contains("REF-1", State.Activity[0].Message);
     }
 
     [Fact]
@@ -449,6 +520,11 @@ public class PayoutTests
         public List<string> Calls { get; } = [];
         public Exception? WithdrawError { get; set; }
         public bool LoseResponse { get; set; }
+
+        /// <summary>New withdrawals are accepted but not listed, as on an account where they wait for approval.</summary>
+        public bool AwaitApproval { get; set; }
+
+        public HashSet<string> Unlisted { get; } = [];
         public Action? OnQuote { get; set; }
         public Action? OnWithdraw { get; set; }
 
@@ -486,6 +562,8 @@ public class PayoutTests
             var reference = $"REF-{Withdrawals.Count}";
             Balance -= amount;
             Records.Add(new WithdrawalRecord(reference, destination, amount - Fee, Fee, clock.GetUtcNow(), WithdrawalStatus.InProgress));
+            if (AwaitApproval)
+                Unlisted.Add(reference);
             OnWithdraw?.Invoke();
             if (LoseResponse)
                 throw new HttpRequestException("The response was lost");
@@ -496,7 +574,7 @@ public class PayoutTests
             CancellationToken cancellationToken)
         {
             Calls.Add("recent");
-            return Task.FromResult<IReadOnlyList<WithdrawalRecord>>(Records.Where(r => r.RequestedAt >= since).ToList());
+            return Task.FromResult<IReadOnlyList<WithdrawalRecord>>(Records.Where(r => r.RequestedAt >= since && !Unlisted.Contains(r.Reference)).ToList());
         }
 
         public Task<CredentialsCheck> TestCredentialsAsync(ExchangeCredentials credentials, string asset, CancellationToken cancellationToken) =>

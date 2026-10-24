@@ -15,7 +15,8 @@ public class PayoutState
     public DateTimeOffset? LastRun { get; set; }
 
     /// <summary>
-    /// Withdrawals sent whose outcome isn't known (the response was lost). Each is saved before it is sent, and nothing
+    /// Withdrawals sent that the exchange doesn't list yet: the response was lost, or it was accepted but isn't listed (an
+    /// account that needs withdrawals approved lists them only once approved). Each is saved before it is sent, and nothing
     /// more is withdrawn until it is found in the exchange's withdrawals or the owner removes it.
     /// </summary>
     public List<PendingWithdrawal> Pending { get; set; } = [];
@@ -94,6 +95,12 @@ public class PendingWithdrawal
     public decimal Fee { get; set; }
 
     public DateTimeOffset SentAt { get; set; }
+
+    /// <summary>
+    /// The exchange's reference when it accepted the withdrawal. Set means it is already counted against the cap and is
+    /// looked up by this reference; null means the response was lost and it is matched by amount, destination and time.
+    /// </summary>
+    public string? Reference { get; set; }
 
     /// <summary>
     /// The exchange's withdrawals already listed just before this one was sent, which can never be it: an earlier withdrawal

@@ -21,7 +21,7 @@ public class KrakenWithdrawals(KrakenConnector kraken) : IWithdrawalConnector
 
     public string KeyPermissionsHelp =>
         "In Kraken: Settings > API > Create key. Use a separate key from the trading key, and tick only Query Funds and Withdraw Funds. " +
-        "Never tick any order permission, nor Add or Update Withdrawal Addresses (payout refuses a key that has them). Payouts only go to a withdrawal destination you already saved and verified in Kraken; " +
+        "Tick nothing else: payout refuses a key with any other permission, such as an order permission or Add or Update Withdrawal Addresses. Payouts only go to a withdrawal destination you already saved and verified in Kraken; " +
         "enter its name exactly as Kraken shows it.";
 
     public async Task<decimal> GetAvailableBalanceAsync(ExchangeCredentials credentials, string asset, CancellationToken cancellationToken) =>
@@ -164,20 +164,24 @@ public class KrakenWithdrawals(KrakenConnector kraken) : IWithdrawalConnector
         try
         {
             var problems = await GetKeyProblemsAsync(credentials, cancellationToken);
-            checks.Add(new PermissionCheck("No Add or Update Withdrawal Addresses", problems.Count == 0, problems.Count == 0 ? null : string.Join(" ", problems)));
+            checks.Add(new PermissionCheck("No Other Permissions", problems.Count == 0, problems.Count == 0 ? null : string.Join(" ", problems)));
         }
         catch (ExchangeException e)
         {
-            checks.Add(new PermissionCheck("No Add or Update Withdrawal Addresses", false, $"Could not read the key's permissions: {e.Message}"));
+            checks.Add(new PermissionCheck("No Other Permissions", false, $"Could not read the key's permissions: {e.Message}"));
         }
         return new CredentialsCheck(checks);
     }
 
-    static readonly Dictionary<string, string> ForbiddenPermissions = new()
+    // Payout needs only these. Anything else is refused: the key is worth stealing, so it gets nothing it doesn't use.
+    static readonly HashSet<string> AllowedPermissions = ["query-funds", "withdraw-funds"];
+
+    static readonly Dictionary<string, string> PermissionProblems = new()
     {
-        ["add-withdraw-address"] = "This key can add withdrawal addresses, so a stolen copy could send funds anywhere. Create a payout key without it.",
-        ["update-withdraw-address"] = "This key can update withdrawal addresses, so a stolen copy could redirect funds. Create a payout key without it.",
-        ["modify-trades"] = "This key can place orders. Create a payout key with only Query Funds and Withdraw Funds."
+        ["add-withdraw-address"] = "This key can add withdrawal addresses, so a stolen copy could send funds anywhere.",
+        ["update-withdraw-address"] = "This key can update withdrawal addresses, so a stolen copy could redirect funds.",
+        ["modify-trades"] = "This key can place orders.",
+        ["close-trades"] = "This key can cancel or close orders."
     };
 
     public async Task<IReadOnlyList<string>> GetKeyProblemsAsync(ExchangeCredentials credentials, CancellationToken cancellationToken)
@@ -185,7 +189,12 @@ public class KrakenWithdrawals(KrakenConnector kraken) : IWithdrawalConnector
         var info = Expect<JObject>(await kraken.PrivateAsync(credentials, "GetApiKeyInfo", [], cancellationToken), "GetApiKeyInfo");
         if (info["permissions"] is not JArray permissions || permissions.Any(p => p.Type != JTokenType.String))
             throw new ExchangeException("Kraken sent no permission list for the key.");
-        return permissions.Select(p => (string)p!).Where(ForbiddenPermissions.ContainsKey).Distinct().Select(p => ForbiddenPermissions[p]).ToList();
+        var problems = permissions.Select(p => (string)p!).Where(p => !AllowedPermissions.Contains(p)).Distinct()
+            .Select(p => PermissionProblems.GetValueOrDefault(p, $"This key has the {p} permission, which payout doesn't use."))
+            .ToList();
+        if (problems.Count > 0)
+            problems.Add("Create a payout key with only Query Funds and Withdraw Funds.");
+        return problems;
     }
 
     async Task<JArray> AddressesAsync(ExchangeCredentials credentials, string asset, string? destination, CancellationToken cancellationToken)

@@ -222,7 +222,7 @@ public class KrakenWithdrawalsTests
         http.Responses["/0/private/AddOrder"] = addOrder;
         http.Responses["/0/private/GetApiKeyInfo"] = """{"error":[],"result":{"api_key_name":"test","permissions":["query-funds","withdraw-funds"]}}""";
         var check = await kraken.TestCredentialsAsync(Credentials, "USD", Ct);
-        Assert.Equal(["Query Funds", "Withdraw Funds", "No Create & Modify Orders", "No Add or Update Withdrawal Addresses"], check.Checks.Select(c => c.Permission));
+        Assert.Equal(["Query Funds", "Withdraw Funds", "No Create & Modify Orders", "No Other Permissions"], check.Checks.Select(c => c.Permission));
         Assert.Equal(ok, check.AllOk);
         Assert.Contains("validate=true", Body(http, "/0/private/AddOrder"));
         Assert.Contains("asset=USD", Body(http, "/0/private/WithdrawMethods"));
@@ -230,9 +230,12 @@ public class KrakenWithdrawalsTests
 
     [Theory]
     [InlineData("""["query-funds","withdraw-funds"]""", 0)]
-    [InlineData("""["query-funds","withdraw-funds","add-withdraw-address"]""", 1)]
-    [InlineData("""["withdraw-funds","update-withdraw-address","add-withdraw-address","modify-trades"]""", 3)]
-    public async Task KeysThatCanManageDestinationsOrTradeAreRefused(string permissions, int problems)
+    [InlineData("""["withdraw-funds"]""", 0)]
+    [InlineData("""["query-funds","withdraw-funds","add-withdraw-address"]""", 2)]
+    [InlineData("""["withdraw-funds","update-withdraw-address","add-withdraw-address","modify-trades"]""", 4)]
+    [InlineData("""["query-funds","withdraw-funds","close-trades"]""", 2)]
+    [InlineData("""["query-funds","withdraw-funds","earn-funds","query-ledger","some-new-permission"]""", 4)]
+    public async Task KeysWithAnyOtherPermissionAreRefused(string permissions, int problems)
     {
         var (http, kraken) = Setup();
         http.Responses["/0/private/GetApiKeyInfo"] = $$$"""{"error":[],"result":{"api_key_name":"test","permissions":{{{permissions}}}}}""";
@@ -240,6 +243,10 @@ public class KrakenWithdrawalsTests
         Assert.Equal(problems, found.Count);
         if (permissions.Contains("add-withdraw-address"))
             Assert.Contains(found, p => p.Contains("add withdrawal addresses"));
+        if (permissions.Contains("close-trades"))
+            Assert.Contains(found, p => p.Contains("cancel or close orders"));
+        if (permissions.Contains("some-new-permission"))
+            Assert.Contains(found, p => p.Contains("some-new-permission"));
     }
 
     [Theory]
