@@ -66,6 +66,9 @@ public class KrakenTests
     [InlineData("/0/public/AssetPairs", """{"error":[],"result":"XBTUSD"}""")]
     [InlineData("/0/public/AssetPairs", """{"error":[],"result":{"XXBTZUSD":{"ordermin":"0.00005","costmin":"0.5","lot_decimals":"8"}}}""")]
     [InlineData("/0/public/Ticker", """{"error":[],"result":{"XXBTZUSD":{"c":"60000"}}}""")]
+    [InlineData("/0/public/Ticker", """{"error":[],"result":{"XXBTZUSD":{"c":["60000","1"],"p":["60000","60000"]}}}""")] // no bid
+    [InlineData("/0/public/Ticker", """{"error":[],"result":{"XXBTZUSD":{"c":["60000","1"],"b":["59990","1","1"],"p":["60000"]}}}""")] // no 24-hour average
+    [InlineData("/0/public/Ticker", """{"error":[],"result":{"XXBTZUSD":{"c":["60000","1"],"b":["59990","1","1"],"p":["0","0"]}}}""")]
     public async Task UnexpectedResponseShapesFailAsExchangeErrors(string path, string response)
     {
         var http = new FakeHttp();
@@ -152,7 +155,7 @@ public class KrakenTests
         var http = new FakeHttp();
         http.Responses["/0/private/AddOrder"] = """{"error":[],"result":{"descr":{"order":"sell"},"txid":""" + txid + "}}";
         await Assert.ThrowsAsync<ExchangeException>(() => new KrakenConnector(http.Client())
-            .SellAtMarketAsync(Credentials, "BTC", "CAD", 0.1m, OrderId, validateOnly: false, TestContext.Current.CancellationToken));
+            .SellAsync(Credentials, "BTC", "CAD", 0.1m, 50000m, OrderId, validateOnly: false, TestContext.Current.CancellationToken));
     }
 
     [Fact]
@@ -255,8 +258,8 @@ public class KrakenTests
         http.Responses["/0/private/DepositMethods"] = """{"error":[],"result":[]}""";
         http.Responses["/0/private/OpenOrders"] = """{"error":[],"result":{"open":{}}}""";
         http.Responses["/0/private/ClosedOrders"] = """{"error":[],"result":{"closed":{},"count":0}}""";
-        http.Responses["/0/public/AssetPairs"] = """{"error":[],"result":{"XXBTZUSD":{"ordermin":"0.00005","costmin":"0.5","lot_decimals":8}}}""";
-        http.Responses["/0/public/Ticker"] = """{"error":[],"result":{"XXBTZUSD":{"c":["100000.0","0.01"]}}}""";
+        http.Responses["/0/public/AssetPairs"] = """{"error":[],"result":{"XXBTZUSD":{"ordermin":"0.00005","costmin":"0.5","lot_decimals":8,"pair_decimals":1}}}""";
+        http.Responses["/0/public/Ticker"] = """{"error":[],"result":{"XXBTZUSD":{"c":["100000.0","0.01"],"b":["99990.0","1","1.000"],"p":["100100.0","100050.0"]}}}""";
         http.Responses["/0/private/AddOrder"] = """{"error":["EOrder:Cost minimum not met"]}""";
         var check = await new KrakenConnector(http.Client()).TestCredentialsAsync(Credentials, TestContext.Current.CancellationToken);
         Assert.True(check.AllOk);
@@ -346,14 +349,15 @@ public class KrakenTests
     public async Task PriceAndMarketRules()
     {
         var http = new FakeHttp();
-        http.Responses["/0/public/Ticker"] = """{"error":[],"result":{"XXBTZCAD":{"c":["123456.7","0.01"]}}}""";
-        http.Responses["/0/public/AssetPairs"] = """{"error":[],"result":{"XXBTZCAD":{"altname":"XBTCAD","ordermin":"0.00005","costmin":"0.5","lot_decimals":8}}}""";
+        http.Responses["/0/public/Ticker"] = """{"error":[],"result":{"XXBTZCAD":{"c":["123456.7","0.01"],"b":["123400.1","2","2.000"],"p":["123000.0","122500.5"]}}}""";
+        http.Responses["/0/public/AssetPairs"] = """{"error":[],"result":{"XXBTZCAD":{"altname":"XBTCAD","ordermin":"0.00005","costmin":"0.5","lot_decimals":8,"pair_decimals":1}}}""";
         var kraken = new KrakenConnector(http.Client());
-        Assert.Equal(123456.7m, await kraken.GetPriceAsync("BTC", "CAD", TestContext.Current.CancellationToken));
+        Assert.Equal(new MarketPrice(123456.7m, 123400.1m, 122500.5m), await kraken.GetPriceAsync("BTC", "CAD", TestContext.Current.CancellationToken));
         var rules = await kraken.GetMarketRulesAsync("BTC", "CAD", TestContext.Current.CancellationToken);
         Assert.Equal(0.00005m, rules.MinimumAmount);
         Assert.Equal(0.5m, rules.MinimumCost);
         Assert.Equal(8, rules.AmountDecimals);
+        Assert.Equal(1, rules.PriceDecimals);
         Assert.Contains("pair=XBTCAD", http.Sent[0].Request.RequestUri!.Query);
     }
 
@@ -361,14 +365,16 @@ public class KrakenTests
     public async Task ValidateOnlySellIsNotPlaced()
     {
         var http = new FakeHttp();
-        http.Responses["/0/private/AddOrder"] = """{"error":[],"result":{"descr":{"order":"sell 0.01000000 XBTCAD @ market"}}}""";
-        var result = await new KrakenConnector(http.Client()).SellAtMarketAsync(Credentials, "BTC", "CAD", 0.01m, OrderId, validateOnly: true, TestContext.Current.CancellationToken);
+        http.Responses["/0/private/AddOrder"] = """{"error":[],"result":{"descr":{"order":"sell 0.01000000 XBTCAD @ limit 120000.0"}}}""";
+        var result = await new KrakenConnector(http.Client()).SellAsync(Credentials, "BTC", "CAD", 0.01m, 120000.0m, OrderId, validateOnly: true, TestContext.Current.CancellationToken);
         Assert.False(result.Placed);
         Assert.Empty(result.OrderIds);
         var body = http.Sent.Single().Body;
         Assert.Contains("validate=true", body);
         Assert.Contains("type=sell", body);
-        Assert.Contains("ordertype=market", body);
+        Assert.Contains("ordertype=limit", body);
+        Assert.Contains("price=120000.0", body);
+        Assert.Contains("timeinforce=IOC", body); // never rests on the book, never sells below the limit
         Assert.Contains("volume=0.01", body);
         Assert.Contains("cl_ord_id=" + OrderId.ToString("D"), body);
     }
@@ -377,8 +383,8 @@ public class KrakenTests
     public async Task PlacedSellReturnsTheOrderIds()
     {
         var http = new FakeHttp();
-        http.Responses["/0/private/AddOrder"] = """{"error":[],"result":{"descr":{"order":"sell 300 XDGXBT @ market"},"txid":["OEXAMP-LE000-ORDER1"]}}""";
-        var result = await new KrakenConnector(http.Client()).SellAtMarketAsync(Credentials, "DOGE", "BTC", 300m, OrderId, validateOnly: false, TestContext.Current.CancellationToken);
+        http.Responses["/0/private/AddOrder"] = """{"error":[],"result":{"descr":{"order":"sell 300 XDGXBT @ limit 0.0000015"},"txid":["OEXAMP-LE000-ORDER1"]}}""";
+        var result = await new KrakenConnector(http.Client()).SellAsync(Credentials, "DOGE", "BTC", 300m, 0.0000015m, OrderId, validateOnly: false, TestContext.Current.CancellationToken);
         Assert.True(result.Placed);
         Assert.Equal(["OEXAMP-LE000-ORDER1"], result.OrderIds);
         Assert.DoesNotContain("validate", http.Sent.Single().Body);
@@ -401,8 +407,8 @@ public class KrakenTests
         http.Responses["/0/private/DepositMethods"] = """{"error":["EGeneral:Permission denied"]}""";
         http.Responses["/0/private/OpenOrders"] = """{"error":[],"result":{"open":{}}}""";
         http.Responses["/0/private/ClosedOrders"] = """{"error":[],"result":{"closed":{},"count":0}}""";
-        http.Responses["/0/public/AssetPairs"] = """{"error":[],"result":{"XXBTZUSD":{"ordermin":"0.00005","costmin":"0.5","lot_decimals":8}}}""";
-        http.Responses["/0/public/Ticker"] = """{"error":[],"result":{"XXBTZUSD":{"c":["100000.0","0.01"]}}}""";
+        http.Responses["/0/public/AssetPairs"] = """{"error":[],"result":{"XXBTZUSD":{"ordermin":"0.00005","costmin":"0.5","lot_decimals":8,"pair_decimals":1}}}""";
+        http.Responses["/0/public/Ticker"] = """{"error":[],"result":{"XXBTZUSD":{"c":["100000.0","0.01"],"b":["99990.0","1","1.000"],"p":["100100.0","100050.0"]}}}""";
         http.Responses["/0/private/AddOrder"] = """{"error":["EOrder:Insufficient funds"]}""";
         var check = await new KrakenConnector(http.Client()).TestCredentialsAsync(Credentials, TestContext.Current.CancellationToken);
         Assert.False(check.AllOk);
@@ -411,7 +417,11 @@ public class KrakenTests
         Assert.True(check.Checks.Single(c => c.Permission == "Query Open Orders & Trades").Ok);
         Assert.True(check.Checks.Single(c => c.Permission == "Query Closed Orders & Trades").Ok);
         Assert.True(check.Checks.Single(c => c.Permission == "Create & Modify Orders").Ok);
-        Assert.All(http.Sent.Where(s => s.Request.RequestUri!.AbsolutePath == "/0/private/AddOrder"), s => Assert.Contains("validate=true", s.Body));
+        var order = http.Sent.Single(s => s.Request.RequestUri!.AbsolutePath == "/0/private/AddOrder").Body;
+        Assert.Contains("validate=true", order);
+        Assert.Contains("ordertype=limit", order);
+        Assert.Contains("price=200000&", order); // twice the last price: could never fill
+        Assert.Contains("timeinforce=IOC", order);
     }
 
     [Theory]
@@ -423,14 +433,14 @@ public class KrakenTests
     [InlineData("0.01", 8, "0.0001", "0.5", "0.01")]
     public void SellableRoundsDownAndRespectsBothMinimums(string amount, int decimals, string minimum, string minimumCost, string expected)
     {
-        var rules = new MarketRules("X", "Y", D(minimum), D(minimumCost), decimals);
+        var rules = new MarketRules("X", "Y", D(minimum), D(minimumCost), decimals, 8);
         Assert.Equal(D(expected), rules.Sellable(D(amount), price: 100m));
     }
 
     [Fact]
     public void MinimumSellAmountCoversTheCostMinimumAtThisPrice()
     {
-        var rules = new MarketRules("X", "Y", 0.0001m, 0.5m, 8);
+        var rules = new MarketRules("X", "Y", 0.0001m, 0.5m, 8, 8);
         Assert.Equal(0.005m, rules.MinimumSellAmount(100m));
         Assert.Equal(0.0001m, rules.MinimumSellAmount(100000m));
         Assert.Equal(0.00333334m, rules.MinimumSellAmount(150m)); // rounded up to 8 decimals
@@ -438,7 +448,7 @@ public class KrakenTests
 
     [Fact]
     public void UnsupportedPrecisionIsRefused() =>
-        Assert.Throws<ExchangeException>(() => new MarketRules("X", "Y", 0, 0, 40).Sellable(1m, 1m));
+        Assert.Throws<ExchangeException>(() => new MarketRules("X", "Y", 0, 0, 40, 8).Sellable(1m, 1m));
 
     [Fact]
     public async Task PlacedSellWithoutAnOrderIdFails()
@@ -446,7 +456,7 @@ public class KrakenTests
         var http = new FakeHttp();
         http.Responses["/0/private/AddOrder"] = """{"error":[],"result":{"descr":{"order":"sell 300 XDGXBT @ market"}}}""";
         var e = await Assert.ThrowsAsync<ExchangeException>(() => new KrakenConnector(http.Client())
-            .SellAtMarketAsync(Credentials, "DOGE", "BTC", 300m, OrderId, validateOnly: false, TestContext.Current.CancellationToken));
+            .SellAsync(Credentials, "DOGE", "BTC", 300m, 0.0000015m, OrderId, validateOnly: false, TestContext.Current.CancellationToken));
         Assert.Contains(OrderId.ToString("D"), e.Message);
     }
 
@@ -462,9 +472,12 @@ public class KrakenTests
     }
 
     [Theory]
-    [InlineData("""{"ordermin":"0.00005","lot_decimals":8}""")] // no costmin
-    [InlineData("""{"costmin":"0.5","lot_decimals":8}""")] // no ordermin
-    [InlineData("""{"ordermin":"0.00005","costmin":"0.5"}""")] // no precision
+    [InlineData("""{"ordermin":"0.00005","lot_decimals":8,"pair_decimals":1}""")] // no costmin
+    [InlineData("""{"costmin":"0.5","lot_decimals":8,"pair_decimals":1}""")] // no ordermin
+    [InlineData("""{"ordermin":"0.00005","costmin":"0.5","pair_decimals":1}""")] // no amount precision
+    [InlineData("""{"ordermin":"0.00005","costmin":"0.5","lot_decimals":8}""")] // no price precision
+    [InlineData("""{"ordermin":"0.00005","costmin":"0.5","lot_decimals":8,"pair_decimals":"1"}""")]
+    [InlineData("""{"ordermin":"0.00005","costmin":"0.5","lot_decimals":8,"pair_decimals":-1}""")]
     [InlineData("""{"ordermin":"0.00005","costmin":"0.5","lot_decimals":99}""")]
     [InlineData("""{"ordermin":"0.00005","costmin":"0.5","lot_decimals":99999999999999999999999}""")]
     public async Task IncompleteMarketRulesFail(string pair)
@@ -474,6 +487,14 @@ public class KrakenTests
         await Assert.ThrowsAsync<ExchangeException>(() =>
             new KrakenConnector(http.Client()).GetMarketRulesAsync("BTC", "CAD", TestContext.Current.CancellationToken));
     }
+
+    [Theory]
+    [InlineData(1, "123.4567", "123.5")] // rounded up: a sell limit never undercuts its floor
+    [InlineData(1, "123.4", "123.4")]
+    [InlineData(7, "0.0000014999", "0.0000015")]
+    [InlineData(0, "0.2", "1")]
+    public void LimitPriceIsRoundedUpToThePricePrecision(int priceDecimals, string floor, string expected) =>
+        Assert.Equal(D(expected), new MarketRules("X", "Y", 0, 0, 8, priceDecimals).LimitPriceAtLeast(D(floor)));
 
     static decimal D(string value) => decimal.Parse(value, System.Globalization.CultureInfo.InvariantCulture);
 

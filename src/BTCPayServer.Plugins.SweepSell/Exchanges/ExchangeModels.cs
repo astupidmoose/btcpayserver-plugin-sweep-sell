@@ -25,7 +25,14 @@ public sealed record DepositDestination(string Address, string? Tag)
     public bool RequiresTag => !string.IsNullOrEmpty(Tag);
 }
 
-public sealed record MarketRules(string BaseAsset, string QuoteAsset, decimal MinimumAmount, decimal MinimumCost, int AmountDecimals)
+/// <summary>
+/// Prices of one <c>BaseAsset</c> in the quote asset. <see cref="DailyAverage"/> (volume-weighted, last 24 hours) is the
+/// reference for price floors: a single trade on a thin market moves <see cref="Last"/> but barely moves it.
+/// </summary>
+public sealed record MarketPrice(decimal Last, decimal Bid, decimal DailyAverage);
+
+public sealed record MarketRules(string BaseAsset, string QuoteAsset, decimal MinimumAmount, decimal MinimumCost, int AmountDecimals,
+    int PriceDecimals)
 {
     /// <summary>Largest precision a decimal can scale by without overflow for realistic amounts.</summary>
     public const int MaxAmountDecimals = 18;
@@ -53,13 +60,27 @@ public sealed record MarketRules(string BaseAsset, string QuoteAsset, decimal Mi
         return Math.Ceiling(minimum * factor) / factor;
     }
 
-    // Built in decimal, never double: amounts are money.
-    decimal Factor()
+    /// <summary>
+    /// The lowest price this market accepts that is not below <paramref name="floor"/>: rounded up to the price precision,
+    /// so a sell limit never undercuts the floor.
+    /// </summary>
+    public decimal LimitPriceAtLeast(decimal floor)
     {
-        if (AmountDecimals is < 0 or > MaxAmountDecimals)
-            throw new ExchangeException($"Unsupported amount precision {AmountDecimals} for {BaseAsset}/{QuoteAsset}.");
+        if (floor <= 0)
+            throw new ExchangeException($"No valid price floor for {BaseAsset}/{QuoteAsset}.");
+        var factor = Factor(PriceDecimals, "price");
+        return Math.Ceiling(floor * factor) / factor;
+    }
+
+    decimal Factor() => Factor(AmountDecimals, "amount");
+
+    // Built in decimal, never double: amounts are money.
+    decimal Factor(int decimals, string what)
+    {
+        if (decimals is < 0 or > MaxAmountDecimals)
+            throw new ExchangeException($"Unsupported {what} precision {decimals} for {BaseAsset}/{QuoteAsset}.");
         var factor = 1m;
-        for (var i = 0; i < AmountDecimals; i++)
+        for (var i = 0; i < decimals; i++)
             factor *= 10m;
         return factor;
     }

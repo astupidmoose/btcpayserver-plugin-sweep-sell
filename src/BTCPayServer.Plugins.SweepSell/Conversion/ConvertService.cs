@@ -115,22 +115,48 @@ public class ConvertService(ISweepSellRepository repository, SecretProtector pro
         }
 
         var target = convert.TargetAsset;
+        var slippage = Math.Clamp(convert.MaxSlippagePercent, ConvertSettings.MinSlippageLimit, ConvertSettings.MaxSlippageLimit) / 100m;
         foreach (var asset in convert.Assets.Where(a => !string.Equals(a, target, StringComparison.OrdinalIgnoreCase)))
         {
             var available = balances.GetValueOrDefault(asset);
             if (available <= 0)
                 continue;
-            decimal amount;
-            MarketRules rules;
+            decimal amount, limitPrice, reference;
             try
             {
-                rules = await exchange.GetMarketRulesAsync(asset, target, cancellationToken);
+                var rules = await exchange.GetMarketRulesAsync(asset, target, cancellationToken);
                 var price = await exchange.GetPriceAsync(asset, target, cancellationToken);
-                amount = rules.Sellable(available, price);
-                if (amount == 0)
+                // The floor is set from the 24-hour average, which one trade on a thin market can't drag down.
+                reference = price.DailyAverage;
+                if (reference <= 0)
+                    throw new ExchangeException($"{exchange.Name} returned no average price for {asset}/{target}.");
+                var floor = reference * (1 - slippage);
+                if (price.Bid < floor)
                 {
                     Record(storeId, state, asset, ActivityOutcome.Waiting,
-                        $"{Amount(available)} {asset} is below {exchange.Name}'s minimum order of {Amount(rules.MinimumSellAmount(price))} {asset}. Waiting for more.");
+                        $"The best bid for {asset} ({Amount(price.Bid)} {target}) is more than {Amount(slippage * 100)}% below the 24-hour average ({Amount(reference)} {target}). Waiting for the price to recover.");
+                    continue;
+                }
+                limitPrice = rules.LimitPriceAtLeast(floor);
+                var wanted = available;
+                if (convert.DailyCap > 0)
+                {
+                    var left = convert.DailyCap - state.SoldOn(clock.GetUtcNow());
+                    if (left <= 0)
+                    {
+                        Record(storeId, state, asset, ActivityOutcome.Waiting,
+                            $"Today's cap of {Amount(convert.DailyCap)} {target} is reached. Selling resumes tomorrow (UTC).");
+                        continue;
+                    }
+                    wanted = Math.Min(available, left / reference);
+                }
+                // Minimums are checked at the limit price: the lowest price the order can fill at.
+                amount = rules.Sellable(wanted, limitPrice);
+                if (amount == 0)
+                {
+                    Record(storeId, state, asset, ActivityOutcome.Waiting, wanted < available
+                        ? $"What today's cap still allows of {asset} is below {exchange.Name}'s minimum order. Selling resumes tomorrow (UTC)."
+                        : $"{Amount(available)} {asset} is below {exchange.Name}'s minimum order of {Amount(rules.MinimumSellAmount(limitPrice))} {asset}. Waiting for more.");
                     continue;
                 }
             }
@@ -144,9 +170,9 @@ public class ConvertService(ISweepSellRepository repository, SecretProtector pro
             {
                 try
                 {
-                    var check = await exchange.SellAtMarketAsync(credentials, asset, target, amount, Guid.NewGuid(), validateOnly: true, cancellationToken);
+                    var check = await exchange.SellAsync(credentials, asset, target, amount, limitPrice, Guid.NewGuid(), validateOnly: true, cancellationToken);
                     Record(storeId, state, asset, ActivityOutcome.DryRun,
-                        $"Dry run: would sell {Amount(amount)} {asset} for {target} ({check.Description}). {exchange.Name} accepted the order check; nothing was sold.");
+                        $"Dry run: would sell up to {Amount(amount)} {asset} for {target} at {Amount(limitPrice)} or better ({check.Description}). {exchange.Name} accepted the order check; nothing was sold.");
                 }
                 catch (Exception e) when (IsExchangeFailure(e, cancellationToken))
                 {
@@ -164,6 +190,7 @@ public class ConvertService(ISweepSellRepository repository, SecretProtector pro
                 Asset = asset,
                 TargetAsset = target,
                 Amount = amount,
+                ReferencePrice = reference,
                 SentAt = clock.GetUtcNow()
             };
             state.Pending.Add(pending);
@@ -171,7 +198,7 @@ public class ConvertService(ISweepSellRepository repository, SecretProtector pro
             OrderResult result;
             try
             {
-                result = await exchange.SellAtMarketAsync(credentials, asset, target, amount, pending.ClientOrderId, validateOnly: false, cancellationToken);
+                result = await exchange.SellAsync(credentials, asset, target, amount, limitPrice, pending.ClientOrderId, validateOnly: false, cancellationToken);
             }
             catch (Exception e) when (!cancellationToken.IsCancellationRequested)
             {
@@ -181,8 +208,36 @@ public class ConvertService(ISweepSellRepository repository, SecretProtector pro
                 return;
             }
             state.Pending.Remove(pending);
-            Record(storeId, state, asset, ActivityOutcome.Sold,
-                $"Sold {Amount(amount)} {asset} for {target} at market ({string.Join(", ", result.OrderIds)}).");
+
+            // An immediate-or-cancel order is done once placed; look up how much filled, for the record and the cap.
+            OrderLookup? fill = null;
+            try
+            {
+                fill = await exchange.FindOrderAsync(credentials, pending.ClientOrderId, cancellationToken);
+            }
+            catch (Exception e) when (IsExchangeFailure(e, cancellationToken))
+            {
+                logger.LogWarning("Sweep & Sell convert, store {StoreId}: could not look up the {Asset} fill: {Error}", storeId, asset, e.Message);
+            }
+            var orders = string.Join(", ", result.OrderIds);
+            if (fill is null)
+            {
+                // Unknown fill: count the whole order against the cap, so the cap is never exceeded.
+                state.AddSold(clock.GetUtcNow(), amount * reference);
+                Record(storeId, state, asset, ActivityOutcome.Sold,
+                    $"Placed a sell of up to {Amount(amount)} {asset} for {target} at {Amount(limitPrice)} or better ({orders}). The fill isn't known yet; check {exchange.Name} for the amount sold.");
+            }
+            else if (fill.ExecutedAmount == 0)
+            {
+                Record(storeId, state, asset, ActivityOutcome.Waiting,
+                    $"No buyer for {asset} at {Amount(limitPrice)} {target} or better; nothing was sold ({orders}). Trying again on the next run.");
+            }
+            else
+            {
+                state.AddSold(clock.GetUtcNow(), fill.ExecutedAmount * reference);
+                Record(storeId, state, asset, ActivityOutcome.Sold,
+                    $"Sold {Amount(fill.ExecutedAmount)} of {Amount(amount)} {asset} for {target} at {Amount(limitPrice)} or better ({orders}).");
+            }
         }
     }
 
@@ -232,6 +287,7 @@ public class ConvertService(ISweepSellRepository repository, SecretProtector pro
                 continue;
             }
             state.Pending.Remove(pending);
+            state.AddSold(clock.GetUtcNow(), lookup.ExecutedAmount * pending.ReferencePrice);
             Record(storeId, state, pending.Asset, ActivityOutcome.Sold,
                 $"Found the earlier sell on {exchange.Name}: {Amount(lookup.ExecutedAmount)} {pending.Asset} sold for {pending.TargetAsset} ({string.Join(", ", lookup.OrderIds)}).");
         }

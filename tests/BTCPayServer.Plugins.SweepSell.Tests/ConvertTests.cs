@@ -54,6 +54,88 @@ public class ConvertTests
     }
 
     [Fact]
+    public async Task OrdersAreImmediateLimitsAtTheFloorBelowTheDailyAverage()
+    {
+        Configure(); // 2% default
+        _exchange.Price = new MarketPrice(Last: 0.0005m, Bid: 0.00099m, DailyAverage: 0.001m); // last trade dragged down
+        _exchange.Balances["DOGE"] = 300m;
+        await Service().RunAsync(StoreId, Ct);
+        var sale = Assert.Single(_exchange.Orders);
+        Assert.Equal(0.00098m, sale.Limit); // 2% below the 24-hour average, not the last trade
+        Assert.Contains("0.00098 or better", State.Activity[0].Message);
+    }
+
+    [Fact]
+    public async Task BidBelowTheFloorWaits()
+    {
+        Configure();
+        _exchange.Price = new MarketPrice(Last: 0.0009m, Bid: 0.00097m, DailyAverage: 0.001m);
+        _exchange.Balances["DOGE"] = 300m;
+        await Service().RunAsync(StoreId, Ct);
+        Assert.Empty(_exchange.Orders);
+        Assert.Equal(ActivityOutcome.Waiting, State.Activity[0].Outcome);
+        Assert.Contains("best bid", State.Activity[0].Message);
+    }
+
+    [Fact]
+    public async Task UnfilledOrderSellsNothingAndDoesNotCountAgainstTheCap()
+    {
+        Configure();
+        _repository.Settings[StoreId].Convert.DailyCap = 1m;
+        _exchange.FillRatio = 0m;
+        _exchange.Balances["DOGE"] = 300m;
+        await Service().RunAsync(StoreId, Ct);
+        Assert.Single(_exchange.Orders);
+        Assert.Equal(ActivityOutcome.Waiting, State.Activity[0].Outcome);
+        Assert.Contains("No buyer", State.Activity[0].Message);
+        Assert.Equal(0m, State.SoldOn(_clock.GetUtcNow()));
+    }
+
+    [Fact]
+    public async Task PartialFillIsRecordedAndCounted()
+    {
+        Configure();
+        _exchange.FillRatio = 0.5m;
+        _exchange.Balances["DOGE"] = 300m;
+        await Service().RunAsync(StoreId, Ct);
+        Assert.Contains("Sold 150 of 300 DOGE", State.Activity[0].Message);
+        Assert.Equal(0.15m, State.SoldOn(_clock.GetUtcNow())); // 150 x 0.001
+    }
+
+    [Fact]
+    public async Task DailyCapLimitsSalesUntilTheNextDay()
+    {
+        Configure();
+        _repository.Settings[StoreId].Convert.DailyCap = 0.1m; // 100 DOGE at 0.001
+        _exchange.Balances["DOGE"] = 300m;
+        await Service().RunAsync(StoreId, Ct);
+        Assert.Equal(100m, Assert.Single(_exchange.Orders).Amount);
+
+        _exchange.Balances["DOGE"] = 200m;
+        _clock.Advance(TimeSpan.FromMinutes(15));
+        await Service().RunAsync(StoreId, Ct);
+        Assert.Single(_exchange.Orders);
+        Assert.Contains("cap", State.Activity[0].Message);
+
+        _clock.Advance(TimeSpan.FromDays(1));
+        await Service().RunAsync(StoreId, Ct);
+        Assert.Equal(2, _exchange.Orders.Count);
+        Assert.Equal(100m, _exchange.Orders[1].Amount);
+    }
+
+    [Fact]
+    public async Task UnknownFillCountsTheWholeOrderAgainstTheCap()
+    {
+        Configure();
+        _repository.Settings[StoreId].Convert.DailyCap = 1m;
+        _exchange.FillUnknown = true;
+        _exchange.Balances["DOGE"] = 300m;
+        await Service().RunAsync(StoreId, Ct);
+        Assert.Equal(0.3m, State.SoldOn(_clock.GetUtcNow()));
+        Assert.Contains("isn't known yet", State.Activity[0].Message);
+    }
+
+    [Fact]
     public async Task DryRunOnlyValidates()
     {
         Configure(dryRun: true);
@@ -274,7 +356,11 @@ public class ConvertTests
             Newtonsoft.Json.JsonConvert.DeserializeObject<ConvertState>(Newtonsoft.Json.JsonConvert.SerializeObject(s))!;
     }
 
-    /// <summary>An exchange with invented markets: every X/BTC pair has a 0.05 minimum, 8 decimals and a price of 0.001.</summary>
+    /// <summary>
+    /// An exchange with invented markets: every X/BTC pair has a 0.05 minimum, 8 amount and 8 price decimals, and trades
+    /// at 0.001 (last, bid and 24-hour average) unless a test changes <see cref="Price"/>. Live sells fill
+    /// <see cref="FillRatio"/> of the amount.
+    /// </summary>
     sealed class FakeExchange : IExchangeConnector
     {
         public const string ExchangeId = "fake";
@@ -284,7 +370,10 @@ public class ConvertTests
 
         public Dictionary<string, decimal> Balances { get; } = new();
         public Dictionary<Guid, OrderLookup> Found { get; } = new();
-        public List<(string Base, string Quote, decimal Amount, bool ValidateOnly, Guid Id)> Orders { get; } = [];
+        public List<(string Base, string Quote, decimal Amount, bool ValidateOnly, Guid Id, decimal Limit)> Orders { get; } = [];
+        public MarketPrice Price { get; set; } = new(0.001m, 0.001m, 0.001m);
+        public decimal FillRatio { get; set; } = 1m;
+        public bool FillUnknown { get; set; }
         public List<string> Calls { get; } = [];
         public Exception? BalanceError { get; set; }
         public Action? OnSell { get; set; }
@@ -298,17 +387,19 @@ public class ConvertTests
         }
 
         public Task<MarketRules> GetMarketRulesAsync(string baseAsset, string quoteAsset, CancellationToken cancellationToken) =>
-            Task.FromResult(new MarketRules(baseAsset, quoteAsset, 0.05m, 0m, 8));
+            Task.FromResult(new MarketRules(baseAsset, quoteAsset, 0.05m, 0m, 8, 8));
 
-        public Task<decimal> GetPriceAsync(string baseAsset, string quoteAsset, CancellationToken cancellationToken) => Task.FromResult(0.001m);
+        public Task<MarketPrice> GetPriceAsync(string baseAsset, string quoteAsset, CancellationToken cancellationToken) => Task.FromResult(Price);
 
-        public Task<OrderResult> SellAtMarketAsync(ExchangeCredentials credentials, string baseAsset, string quoteAsset, decimal amount,
+        public Task<OrderResult> SellAsync(ExchangeCredentials credentials, string baseAsset, string quoteAsset, decimal amount, decimal limitPrice,
             Guid clientOrderId, bool validateOnly, CancellationToken cancellationToken)
         {
             Calls.Add("sell");
-            Orders.Add((baseAsset, quoteAsset, amount, validateOnly, clientOrderId));
+            Orders.Add((baseAsset, quoteAsset, amount, validateOnly, clientOrderId, limitPrice));
             OnSell?.Invoke();
-            return Task.FromResult(new OrderResult(!validateOnly, validateOnly ? [] : ["OAAAAA-BBBBB-CCCCCC"], $"sell {amount} {baseAsset}{quoteAsset} @ market"));
+            if (!validateOnly && !FillUnknown)
+                Found[clientOrderId] = new OrderLookup(["OAAAAA-BBBBB-CCCCCC"], Open: false, ExecutedAmount: amount * FillRatio);
+            return Task.FromResult(new OrderResult(!validateOnly, validateOnly ? [] : ["OAAAAA-BBBBB-CCCCCC"], $"sell {amount} {baseAsset}{quoteAsset} @ limit {limitPrice}"));
         }
 
         public Task<OrderLookup?> FindOrderAsync(ExchangeCredentials credentials, Guid clientOrderId, CancellationToken cancellationToken)

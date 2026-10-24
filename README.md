@@ -8,8 +8,10 @@ Sweep your store's wallets to your exchange and sell what comes in, automaticall
 ## Features
 
 - **Convert at the exchange:** on a schedule, sell chosen coins (e.g. DOGE, LTC) into a target asset
-  (e.g. BTC) as soon as the balance clears the market's minimum order. Starts in dry run, where each
-  order is checked with the exchange but not placed. Every run is listed under Recent activity.
+  (e.g. BTC) as soon as the balance clears the market's minimum order. Orders sell immediately at a
+  price floor (by default 2% below the 24-hour average) or better and cancel whatever can't fill, so a
+  thin market can't take your coins cheaply. Optional daily cap. Starts in dry run, where each order
+  is checked with the exchange but not placed. Every run is listed under Recent activity.
 
 ## Planned features
 

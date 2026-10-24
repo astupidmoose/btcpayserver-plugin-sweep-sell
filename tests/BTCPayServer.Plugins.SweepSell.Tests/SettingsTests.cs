@@ -129,6 +129,22 @@ public class SettingsTests
         Assert.Equal(blocked, conflict is not null);
     }
 
+    [Theory]
+    [InlineData("2", "0", true)]
+    [InlineData("0.05", "0", false)] // too tight to ever fill
+    [InlineData("25", "0", false)] // too loose
+    [InlineData("2", "-1", false)]
+    public void PriceFloorAndCapAreValidated(string slippage, string cap, bool valid)
+    {
+        var errors = UISweepSellController.Validate(new SweepSellSettingsViewModel
+        {
+            ExchangeId = "kraken", ConvertAssets = "DOGE", ConvertTarget = "BTC",
+            ConvertMaxSlippagePercent = decimal.Parse(slippage, System.Globalization.CultureInfo.InvariantCulture),
+            ConvertDailyCap = decimal.Parse(cap, System.Globalization.CultureInfo.InvariantCulture)
+        }, Exchanges);
+        Assert.Equal(valid, !errors.Any());
+    }
+
     [Fact]
     public void ConvertNeedsAnExchange()
     {

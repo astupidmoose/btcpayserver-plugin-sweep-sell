@@ -39,7 +39,7 @@ Mitigations marked *(planned)* arrive with the feature that needs them; the rest
 | Malicious or malformed exchange response (huge amount, wrong address) | Amounts checked against the store's own balances and daily caps; addresses validated for the coin's network before sending *(planned)* |
 | Deposit sent without a required tag or memo is not credited | Connectors return the tag with the address; sweeps refuse destinations that need one *(planned)* |
 | Deposit below the exchange minimum is lost | Minimum deposits read from the exchange; sweeps wait until the exchange's share clears it (connector call in place, sweep logic *(planned)*) |
-| Market order slips badly on a thin market | Daily caps, per-feature minimums, and dry run to observe before going live *(planned)* |
+| Sale fills far below value on a thin or manipulated market | No unpriced market orders: sells are immediate-or-cancel limits at a floor set a configurable percentage (default 2%) below the exchange's 24-hour average price, which a single trade can't drag down; when the best bid is below the floor, nothing is sent. Optional daily cap on value sold, counted pessimistically when a fill is unknown. Dry run to observe before going live. In place for convert; sweeps and hedges *(planned)* |
 | One store reads another's keys | Settings are keyed by store ID and only loaded for the authorized store |
 | Data-protection keys lost after a migration | Decryption failure reads as "no key saved", and the owner re-enters it; nothing crashes or leaks |
 

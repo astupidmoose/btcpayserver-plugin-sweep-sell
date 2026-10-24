@@ -169,6 +169,11 @@ public class UISweepSellController(ISweepSellRepository repository, SecretProtec
         if (vm.ConvertIntervalMinutes is < ConvertSettings.MinIntervalMinutes or > ConvertSettings.MaxIntervalMinutes)
             yield return (nameof(vm.ConvertIntervalMinutes),
                 $"Check between every {ConvertSettings.MinIntervalMinutes} and {ConvertSettings.MaxIntervalMinutes} minutes.");
+        if (vm.ConvertMaxSlippagePercent is < ConvertSettings.MinSlippageLimit or > ConvertSettings.MaxSlippageLimit)
+            yield return (nameof(vm.ConvertMaxSlippagePercent),
+                $"Allow between {ConvertSettings.MinSlippageLimit}% and {ConvertSettings.MaxSlippageLimit}% below the 24-hour average.");
+        if (vm.ConvertDailyCap < 0)
+            yield return (nameof(vm.ConvertDailyCap), "The daily cap can't be negative. Use 0 for no cap.");
         if (vm.ConvertEnabled && assets.Count == 0)
             yield return (nameof(vm.ConvertAssets), "List at least one coin to convert, or turn conversion off.");
         if (vm.ConvertEnabled && string.IsNullOrWhiteSpace(vm.ExchangeId))
@@ -202,7 +207,9 @@ public class UISweepSellController(ISweepSellRepository repository, SecretProtec
                 DryRun = vm.ConvertDryRun,
                 Assets = Tickers(vm.ConvertAssets),
                 TargetAsset = Clean(vm.ConvertTarget)?.ToUpperInvariant() ?? saved.Convert.TargetAsset,
-                IntervalMinutes = vm.ConvertIntervalMinutes
+                IntervalMinutes = vm.ConvertIntervalMinutes,
+                MaxSlippagePercent = vm.ConvertMaxSlippagePercent,
+                DailyCap = vm.ConvertDailyCap
             }
         };
         var key = Clean(vm.ApiKey);
@@ -231,6 +238,8 @@ public class UISweepSellController(ISweepSellRepository repository, SecretProtec
         ConvertAssets = posted?.ConvertAssets ?? string.Join(", ", settings.Convert.Assets),
         ConvertTarget = posted?.ConvertTarget ?? settings.Convert.TargetAsset,
         ConvertIntervalMinutes = posted?.ConvertIntervalMinutes ?? settings.Convert.IntervalMinutes,
+        ConvertMaxSlippagePercent = posted?.ConvertMaxSlippagePercent ?? settings.Convert.MaxSlippagePercent,
+        ConvertDailyCap = posted?.ConvertDailyCap ?? settings.Convert.DailyCap,
         ConvertLastRun = state.LastRun,
         ConvertPending = state.Pending,
         ConvertActivity = state.Activity,
@@ -283,6 +292,12 @@ public class SweepSellSettingsViewModel
 
     [Display(Name = "Check every (minutes)")]
     public int ConvertIntervalMinutes { get; set; } = 15;
+
+    [Display(Name = "Lowest price, % below the 24-hour average")]
+    public decimal ConvertMaxSlippagePercent { get; set; } = 2m;
+
+    [Display(Name = "Daily cap (in the coin you convert to)")]
+    public decimal ConvertDailyCap { get; set; }
 
     public DateTimeOffset? ConvertLastRun { get; set; }
 
