@@ -177,7 +177,7 @@ public class HedgeService(ISweepSellRepository repository, SecretProtector prote
         }
 
         if (!await PendingOrders.ReconcileAsync(state.Pending, exchange, credentials, now,
-                (order, executed) => Sold(state, order.SentAt, order.TargetAsset, executed),
+                (order, executed) => Sold(state, order, order.SentAt, executed),
                 (asset, outcome, message) => Record(storeId, state, asset, outcome, message),
                 e => IsRecordedFailure(e, cancellationToken), cancellationToken))
             return;
@@ -198,7 +198,7 @@ public class HedgeService(ISweepSellRepository repository, SecretProtector prote
         var simulated = 0m;
         foreach (var market in markets)
         {
-            var queued = state.Queued(market, hedge.DryRun).Sum(i => i.Value.Remaining);
+            var queued = state.Queued(market, hedge.DryRun, hedge.EnabledSince).Sum(i => i.Value.Remaining);
             decimal amount, limitPrice, reference;
             try
             {
@@ -248,7 +248,7 @@ public class HedgeService(ISweepSellRepository repository, SecretProtector prote
                 try
                 {
                     var check = await exchange.SellAsync(credentials, Asset, market, amount, limitPrice, Guid.NewGuid(), validateOnly: true, cancellationToken);
-                    state.Allocate(market, amount, dryRun: true);
+                    state.Allocate(market, amount, hedge.EnabledSince, dryRun: true);
                     available -= amount;
                     simulated += amount;
                     Record(storeId, state, Asset, ActivityOutcome.DryRun,
@@ -270,7 +270,8 @@ public class HedgeService(ISweepSellRepository repository, SecretProtector prote
                 TargetAsset = market,
                 Amount = amount,
                 ReferencePrice = reference,
-                SentAt = clock.GetUtcNow()
+                SentAt = clock.GetUtcNow(),
+                HedgeEnabledSince = hedge.EnabledSince
             };
             OrderResult result;
             // Settings saves take the same lock, so a pause or change saved during the run applies before anything is sent.
@@ -342,7 +343,7 @@ public class HedgeService(ISweepSellRepository repository, SecretProtector prote
                     $"No buyer for BTC at {Amount(limitPrice)} {market} or better; nothing was sold ({orders}). Trying again on the next run.");
                 continue;
             }
-            Sold(state, pending.SentAt, market, fill.ExecutedAmount);
+            Sold(state, pending, pending.SentAt, fill.ExecutedAmount);
             available -= fill.ExecutedAmount;
             Record(storeId, state, Asset, ActivityOutcome.Sold,
                 $"Sold {Amount(fill.ExecutedAmount)} of {Amount(amount)} BTC for {market} at {Amount(limitPrice)} or better ({orders}).");
@@ -393,11 +394,15 @@ public class HedgeService(ISweepSellRepository repository, SecretProtector prote
 
     bool ScanDue(HedgeState state) => state.LastScan is not { } last || clock.GetUtcNow() - last >= ScanInterval;
 
-    static void Sold(HedgeState state, DateTimeOffset sentAt, string market, decimal executed)
+    /// <summary>
+    /// Counts what <paramref name="order"/> sold against the cap on the day of <paramref name="at"/>, and against the
+    /// invoices it was sent for: those of its market and hedging period. Invoices of an earlier period were already
+    /// dropped when hedging was turned on again, so a fill found after that sells for none of today's invoices.
+    /// </summary>
+    static void Sold(HedgeState state, PendingOrder order, DateTimeOffset at, decimal executed)
     {
-        // Counted on the day it was sent: an immediate-or-cancel order fills when it arrives, however late it is found.
-        state.Sold.Add(sentAt, Asset, executed);
-        state.Allocate(market, executed);
+        state.Sold.Add(at, Asset, executed);
+        state.Allocate(order.TargetAsset, executed, order.HedgeEnabledSince);
     }
 
     /// <summary>
@@ -416,7 +421,7 @@ public class HedgeService(ISweepSellRepository repository, SecretProtector prote
                 return false;
             state.Pending.Remove(pending);
             // Counted against the day of removal: one sent on an earlier day wouldn't touch today's cap.
-            Sold(state, clock.GetUtcNow(), pending.TargetAsset, pending.Amount);
+            Sold(state, pending, clock.GetUtcNow(), pending.Amount);
             Record(storeId, state, Asset, ActivityOutcome.Failed,
                 $"The pending sell of {Amount(pending.Amount)} BTC for {pending.TargetAsset} (client order {clientOrderId:D}) was removed by hand. " +
                 "It counts as fully sold, for its invoices and today's cap, so they can't be hedged twice. Hedging resumes.");

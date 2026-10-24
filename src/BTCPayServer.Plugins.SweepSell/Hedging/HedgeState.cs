@@ -37,16 +37,22 @@ public class HedgeState
 
     public void Add(ActivityEntry entry) => ActivityLog.Add(Activity, entry, MaxActivity);
 
-    /// <summary>Invoices with BTC still to sell into <paramref name="market"/>, oldest invoice first.</summary>
-    public IEnumerable<KeyValuePair<string, HedgedInvoice>> Queued(string market, bool dryRun) =>
-        Invoices.Where(i => i.Value.Remaining > 0 && i.Value.DryRun == dryRun && i.Value.Market == market)
+    /// <summary>
+    /// Invoices with BTC still to sell into <paramref name="market"/>, taken while hedging was on since
+    /// <paramref name="enabledSince"/>, oldest invoice first.
+    /// </summary>
+    public IEnumerable<KeyValuePair<string, HedgedInvoice>> Queued(string market, bool dryRun, DateTimeOffset? enabledSince) =>
+        Invoices.Where(i => i.Value.Remaining > 0 && i.Value.DryRun == dryRun && i.Value.Market == market && i.Value.EnabledSince == enabledSince)
             .OrderBy(i => i.Value.CreatedAt)
             .ThenBy(i => i.Key, StringComparer.Ordinal);
 
-    /// <summary>Counts <paramref name="sold"/> BTC against the queued invoices of <paramref name="market"/>, oldest first.</summary>
-    public void Allocate(string market, decimal sold, bool dryRun = false)
+    /// <summary>
+    /// Counts <paramref name="sold"/> BTC against the queued invoices of <paramref name="market"/> and of the hedging
+    /// period that started at <paramref name="enabledSince"/>, oldest first. What no such invoice needs is dropped.
+    /// </summary>
+    public void Allocate(string market, decimal sold, DateTimeOffset? enabledSince, bool dryRun = false)
     {
-        foreach (var (_, invoice) in Queued(market, dryRun).ToList())
+        foreach (var (_, invoice) in Queued(market, dryRun, enabledSince).ToList())
         {
             if (sold <= 0)
                 break;

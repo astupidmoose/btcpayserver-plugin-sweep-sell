@@ -312,6 +312,35 @@ public class HedgeServiceTests
         Assert.Contains("before hedging was last turned on", State.Activity[0].Message);
     }
 
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task OrderSentBeforeTurningHedgingOffAndOnNeverHedgesNewInvoices(bool removedByHand)
+    {
+        var hedge = Configure();
+        _exchange.OnSell = () => throw new HttpRequestException("connection reset");
+        Invoice("inv-1", 0.1m);
+        var service = Service();
+        await service.OnInvoiceAsync("inv-1", Ct);
+        var pending = Assert.Single(State.Pending);
+        Assert.Equal(hedge.EnabledSince, pending.HedgeEnabledSince);
+
+        hedge.EnabledSince = Start; // turned off and on again while the order was unresolved
+        _exchange.OnSell = null;
+        _clock.Advance(TimeSpan.FromHours(1));
+        Invoice("inv-2", 0.1m, created: Start.AddMinutes(30));
+        if (removedByHand)
+            Assert.True(await service.RemovePendingAsync(_storeId, pending.ClientOrderId, Ct));
+        else
+            _exchange.Found[pending.ClientOrderId] = new OrderLookup(["OAAAAA-BBBBB-CCCCCC"], Open: false, ExecutedAmount: 0.1m);
+        await service.OnInvoiceAsync("inv-2", Ct);
+
+        Assert.Empty(State.Pending);
+        Assert.Equal(0.1m, _exchange.Orders[^1].Amount); // inv-2 is sold for itself
+        Assert.Equal(0m, State.Invoices["inv-2"].Remaining);
+        Assert.Equal(0.2m, State.Sold.On(_clock.GetUtcNow(), "BTC")); // the old fill still counts against the cap
+    }
+
     [Fact]
     public async Task ImpossibleFillsAreNeverCounted()
     {
