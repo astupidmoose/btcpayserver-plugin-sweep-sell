@@ -5,6 +5,7 @@ using BTCPayServer.Plugins.SweepSell.Conversion;
 using BTCPayServer.Plugins.SweepSell.Exchanges;
 using BTCPayServer.Plugins.SweepSell.Exchanges.Kraken;
 using BTCPayServer.Plugins.SweepSell.Hedging;
+using BTCPayServer.Plugins.SweepSell.Payout;
 using BTCPayServer.Plugins.SweepSell.Settings;
 using BTCPayServer.Plugins.SweepSell.Sweeping;
 using Microsoft.Extensions.DependencyInjection;
@@ -34,9 +35,13 @@ public class SweepSellPlugin : BaseBTCPayServerPlugin
         services.TryAddSingleton(System.TimeProvider.System);
 
         services.AddHttpClient(KrakenConnector.HttpClientName);
-        services.AddSingleton<IExchangeConnector>(provider => new KrakenConnector(
+        services.AddSingleton(provider => new KrakenConnector(
             provider.GetRequiredService<System.Net.Http.IHttpClientFactory>().CreateClient(KrakenConnector.HttpClientName)));
+        services.AddSingleton<IExchangeConnector>(provider => provider.GetRequiredService<KrakenConnector>());
         services.AddSingleton<ExchangeRegistry>();
+        // Withdrawals live behind their own interface and key, so trading never needs withdrawal permission.
+        services.AddSingleton<IWithdrawalConnector>(provider => new KrakenWithdrawals(provider.GetRequiredService<KrakenConnector>()));
+        services.AddSingleton<WithdrawalRegistry>();
 
         services.AddSingleton<ConvertService>();
         services.AddScheduledTask<ConvertTask>(System.TimeSpan.FromMinutes(1));
@@ -53,6 +58,10 @@ public class SweepSellPlugin : BaseBTCPayServerPlugin
         services.AddScheduledTask<HedgeTask>(System.TimeSpan.FromMinutes(1));
         services.AddSingleton<HedgeInvoiceListener>();
         services.AddSingleton<IHostedService>(provider => provider.GetRequiredService<HedgeInvoiceListener>());
+
+        services.AddSingleton<IPayoutRepository, PayoutRepository>();
+        services.AddSingleton<PayoutService>();
+        services.AddScheduledTask<PayoutTask>(System.TimeSpan.FromMinutes(1));
 
         services.AddUIExtension("store-integrations-nav", $"{ViewsDirectory}/StoreNavExtension.cshtml");
     }

@@ -21,6 +21,8 @@
         <p class="text-secondary">
             Sweep this store's wallets to your exchange and sell what comes in. Connect an exchange here first;
             the features below use it.
+            To withdraw from the exchange to an account you saved there, see
+            <a asp-controller="UISweepSellPayout" asp-action="Payout" asp-route-storeId="@storeId" id="PayoutLink">Payout</a>.
         </p>
         @if (!ViewContext.ModelState.IsValid)
         {
@@ -31,7 +33,7 @@
                 <input asp-for="Paused" type="checkbox" class="btcpay-toggle me-3" />
                 <div>
                     <label asp-for="Paused" class="form-check-label"></label>
-                    <div class="form-text mt-0">When on, nothing is swept or sold for this store. Your settings are kept.</div>
+                    <div class="form-text mt-0">When on, nothing is swept, sold or paid out for this store. Your settings are kept.</div>
                 </div>
             </div>
 

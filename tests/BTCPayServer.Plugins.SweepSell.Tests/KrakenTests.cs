@@ -262,9 +262,42 @@ public class KrakenTests
         http.Responses["/0/public/AssetPairs"] = """{"error":[],"result":{"XXBTZUSD":{"ordermin":"0.00005","costmin":"0.5","lot_decimals":8,"pair_decimals":1}}}""";
         http.Responses["/0/public/Ticker"] = """{"error":[],"result":{"XXBTZUSD":{"c":["100000.0","0.01"],"b":["99990.0","1","1.000"],"p":["100100.0","100050.0"]}}}""";
         http.Responses["/0/private/AddOrder"] = """{"error":["EOrder:Cost minimum not met"]}""";
+        http.Responses["/0/private/WithdrawMethods"] = """{"error":["EGeneral:Permission denied"]}""";
+        http.Responses["/0/private/GetApiKeyInfo"] = """{"error":[],"result":{"api_key_name":"test","permissions":["query-funds","modify-trades"]}}""";
         var check = await new KrakenConnector(http.Client()).TestCredentialsAsync(Credentials, TestContext.Current.CancellationToken);
         Assert.True(check.AllOk);
         Assert.Contains("volume=0.0001", http.Sent.Single(x => x.Request.RequestUri!.AbsolutePath == "/0/private/AddOrder").Body); // twice the minimum
+    }
+
+    [Theory]
+    [InlineData("""{"error":[],"result":[{"asset":"XXBT","method":"Bitcoin","minimum":"0.0005"}]}""", false)]
+    [InlineData("""{"error":["EGeneral:Permission denied"]}""", true)]
+    [InlineData("""{"error":["EService:Unavailable"]}""", false)]
+    public async Task TradingKeyMustNotBeAbleToWithdraw(string withdrawMethods, bool ok)
+    {
+        var http = new FakeHttp();
+        http.Responses["/0/private/WithdrawMethods"] = withdrawMethods;
+        var check = await new KrakenConnector(http.Client()).TestCredentialsAsync(Credentials, TestContext.Current.CancellationToken);
+        var withdraw = check.Checks.Single(c => c.Permission == "No Withdraw Funds");
+        Assert.Equal(ok, withdraw.Ok);
+        if (!ok)
+            Assert.NotNull(withdraw.Error);
+    }
+
+    [Theory]
+    [InlineData("""{"error":[],"result":{"permissions":["query-funds","modify-trades"]}}""", true)]
+    [InlineData("""{"error":[],"result":{"permissions":["query-funds","modify-trades","add-withdraw-address"]}}""", false)]
+    [InlineData("""{"error":[],"result":{"permissions":["modify-trades","update-withdraw-address"]}}""", false)]
+    [InlineData("""{"error":[],"result":{}}""", false)] // unreadable: not confirmed
+    public async Task TradingKeyMustNotBeAbleToChangeWithdrawalAddresses(string keyInfo, bool ok)
+    {
+        var http = new FakeHttp();
+        http.Responses["/0/private/GetApiKeyInfo"] = keyInfo;
+        var check = await new KrakenConnector(http.Client()).TestCredentialsAsync(Credentials, TestContext.Current.CancellationToken);
+        var addresses = check.Checks.Single(c => c.Permission == "No Withdrawal Address Changes");
+        Assert.Equal(ok, addresses.Ok);
+        if (!ok)
+            Assert.NotNull(addresses.Error);
     }
 
     [Fact]
@@ -473,6 +506,8 @@ public class KrakenTests
         Assert.True(check.Checks.Single(c => c.Permission == "Query Open Orders & Trades").Ok);
         Assert.True(check.Checks.Single(c => c.Permission == "Query Closed Orders & Trades").Ok);
         Assert.True(check.Checks.Single(c => c.Permission == "Create & Modify Orders").Ok);
+        // No WithdrawMethods answer: whether the key can withdraw isn't confirmed, so that check fails.
+        Assert.False(check.Checks.Single(c => c.Permission == "No Withdraw Funds").Ok);
         var order = http.Sent.Single(s => s.Request.RequestUri!.AbsolutePath == "/0/private/AddOrder").Body;
         Assert.Contains("validate=true", order);
         Assert.Contains("ordertype=limit", order);

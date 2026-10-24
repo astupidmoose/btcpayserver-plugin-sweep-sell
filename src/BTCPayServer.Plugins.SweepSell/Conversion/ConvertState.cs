@@ -106,7 +106,7 @@ public enum ActivityOutcome
     DryRun,
     Waiting,
     Failed,
-    /// <summary>A sweep was broadcast, or its deposit was credited on the exchange.</summary>
+    /// <summary>A sweep was broadcast, its deposit was credited on the exchange, or a payout was withdrawn.</summary>
     Sent,
     /// <summary>A setting that decides where funds go was changed.</summary>
     Changed
