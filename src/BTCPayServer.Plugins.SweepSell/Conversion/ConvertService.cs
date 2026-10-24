@@ -250,6 +250,8 @@ public class ConvertService(ISweepSellRepository repository, SecretProtector pro
                 settingsLock.Release();
             }
             pending.OrderIds = result.OrderIds.ToList();
+            // Saved straight away: once the exchange confirmed the order, a restart must never treat it as unplaced.
+            await repository.SaveConvertStateAsync(storeId, state);
 
             // An immediate-or-cancel order closes straight away; look up how much filled, for the record and the cap.
             OrderLookup? fill = null;

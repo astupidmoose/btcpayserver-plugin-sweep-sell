@@ -78,8 +78,11 @@ public class HedgedInvoice
     /// <summary>BTC not sold yet; 0 once hedged.</summary>
     public decimal Remaining { get; set; }
 
-    /// <summary>What the BTC is sold for, e.g. CAD.</summary>
+    /// <summary>What the BTC is sold for, e.g. CAD. Follows the settings if the market for <see cref="Currency"/> changes.</summary>
     public string Market { get; set; } = "";
+
+    /// <summary>The invoice's currency, which decides <see cref="Market"/>.</summary>
+    public string? Currency { get; set; }
 
     /// <summary>Taken while hedging was in dry run: only ever checked with the exchange, never sold.</summary>
     public bool DryRun { get; set; }

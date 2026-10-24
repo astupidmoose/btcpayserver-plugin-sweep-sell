@@ -186,6 +186,40 @@ public class HedgeServiceTests
     }
 
     [Fact]
+    public async Task QueuedInvoicesFollowAChangedMarket()
+    {
+        var hedge = Configure(hedge: h => h.Markets["GBP"] = "EUR");
+        _exchange.Balances["BTC"] = 0m;
+        Invoice("gbp", 0.1m, currency: "GBP");
+        Invoice("usd", 0.1m, currency: "USD");
+        var service = Service();
+        await service.OnInvoiceAsync("gbp", Ct); // waits for BTC on the exchange
+        await service.OnInvoiceAsync("usd", Ct);
+        Assert.Equal("EUR", State.Invoices["gbp"].Market);
+
+        hedge.Markets["GBP"] = "CAD"; // the owner corrects the mapping before BTC arrives
+        hedge.Markets["USD"] = "BTC"; // and leaves USD invoices without a market
+        _exchange.Balances["BTC"] = 1m;
+        await service.RunAsync(_storeId, Ct);
+        Assert.Equal("CAD", Assert.Single(_exchange.Orders).Quote);
+        Assert.Equal(0m, State.Invoices["gbp"].Remaining);
+        Assert.Equal(0m, State.Invoices["usd"].Remaining);
+        Assert.Contains(State.Activity, a => a.Message.Contains("now sells for CAD instead of EUR"));
+        Assert.Contains(State.Activity, a => a.Message.Contains("USD invoices have no market now"));
+    }
+
+    [Fact]
+    public async Task ConfirmedOrderIdsAreSavedBeforeTheFillIsLookedUp()
+    {
+        Configure();
+        Invoice("inv-1", 0.1m);
+        IReadOnlyList<string>? saved = null;
+        _exchange.OnFind = _ => saved = _repository.HedgeStates[_storeId].Pending.Single().OrderIds;
+        await Service().OnInvoiceAsync("inv-1", Ct);
+        Assert.Equal(["OAAAAA-BBBBB-CCCCCC"], saved); // a restart here would still know the order exists
+    }
+
+    [Fact]
     public async Task BtcInvoicesNeedAMarket()
     {
         Configure();

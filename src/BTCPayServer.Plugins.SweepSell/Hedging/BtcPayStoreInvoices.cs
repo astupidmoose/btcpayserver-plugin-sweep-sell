@@ -15,8 +15,9 @@ public class BtcPayStoreInvoices(InvoiceRepository invoices) : IStoreInvoices
     const int PageSize = 100;
 
     /// <summary>
-    /// Pages by creation time, oldest first, each page starting at the last one's newest invoice (and skipping those already
-    /// read), rather than by offset: an invoice becoming paid while the pages are read can't shift the rest so one is missed.
+    /// Pages by creation time, oldest first, rather than by offset: an invoice becoming paid while the pages are read can't
+    /// shift the rest so one is missed. After a full page, every invoice created at that page's newest time is read in one
+    /// go, however many share it, and the next page starts just after it.
     /// </summary>
     public async Task<IReadOnlyList<HedgeInvoice>> GetPaidSinceAsync(string storeId, DateTimeOffset since, CancellationToken cancellationToken)
     {
@@ -24,25 +25,28 @@ public class BtcPayStoreInvoices(InvoiceRepository invoices) : IStoreInvoices
         var from = since;
         while (true)
         {
-            var page = await invoices.GetInvoices(new InvoiceQuery
-            {
-                StoreId = [storeId],
-                StartDate = from,
-                Status = [nameof(InvoiceStatus.Processing), nameof(InvoiceStatus.Settled)],
-                OrderByDesc = false,
-                Take = PageSize
-            }, cancellationToken);
-            var added = 0;
+            var page = await PaidAsync(storeId, from, null, PageSize, cancellationToken);
             foreach (var invoice in page)
-                if (found.TryAdd(invoice.Id, From(invoice)))
-                    added++;
-            // A full page adding nothing new means more invoices than a page share one creation time; their invoice events
-            // still hedge them, and the scan stops rather than loop.
-            if (page.Length < PageSize || added == 0)
+                found.TryAdd(invoice.Id, From(invoice));
+            if (page.Length < PageSize)
                 return found.Values.ToList();
-            from = page[^1].InvoiceTime;
+            var last = page[^1].InvoiceTime;
+            foreach (var invoice in await PaidAsync(storeId, last, last, null, cancellationToken))
+                found.TryAdd(invoice.Id, From(invoice));
+            from = last.AddTicks(1); // always later than the page started, so the scan ends
         }
     }
+
+    Task<InvoiceEntity[]> PaidAsync(string storeId, DateTimeOffset from, DateTimeOffset? to, int? take, CancellationToken cancellationToken) =>
+        invoices.GetInvoices(new InvoiceQuery
+        {
+            StoreId = [storeId],
+            StartDate = from,
+            EndDate = to,
+            Status = [nameof(InvoiceStatus.Processing), nameof(InvoiceStatus.Settled)],
+            OrderByDesc = false,
+            Take = take
+        }, cancellationToken);
 
     public async Task<HedgeInvoice?> GetAsync(string invoiceId, CancellationToken cancellationToken) =>
         await invoices.GetInvoice(invoiceId) is { } invoice ? From(invoice) : null;

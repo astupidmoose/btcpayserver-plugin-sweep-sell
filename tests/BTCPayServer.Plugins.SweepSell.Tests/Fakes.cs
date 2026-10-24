@@ -71,6 +71,7 @@ sealed class FakeExchange : IExchangeConnector
     public System.Collections.Concurrent.ConcurrentDictionary<string, Task> SellGates { get; } = new();
     public Exception? FindError { get; set; }
     public Action? OnPrice { get; set; }
+    public Action<Guid>? OnFind { get; set; }
 
     public Task<IReadOnlyDictionary<string, decimal>> GetAvailableBalancesAsync(ExchangeCredentials credentials, CancellationToken cancellationToken)
     {
@@ -107,6 +108,7 @@ sealed class FakeExchange : IExchangeConnector
     public Task<OrderLookup?> FindOrderAsync(ExchangeCredentials credentials, Guid clientOrderId, CancellationToken cancellationToken)
     {
         Calls.Add("find");
+        OnFind?.Invoke(clientOrderId);
         if (FindError is not null)
             throw FindError;
         return Task.FromResult(Found.GetValueOrDefault(clientOrderId));

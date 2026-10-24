@@ -54,6 +54,17 @@ public class ConvertTests
     }
 
     [Fact]
+    public async Task ConfirmedOrderIdsAreSavedBeforeTheFillIsLookedUp()
+    {
+        Configure(assets: "DOGE");
+        _exchange.Balances["DOGE"] = 100m;
+        IReadOnlyList<string>? saved = null;
+        _exchange.OnFind = _ => saved = _repository.States[StoreId].Pending.Single().OrderIds;
+        await Service().RunAsync(StoreId, Ct);
+        Assert.Equal(["OAAAAA-BBBBB-CCCCCC"], saved); // a restart here would still know the order exists
+    }
+
+    [Fact]
     public async Task OrdersAreImmediateLimitsAtTheFloorBelowTheDailyAverage()
     {
         Configure(); // 2% default

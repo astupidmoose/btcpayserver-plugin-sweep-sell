@@ -162,6 +162,22 @@ public class HedgeService(ISweepSellRepository repository, SecretProtector prote
                 invoice.Remaining = 0;
                 Record(storeId, state, Asset, ActivityOutcome.Waiting, $"Invoice {id} was taken while hedging was in dry run, so it isn't sold now that it is live.");
             }
+            // The market for its currency changed since it was taken: what is left sells where the settings now say.
+            else if (invoice.Currency is { } currency && hedge.MarketFor(currency).ToUpperInvariant() is var market && market != invoice.Market)
+            {
+                if (market == Asset)
+                {
+                    invoice.Remaining = 0;
+                    Record(storeId, state, Asset, ActivityOutcome.Waiting,
+                        $"Invoice {id} was to be sold for {invoice.Market}, but {currency} invoices have no market now, so what was left of it isn't sold.");
+                }
+                else
+                {
+                    Record(storeId, state, Asset, ActivityOutcome.Waiting,
+                        $"What is left of invoice {id} ({Amount(invoice.Remaining)} BTC) now sells for {market} instead of {invoice.Market}, as the settings changed.");
+                    invoice.Market = market;
+                }
+            }
         }
 
         var markets = state.Invoices.Values.Where(i => i.Remaining > 0 && i.DryRun == hedge.DryRun).Select(i => i.Market).Distinct().Order().ToList();
@@ -311,6 +327,8 @@ public class HedgeService(ISweepSellRepository repository, SecretProtector prote
                 settingsLock.Release();
             }
             pending.OrderIds = result.OrderIds.ToList();
+            // Saved straight away: once the exchange confirmed the order, a restart must never treat it as unplaced.
+            await repository.SaveHedgeStateAsync(storeId, state);
             var orders = string.Join(", ", result.OrderIds);
 
             OrderLookup? fill;
@@ -362,6 +380,7 @@ public class HedgeService(ISweepSellRepository repository, SecretProtector prote
         var entry = new HedgedInvoice
         {
             Market = market,
+            Currency = invoice.Currency.ToUpperInvariant(),
             DryRun = hedge.DryRun,
             EnabledSince = hedge.EnabledSince,
             CreatedAt = invoice.CreatedAt,
