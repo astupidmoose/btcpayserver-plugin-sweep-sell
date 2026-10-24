@@ -1,0 +1,182 @@
+#nullable enable
+using System;
+using System.Collections.Generic;
+using System.ComponentModel.DataAnnotations;
+using System.Linq;
+using System.Threading;
+using System.Threading.Tasks;
+using BTCPayServer.Abstractions.Constants;
+using BTCPayServer.Abstractions.Extensions;
+using BTCPayServer.Abstractions.Models;
+using BTCPayServer.Client;
+using BTCPayServer.Plugins.SweepSell.Exchanges;
+using BTCPayServer.Plugins.SweepSell.Settings;
+using Microsoft.AspNetCore.Authorization;
+using Microsoft.AspNetCore.Mvc;
+using Microsoft.Extensions.Logging;
+
+namespace BTCPayServer.Plugins.SweepSell.Controllers;
+
+[Route("stores/{storeId}/sweep-sell")]
+[Authorize(AuthenticationSchemes = AuthenticationSchemes.Cookie)]
+[Authorize(Policy = Policies.CanModifyStoreSettings, AuthenticationSchemes = AuthenticationSchemes.Cookie)]
+public class UISweepSellController(SweepSellSettingsRepository repository, SecretProtector protector, ExchangeRegistry exchanges,
+    ILogger<UISweepSellController> logger) : Controller
+{
+    public const string SettingsView = SweepSellPlugin.ViewsDirectory + "/Settings.cshtml";
+
+    [HttpGet("")]
+    public async Task<IActionResult> Settings(string storeId)
+    {
+        var settings = await repository.GetAsync(storeId);
+        return View(SettingsView, ToViewModel(settings, null));
+    }
+
+    [HttpPost("")]
+    public async Task<IActionResult> Settings(string storeId, SweepSellSettingsViewModel vm)
+    {
+        var saved = await repository.GetAsync(storeId);
+        foreach (var (field, error) in Validate(vm, exchanges))
+            ModelState.AddModelError(field, error);
+        var updated = Apply(saved, vm, protector);
+        if (!ModelState.IsValid)
+            return View(SettingsView, ToViewModel(saved, vm));
+
+        await repository.SaveAsync(storeId, updated);
+        // Never log the key itself; whether one is saved is enough to follow what happened.
+        logger.LogInformation("Sweep & Sell settings of store {StoreId} saved: exchange {Exchange}, credentials {Credentials}, paused {Paused}",
+            storeId, updated.ExchangeId ?? "none", updated.HasCredentials ? "saved" : "none", updated.Paused);
+        TempData.SetStatusMessageModel(new StatusMessageModel
+        {
+            Severity = StatusMessageModel.StatusSeverity.Success,
+            Message = "Sweep & Sell settings saved."
+        });
+        return RedirectToAction(nameof(Settings), new { storeId });
+    }
+
+    [HttpPost("test")]
+    public async Task<IActionResult> TestCredentials(string storeId, CancellationToken cancellationToken)
+    {
+        var settings = await repository.GetAsync(storeId);
+        var exchange = exchanges.Find(settings.ExchangeId);
+        var credentials = protector.Credentials(settings);
+        StatusMessageModel message;
+        if (exchange is null || credentials is null)
+        {
+            message = new StatusMessageModel
+            {
+                Severity = StatusMessageModel.StatusSeverity.Error,
+                Message = "Save an exchange and its API key first."
+            };
+        }
+        else
+        {
+            CredentialsCheck check;
+            try
+            {
+                check = await exchange.TestCredentialsAsync(credentials, cancellationToken);
+            }
+            catch (Exception e) when (e is ExchangeException or System.Net.Http.HttpRequestException or TaskCanceledException &&
+                                      !cancellationToken.IsCancellationRequested)
+            {
+                // Exchange and network errors carry no credentials.
+                logger.LogWarning("Sweep & Sell key test for store {StoreId} on {Exchange} could not run: {Error}", storeId, exchange.Id, e.Message);
+                check = new CredentialsCheck([new PermissionCheck("Connection", false, e.Message)]);
+            }
+            // Exchange error texts carry no credentials; log them so failures show up in the server logs too.
+            foreach (var failed in check.Checks.Where(c => !c.Ok))
+                logger.LogWarning("Sweep & Sell key test failed for store {StoreId} on {Exchange}: {Permission}: {Error}",
+                    storeId, exchange.Id, failed.Permission, failed.Error);
+            message = new StatusMessageModel
+            {
+                Severity = check.AllOk ? StatusMessageModel.StatusSeverity.Success : StatusMessageModel.StatusSeverity.Error,
+                Message = $"{exchange.Name}: " + string.Join(" ", check.Checks.Select(c => c.Ok ? $"{c.Permission}: OK." : $"{c.Permission}: failed ({c.Error})."))
+            };
+        }
+        TempData.SetStatusMessageModel(message);
+        return RedirectToAction(nameof(Settings), new { storeId });
+    }
+
+    /// <summary>Form errors, by field. Removing the key never depends on what was typed (or autofilled) in the key fields.</summary>
+    public static IEnumerable<(string Field, string Error)> Validate(SweepSellSettingsViewModel vm, ExchangeRegistry exchanges)
+    {
+        if (!string.IsNullOrEmpty(vm.ExchangeId) && exchanges.Find(vm.ExchangeId) is null)
+            yield return (nameof(vm.ExchangeId), "Pick an exchange from the list.");
+        if (vm.ClearCredentials)
+            yield break;
+        var key = !string.IsNullOrWhiteSpace(vm.ApiKey);
+        var secret = !string.IsNullOrWhiteSpace(vm.ApiSecret);
+        if (key != secret)
+            yield return (nameof(vm.ApiSecret), "Enter both the API key and its private key.");
+        if ((key || secret) && string.IsNullOrWhiteSpace(vm.ExchangeId))
+            yield return (nameof(vm.ExchangeId), "Pick the exchange this key belongs to.");
+    }
+
+    /// <summary>
+    /// The settings after a save. Keys are write-only on the page: an empty field keeps the saved key,
+    /// "remove" clears both, and a new pair replaces both.
+    /// </summary>
+    public static SweepSellSettings Apply(SweepSellSettings saved, SweepSellSettingsViewModel vm, SecretProtector protector)
+    {
+        var updated = new SweepSellSettings
+        {
+            Paused = vm.Paused,
+            ExchangeId = string.IsNullOrWhiteSpace(vm.ExchangeId) ? null : vm.ExchangeId.Trim(),
+            ProtectedApiKey = saved.ProtectedApiKey,
+            ProtectedApiSecret = saved.ProtectedApiSecret
+        };
+        var key = Clean(vm.ApiKey);
+        var secret = Clean(vm.ApiSecret);
+        if (vm.ClearCredentials || updated.ExchangeId != saved.ExchangeId)
+        {
+            // A key belongs to one exchange: switching exchanges forgets it.
+            updated.ProtectedApiKey = null;
+            updated.ProtectedApiSecret = null;
+        }
+        // "Remove" wins over anything typed (or autofilled) in the key fields, and a key needs an exchange to belong to.
+        if (!vm.ClearCredentials && updated.ExchangeId is not null && key is not null && secret is not null)
+        {
+            updated.ProtectedApiKey = protector.Protect(key);
+            updated.ProtectedApiSecret = protector.Protect(secret);
+        }
+        return updated;
+    }
+
+    SweepSellSettingsViewModel ToViewModel(SweepSellSettings settings, SweepSellSettingsViewModel? posted) => new()
+    {
+        Paused = posted?.Paused ?? settings.Paused,
+        ExchangeId = posted?.ExchangeId ?? settings.ExchangeId,
+        // Saved but undecryptable (e.g. restored on a server with other data-protection keys) counts as not saved.
+        HasCredentials = protector.Credentials(settings) is not null,
+        CredentialsUnreadable = settings.HasCredentials && protector.Credentials(settings) is null,
+        Exchanges = exchanges.All.Select(e => new ExchangeOption(e.Id, e.Name, e.KeyPermissionsHelp)).ToList()
+    };
+
+    static string? Clean(string? value) => string.IsNullOrWhiteSpace(value) ? null : value.Trim();
+}
+
+public record ExchangeOption(string Id, string Name, string KeyPermissionsHelp);
+
+public class SweepSellSettingsViewModel
+{
+    [Display(Name = "Pause everything")]
+    public bool Paused { get; set; }
+
+    [Display(Name = "Exchange")]
+    public string? ExchangeId { get; set; }
+
+    [Display(Name = "API key")]
+    public string? ApiKey { get; set; }
+
+    [Display(Name = "Private key")]
+    public string? ApiSecret { get; set; }
+
+    [Display(Name = "Remove the saved key")]
+    public bool ClearCredentials { get; set; }
+
+    public bool HasCredentials { get; set; }
+
+    public bool CredentialsUnreadable { get; set; }
+
+    public List<ExchangeOption> Exchanges { get; set; } = [];
+}
