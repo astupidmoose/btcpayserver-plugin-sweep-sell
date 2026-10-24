@@ -399,6 +399,46 @@ public class KrakenTests
         Assert.Equal("Kraken: EAPI:Invalid key", e.Message);
     }
 
+    [Theory]
+    [InlineData("""["EOrder:Insufficient funds"]""", true)]
+    [InlineData("""["EGeneral:Invalid arguments:volume"]""", true)]
+    [InlineData("""["EGeneral:Permission denied"]""", true)]
+    [InlineData("""["EAPI:Invalid nonce"]""", true)]
+    [InlineData("""["EService:Unavailable"]""", false)] // may have been placed
+    [InlineData("""["EService:Deadline elapsed"]""", false)]
+    [InlineData("""["EGeneral:Internal error"]""", false)]
+    [InlineData("""["EOrder:Insufficient funds","EService:Busy"]""", false)] // any unknown error makes the outcome unknown
+    [InlineData("""["EOrder:Duplicate order"]""", false)] // an order with that ID exists
+    [InlineData("""[{"code":1}]""", false)]
+    public async Task OnlyDefiniteRefusalsCountAsRejected(string errors, bool rejected)
+    {
+        var http = new FakeHttp();
+        http.Responses["/0/private/AddOrder"] = $$"""{"error":{{errors}}}""";
+        var e = await Assert.ThrowsAsync<ExchangeException>(() =>
+            new KrakenConnector(http.Client()).SellAsync(Credentials, "DOGE", "BTC", 300m, 0.0000015m, OrderId, validateOnly: false, TestContext.Current.CancellationToken));
+        Assert.Equal(rejected, e.Rejected);
+    }
+
+    [Fact]
+    public async Task RefusalWithAnHttpErrorIsNotTrusted()
+    {
+        var http = new FakeHttp { Status = System.Net.HttpStatusCode.BadGateway };
+        http.Responses["/0/private/AddOrder"] = """{"error":["EOrder:Insufficient funds"]}""";
+        var e = await Assert.ThrowsAsync<ExchangeException>(() =>
+            new KrakenConnector(http.Client()).SellAsync(Credentials, "DOGE", "BTC", 300m, 0.0000015m, OrderId, validateOnly: false, TestContext.Current.CancellationToken));
+        Assert.False(e.Rejected);
+    }
+
+    [Fact]
+    public async Task MalformedOrderAnswerIsNotARefusal()
+    {
+        var http = new FakeHttp();
+        http.Responses["/0/private/AddOrder"] = """{"error":[],"result":{"descr":{"order":"sell"},"txid":[]}}""";
+        var e = await Assert.ThrowsAsync<ExchangeException>(() =>
+            new KrakenConnector(http.Client()).SellAsync(Credentials, "DOGE", "BTC", 300m, 0.0000015m, OrderId, validateOnly: false, TestContext.Current.CancellationToken));
+        Assert.False(e.Rejected);
+    }
+
     [Fact]
     public async Task TestReportsEachPermission()
     {

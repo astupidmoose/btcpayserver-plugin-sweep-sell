@@ -35,19 +35,37 @@ public class UISweepSellController(ISweepSellRepository repository, SecretProtec
     }
 
     [HttpPost("")]
-    public async Task<IActionResult> Settings(string storeId, SweepSellSettingsViewModel vm)
+    public async Task<IActionResult> Settings(string storeId, SweepSellSettingsViewModel vm, CancellationToken cancellationToken)
     {
-        var saved = await repository.GetAsync(storeId);
-        var state = await repository.GetConvertStateAsync(storeId);
         foreach (var (field, error) in Validate(vm, exchanges))
             ModelState.AddModelError(field, error);
-        if (PendingConflict(saved, vm, state.Pending.Count) is { } conflict)
-            ModelState.AddModelError(nameof(vm.ExchangeId), conflict);
+        var saved = await repository.GetAsync(storeId);
         var updated = Apply(saved, vm, protector);
+        if (ModelState.IsValid)
+        {
+            if (KeyChanges(saved, updated))
+            {
+                // A convert run could send an order with the old key between the check and the save, so they wait for it.
+                var conflict = await convert.WithStoreLockAsync(storeId, async () =>
+                {
+                    var pending = (await repository.GetConvertStateAsync(storeId)).Pending;
+                    if (PendingConflict(updated, pending, protector) is { } error)
+                        return error;
+                    await repository.SaveAsync(storeId, updated);
+                    return null;
+                }, cancellationToken);
+                if (conflict is not null)
+                    ModelState.AddModelError(nameof(vm.ExchangeId), conflict);
+            }
+            else
+            {
+                // Pausing, removing the key and other settings never wait for a run.
+                await repository.SaveAsync(storeId, updated);
+            }
+        }
         if (!ModelState.IsValid)
-            return View(SettingsView, ToViewModel(saved, state, vm));
+            return View(SettingsView, ToViewModel(saved, await repository.GetConvertStateAsync(storeId), vm));
 
-        await repository.SaveAsync(storeId, updated);
         // Never log the key itself; whether one is saved is enough to follow what happened.
         logger.LogInformation("Sweep & Sell settings of store {StoreId} saved: exchange {Exchange}, credentials {Credentials}, paused {Paused}, " +
                               "convert {Convert} ({ConvertMode}, {ConvertAssets} to {ConvertTarget} every {ConvertInterval} min)",
@@ -136,17 +154,24 @@ public class UISweepSellController(ISweepSellRepository repository, SecretProtec
     }
 
     /// <summary>
-    /// Changing the exchange or entering a new key while orders are pending would make them impossible to look up.
-    /// Removing the key is always allowed: it must never be blocked in an emergency.
+    /// Whether a save puts a different key (or exchange) in place, which pending orders must be checked against.
+    /// Removing the key isn't a change here: with no key nothing runs, and removing it must never wait or be blocked.
     /// </summary>
-    public static string? PendingConflict(SweepSellSettings saved, SweepSellSettingsViewModel vm, int pendingOrders)
+    public static bool KeyChanges(SweepSellSettings saved, SweepSellSettings updated) =>
+        updated.HasCredentials && (updated.ExchangeId != saved.ExchangeId || updated.ProtectedApiKey != saved.ProtectedApiKey ||
+                                   updated.ProtectedApiSecret != saved.ProtectedApiSecret);
+
+    /// <summary>
+    /// A pending order can only be looked up with the exchange and key it was sent with, so a save may put only that key
+    /// in place (for example the original key again after removing it). Null when the save is fine.
+    /// </summary>
+    public static string? PendingConflict(SweepSellSettings updated, IReadOnlyCollection<PendingOrder> pending, SecretProtector protector)
     {
-        if (pendingOrders == 0 || vm.ClearCredentials)
+        if (pending.Count == 0 || protector.Credentials(updated) is not { } credentials)
             return null;
-        var exchangeChanges = Clean(vm.ExchangeId) != saved.ExchangeId;
-        var newKey = Clean(vm.ApiKey) is not null || Clean(vm.ApiSecret) is not null;
-        return exchangeChanges || newKey
-            ? "Orders are still being checked with the exchange. Wait for them to be found (see Pending orders), or remove them there after checking your exchange, before changing the exchange or key."
+        var fingerprint = credentials.Fingerprint();
+        return pending.Any(p => p.ExchangeId != updated.ExchangeId || p.KeyFingerprint != fingerprint)
+            ? "Orders sent with another exchange key are still pending. Save that key again so they can be checked, or check them in your exchange and remove them under Pending orders, before using a different exchange or key."
             : null;
     }
 

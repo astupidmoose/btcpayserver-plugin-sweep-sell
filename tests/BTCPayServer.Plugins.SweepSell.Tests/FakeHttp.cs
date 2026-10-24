@@ -7,6 +7,7 @@ namespace BTCPayServer.Plugins.SweepSell.Tests;
 class FakeHttp : HttpMessageHandler
 {
     public Dictionary<string, string> Responses { get; } = new();
+    public HttpStatusCode Status { get; set; } = HttpStatusCode.OK;
     public List<(HttpRequestMessage Request, string Body)> Sent { get; } = new();
 
     protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
@@ -15,7 +16,7 @@ class FakeHttp : HttpMessageHandler
         Sent.Add((request, body));
         var path = request.RequestUri!.AbsolutePath;
         return Responses.TryGetValue(path, out var json)
-            ? new HttpResponseMessage(HttpStatusCode.OK) { Content = new StringContent(json, Encoding.UTF8, "application/json") }
+            ? new HttpResponseMessage(Status) { Content = new StringContent(json, Encoding.UTF8, "application/json") }
             : new HttpResponseMessage(HttpStatusCode.NotFound) { Content = new StringContent("not found") };
     }
 

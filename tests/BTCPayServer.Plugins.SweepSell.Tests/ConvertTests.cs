@@ -284,6 +284,105 @@ public class ConvertTests
     }
 
     [Fact]
+    public async Task CanceledOrExpiredPendingOrderIsNotASale()
+    {
+        Configure(assets: "DOGE");
+        _repository.Settings[StoreId].Convert.DailyCap = 0.3m;
+        var id = Guid.NewGuid();
+        _repository.States[StoreId] = new ConvertState { Pending = [Pending(id)] };
+        _exchange.Found[id] = new OrderLookup(["OCANCE-LLED00-ORDER1"], Open: false, ExecutedAmount: 0m);
+        _exchange.Balances["DOGE"] = 300m;
+        _clock.Advance(TimeSpan.FromMinutes(15));
+        await Service().RunAsync(StoreId, Ct);
+        Assert.DoesNotContain(State.Activity, a => a.Message.Contains("OCANCE-LLED00-ORDER1") && a.Outcome == ActivityOutcome.Sold);
+        Assert.Contains(State.Activity, a => a.Message.Contains("without selling anything"));
+        // Nothing counted against the cap, and the coins are offered again straight away.
+        var order = Assert.Single(_exchange.Orders);
+        Assert.Equal(300m, order.Amount);
+        Assert.Empty(State.Pending);
+    }
+
+    [Fact]
+    public async Task PartlyFilledPendingOrderCountsWhatSold()
+    {
+        Configure(assets: "DOGE");
+        var id = Guid.NewGuid();
+        var pending = Pending(id);
+        pending.ReferencePrice = 0.001m;
+        _repository.States[StoreId] = new ConvertState { Pending = [pending] };
+        _exchange.Found[id] = new OrderLookup(["OPARTI-ALFIL-LORDER"], Open: false, ExecutedAmount: 120m);
+        await Service().RunAsync(StoreId, Ct);
+        Assert.Contains(State.Activity, a => a.Outcome == ActivityOutcome.Sold && a.Message.Contains("120 of 300 DOGE"));
+        Assert.Equal(0.12m, State.SoldOn(_clock.GetUtcNow()));
+    }
+
+    [Fact]
+    public async Task RefusedOrderIsClearedAndOtherCoinsStillSell()
+    {
+        Configure();
+        _exchange.Balances["DOGE"] = 300m;
+        _exchange.Balances["LTC"] = 2m;
+        _exchange.OnSell = () =>
+        {
+            if (_exchange.Orders.Count == 1)
+                throw new ExchangeException("Kraken: EOrder:Insufficient funds", rejected: true);
+        };
+        await Service().RunAsync(StoreId, Ct);
+        Assert.Empty(State.Pending);
+        Assert.Contains(State.Activity, a => a.Outcome == ActivityOutcome.Failed && a.Message.Contains("refused") && a.Message.Contains("Nothing was sold"));
+        Assert.Equal(2, _exchange.Orders.Count);
+        Assert.Contains(State.Activity, a => a.Outcome == ActivityOutcome.Sold && a.Asset == "LTC");
+    }
+
+    [Fact]
+    public async Task ErrorWithAnUnknownOutcomeKeepsTheOrderPending()
+    {
+        Configure();
+        _exchange.Balances["DOGE"] = 300m;
+        _exchange.Balances["LTC"] = 2m;
+        _exchange.OnSell = () => throw new ExchangeException("Kraken: EService:Unavailable");
+        await Service().RunAsync(StoreId, Ct);
+        Assert.Single(State.Pending);
+        Assert.Single(_exchange.Orders); // stops selling until the order is looked up
+    }
+
+    [Fact]
+    public async Task LookupFailureNamesTheAmount()
+    {
+        Configure();
+        _repository.States[StoreId] = new ConvertState { Pending = [Pending(Guid.NewGuid())] };
+        _exchange.FindError = new HttpRequestException("connection reset");
+        await Service().RunAsync(StoreId, Ct);
+        Assert.Contains("300 DOGE", State.Activity[0].Message);
+        Assert.Single(State.Pending);
+    }
+
+    [Fact]
+    public async Task StoreLockWaitsForARunningConvert()
+    {
+        Configure(assets: "DOGE");
+        _exchange.Balances["DOGE"] = 300m;
+        var gate = new TaskCompletionSource();
+        _exchange.SellGate = gate.Task;
+        var service = Service();
+        var run = service.RunAsync(StoreId, Ct);
+        while (_exchange.Orders.Count == 0)
+            await Task.Delay(10, Ct);
+        var pendingSeen = -1;
+        var locked = service.WithStoreLockAsync(StoreId, async () =>
+        {
+            pendingSeen = (await _repository.GetConvertStateAsync(StoreId)).Pending.Count;
+            return true;
+        }, Ct);
+        await Task.Delay(50, Ct);
+        Assert.False(locked.IsCompleted);
+        gate.SetResult();
+        Assert.Equal(ConvertRunResult.Ran, await run);
+        await locked;
+        Assert.Equal(0, pendingSeen); // ran after the order was settled, never in between
+    }
+
+    [Fact]
     public async Task ExchangeErrorsAreRecordedNotThrown()
     {
         Configure();
@@ -377,6 +476,8 @@ public class ConvertTests
         public List<string> Calls { get; } = [];
         public Exception? BalanceError { get; set; }
         public Action? OnSell { get; set; }
+        public Task SellGate { get; set; } = Task.CompletedTask;
+        public Exception? FindError { get; set; }
 
         public Task<IReadOnlyDictionary<string, decimal>> GetAvailableBalancesAsync(ExchangeCredentials credentials, CancellationToken cancellationToken)
         {
@@ -391,20 +492,23 @@ public class ConvertTests
 
         public Task<MarketPrice> GetPriceAsync(string baseAsset, string quoteAsset, CancellationToken cancellationToken) => Task.FromResult(Price);
 
-        public Task<OrderResult> SellAsync(ExchangeCredentials credentials, string baseAsset, string quoteAsset, decimal amount, decimal limitPrice,
+        public async Task<OrderResult> SellAsync(ExchangeCredentials credentials, string baseAsset, string quoteAsset, decimal amount, decimal limitPrice,
             Guid clientOrderId, bool validateOnly, CancellationToken cancellationToken)
         {
             Calls.Add("sell");
             Orders.Add((baseAsset, quoteAsset, amount, validateOnly, clientOrderId, limitPrice));
+            await SellGate;
             OnSell?.Invoke();
             if (!validateOnly && !FillUnknown)
                 Found[clientOrderId] = new OrderLookup(["OAAAAA-BBBBB-CCCCCC"], Open: false, ExecutedAmount: amount * FillRatio);
-            return Task.FromResult(new OrderResult(!validateOnly, validateOnly ? [] : ["OAAAAA-BBBBB-CCCCCC"], $"sell {amount} {baseAsset}{quoteAsset} @ limit {limitPrice}"));
+            return new OrderResult(!validateOnly, validateOnly ? [] : ["OAAAAA-BBBBB-CCCCCC"], $"sell {amount} {baseAsset}{quoteAsset} @ limit {limitPrice}");
         }
 
         public Task<OrderLookup?> FindOrderAsync(ExchangeCredentials credentials, Guid clientOrderId, CancellationToken cancellationToken)
         {
             Calls.Add("find");
+            if (FindError is not null)
+                throw FindError;
             return Task.FromResult(Found.GetValueOrDefault(clientOrderId));
         }
 

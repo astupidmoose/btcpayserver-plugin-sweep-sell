@@ -61,7 +61,7 @@ public class ConvertService(ISweepSellRepository repository, SecretProtector pro
 
     public async Task<ConvertRunResult> RunAsync(string storeId, CancellationToken cancellationToken)
     {
-        var storeLock = StoreLocks.GetOrAdd(storeId, _ => new SemaphoreSlim(1, 1));
+        var storeLock = StoreLock(storeId);
         if (!await storeLock.WaitAsync(0, cancellationToken))
             return ConvertRunResult.Busy;
         try
@@ -200,6 +200,14 @@ public class ConvertService(ISweepSellRepository repository, SecretProtector pro
             {
                 result = await exchange.SellAsync(credentials, asset, target, amount, limitPrice, pending.ClientOrderId, validateOnly: false, cancellationToken);
             }
+            catch (ExchangeException e) when (e.Rejected)
+            {
+                // The exchange refused the order outright, so there is nothing to look up later.
+                state.Pending.Remove(pending);
+                Record(storeId, state, asset, ActivityOutcome.Failed,
+                    $"{exchange.Name} refused selling {Amount(amount)} {asset} for {target}: {e.Message}. Nothing was sold.");
+                continue;
+            }
             catch (Exception e) when (!cancellationToken.IsCancellationRequested)
             {
                 // The order may or may not exist: keep it pending and stop selling until it is looked up.
@@ -264,7 +272,7 @@ public class ConvertService(ISweepSellRepository repository, SecretProtector pro
             catch (Exception e) when (IsExchangeFailure(e, cancellationToken))
             {
                 Record(storeId, state, pending.Asset, ActivityOutcome.Failed,
-                    $"Could not look up the earlier {pending.Asset} sell on {exchange.Name}: {e.Message}. Nothing is sold until it is found.");
+                    $"Could not look up the earlier sell of {Amount(pending.Amount)} {pending.Asset} on {exchange.Name}: {e.Message}. Nothing is sold until it is found.");
                 return false;
             }
             if (lookup is null)
@@ -287,9 +295,17 @@ public class ConvertService(ISweepSellRepository repository, SecretProtector pro
                 continue;
             }
             state.Pending.Remove(pending);
+            var orders = string.Join(", ", lookup.OrderIds);
+            if (lookup.ExecutedAmount <= 0)
+            {
+                // Closed without a fill: no buyer at the floor, canceled or expired. Nothing was sold, so selling may retry.
+                Record(storeId, state, pending.Asset, ActivityOutcome.Waiting,
+                    $"The earlier sell of {Amount(pending.Amount)} {pending.Asset} ({orders}) closed on {exchange.Name} without selling anything. It will be tried again.");
+                continue;
+            }
             state.AddSold(clock.GetUtcNow(), lookup.ExecutedAmount * pending.ReferencePrice);
             Record(storeId, state, pending.Asset, ActivityOutcome.Sold,
-                $"Found the earlier sell on {exchange.Name}: {Amount(lookup.ExecutedAmount)} {pending.Asset} sold for {pending.TargetAsset} ({string.Join(", ", lookup.OrderIds)}).");
+                $"Found the earlier sell on {exchange.Name}: {Amount(lookup.ExecutedAmount)} of {Amount(pending.Amount)} {pending.Asset} sold for {pending.TargetAsset} ({orders}).");
         }
         return state.Pending.Count == 0;
     }
@@ -298,11 +314,8 @@ public class ConvertService(ISweepSellRepository repository, SecretProtector pro
     /// Drops a pending order the owner has checked on the exchange themselves. Waits for a running job of the store,
     /// so the removal can't be overwritten by it. False when there is no such order.
     /// </summary>
-    public async Task<bool> RemovePendingAsync(string storeId, Guid clientOrderId, CancellationToken cancellationToken)
-    {
-        var storeLock = StoreLocks.GetOrAdd(storeId, _ => new SemaphoreSlim(1, 1));
-        await storeLock.WaitAsync(cancellationToken);
-        try
+    public Task<bool> RemovePendingAsync(string storeId, Guid clientOrderId, CancellationToken cancellationToken) =>
+        WithStoreLockAsync(storeId, async () =>
         {
             var state = await repository.GetConvertStateAsync(storeId);
             var pending = state.Pending.FirstOrDefault(p => p.ClientOrderId == clientOrderId);
@@ -313,12 +326,24 @@ public class ConvertService(ISweepSellRepository repository, SecretProtector pro
                 $"The pending sell of {Amount(pending.Amount)} {pending.Asset} (client order {clientOrderId:D}) was removed by hand. Selling resumes.");
             await repository.SaveConvertStateAsync(storeId, state);
             return true;
+        }, cancellationToken);
+
+    /// <summary>Runs <paramref name="action"/> while no convert job of the store runs, waiting for one in progress to end.</summary>
+    public async Task<T> WithStoreLockAsync<T>(string storeId, Func<Task<T>> action, CancellationToken cancellationToken)
+    {
+        var storeLock = StoreLock(storeId);
+        await storeLock.WaitAsync(cancellationToken);
+        try
+        {
+            return await action();
         }
         finally
         {
             storeLock.Release();
         }
     }
+
+    static SemaphoreSlim StoreLock(string storeId) => StoreLocks.GetOrAdd(storeId, _ => new SemaphoreSlim(1, 1));
 
     void Record(string storeId, ConvertState state, string? asset, ActivityOutcome outcome, string message)
     {

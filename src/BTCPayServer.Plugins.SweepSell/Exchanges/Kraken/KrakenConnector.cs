@@ -363,9 +363,21 @@ public class KrakenConnector(HttpClient http) : IExchangeConnector
         if (json["error"] is not JArray errors)
             throw new ExchangeException($"Kraken answered HTTP {(int)response.StatusCode} without an error list.");
         if (errors.Count > 0)
-            throw new ExchangeException("Kraken: " + string.Join("; ", errors.Select(e => e.ToString())));
+        {
+            var texts = errors.Select(e => e.ToString()).ToList();
+            throw new ExchangeException("Kraken: " + string.Join("; ", texts), rejected: response.IsSuccessStatusCode && texts.All(IsRejection));
+        }
         return json["result"] ?? throw new ExchangeException($"Kraken answered HTTP {(int)response.StatusCode} without a result.");
     }
+
+    // Errors Kraken returns when it refused a request without acting on it. EService errors and EGeneral:Internal error
+    // can come after an order was accepted, and anything unlisted is unknown, so those never count as refusals.
+    static readonly string[] RejectionPrefixes = ["EOrder:", "EAPI:", "EQuery:", "EGeneral:Invalid arguments", "EGeneral:Permission denied"];
+
+    static bool IsRejection(string error) =>
+        RejectionPrefixes.Any(p => error.StartsWith(p, StringComparison.Ordinal)) &&
+        // A duplicate means an order with that ID already exists.
+        !error.Contains("duplicate", StringComparison.OrdinalIgnoreCase);
 
     /// <summary>Kraken wants every nonce of a key larger than the last; microseconds, never repeated in this process.</summary>
     static long NextNonce()

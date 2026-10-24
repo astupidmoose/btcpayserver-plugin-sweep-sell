@@ -1,3 +1,4 @@
+using BTCPayServer.Plugins.SweepSell.Conversion;
 using BTCPayServer.Plugins.SweepSell.Controllers;
 using BTCPayServer.Plugins.SweepSell.Exchanges;
 using BTCPayServer.Plugins.SweepSell.Exchanges.Kraken;
@@ -114,19 +115,58 @@ public class SettingsTests
             Assert.Contains(errors, e => e.Field == errorField);
     }
 
-    [Theory]
-    [InlineData(0, "other", null, false, false)] // nothing pending: anything goes
-    [InlineData(1, "kraken", null, false, false)] // pending, settings unchanged
-    [InlineData(1, "other", null, false, true)] // pending, exchange changes
-    [InlineData(1, "kraken", "new-key", false, true)] // pending, new key typed
-    [InlineData(1, "other", "new-key", true, false)] // removing the key is never blocked
-    public void PendingOrdersBlockExchangeAndKeyChanges(int pending, string exchangeId, string? apiKey, bool clear, bool blocked)
+    static PendingOrder PendingWith(string exchangeId, string apiKey) => new()
     {
-        var conflict = UISweepSellController.PendingConflict(Saved(), new SweepSellSettingsViewModel
+        ClientOrderId = Guid.NewGuid(),
+        ExchangeId = exchangeId,
+        KeyFingerprint = new ExchangeCredentials(apiKey, "unused").Fingerprint(),
+        Asset = "DOGE",
+        TargetAsset = "BTC",
+        Amount = 300m
+    };
+
+    [Theory]
+    [InlineData(false, "kraken", "new-key", false)] // nothing pending: anything goes
+    [InlineData(true, "kraken", null, false)] // settings saved with the same key
+    [InlineData(true, "kraken", "old-key", false)] // the original key typed again, e.g. after removing it
+    [InlineData(true, "kraken", "new-key", true)] // another key can't look the order up
+    [InlineData(true, "other", "old-key", true)] // nor can the same key name on another exchange
+    public void PendingOrdersAllowOnlyTheirOwnKey(bool pending, string exchangeId, string? apiKey, bool blocked)
+    {
+        var updated = UISweepSellController.Apply(Saved(), new SweepSellSettingsViewModel
         {
-            ExchangeId = exchangeId, ApiKey = apiKey, ApiSecret = apiKey is null ? null : "new-secret", ClearCredentials = clear
-        }, pending);
-        Assert.Equal(blocked, conflict is not null);
+            ExchangeId = exchangeId, ApiKey = apiKey, ApiSecret = apiKey is null ? null : "a-secret"
+        }, Protector);
+        PendingOrder[] orders = pending ? [PendingWith("kraken", "old-key")] : [];
+        Assert.Equal(blocked, UISweepSellController.PendingConflict(updated, orders, Protector) is not null);
+    }
+
+    [Theory]
+    [InlineData(true, false)]
+    [InlineData(false, true)]
+    public void SavesWithoutAKeyAreNeverBlockedByPendingOrders(bool clear, bool switchExchange)
+    {
+        // Removing the key, or switching exchange (which forgets it), leaves nothing to look orders up with.
+        var updated = UISweepSellController.Apply(Saved(), new SweepSellSettingsViewModel
+        {
+            ExchangeId = switchExchange ? "other" : "kraken", ClearCredentials = clear
+        }, Protector);
+        Assert.False(UISweepSellController.KeyChanges(Saved(), updated));
+        Assert.Null(UISweepSellController.PendingConflict(updated, [PendingWith("kraken", "old-key")], Protector));
+    }
+
+    [Theory]
+    [InlineData(null, false)] // pausing or other settings
+    [InlineData("old-key", true)] // retyped: checked again, and allowed
+    [InlineData("new-key", true)]
+    public void KeyChangesAreDetected(string? apiKey, bool changes)
+    {
+        var saved = Saved();
+        var updated = UISweepSellController.Apply(saved, new SweepSellSettingsViewModel
+        {
+            ExchangeId = "kraken", Paused = true, ApiKey = apiKey, ApiSecret = apiKey is null ? null : "a-secret"
+        }, Protector);
+        Assert.Equal(changes, UISweepSellController.KeyChanges(saved, updated));
     }
 
     [Theory]

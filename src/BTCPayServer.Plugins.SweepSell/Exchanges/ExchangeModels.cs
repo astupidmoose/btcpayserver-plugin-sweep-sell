@@ -101,5 +101,12 @@ public sealed record CredentialsCheck(IReadOnlyList<PermissionCheck> Checks)
     public bool AllOk => Checks.All(c => c.Ok);
 }
 
-/// <summary>An error the exchange returned, with its own message (never containing credentials).</summary>
-public class ExchangeException(string message) : Exception(message);
+/// <summary>
+/// An error the exchange returned, with its own message (never containing credentials). <see cref="Rejected"/> means the
+/// exchange answered and refused the request without acting on it, e.g. an order refused for insufficient funds. It is
+/// false whenever the outcome is unknown: a timeout, a server error, or an answer that can't be read.
+/// </summary>
+public class ExchangeException(string message, bool rejected = false) : Exception(message)
+{
+    public bool Rejected { get; } = rejected;
+}
