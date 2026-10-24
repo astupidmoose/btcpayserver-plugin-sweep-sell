@@ -9,6 +9,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using BTCPayServer.Plugins.SweepSell.Exchanges;
 using BTCPayServer.Plugins.SweepSell.Settings;
+using BTCPayServer.Plugins.SweepSell.Sweeping;
 using Microsoft.Extensions.Logging;
 
 namespace BTCPayServer.Plugins.SweepSell.Conversion;
@@ -31,11 +32,8 @@ public enum ConvertRunResult
 public class ConvertService(ISweepSellRepository repository, SecretProtector protector, ExchangeRegistry exchanges,
     TimeProvider clock, ILogger<ConvertService> logger)
 {
-    /// <summary>
-    /// How long an order the exchange has no record of stays pending before it counts as never placed. Connectors make
-    /// live orders expire well before this (see <see cref="IExchangeConnector.SellAsync"/>).
-    /// </summary>
-    public static readonly TimeSpan PendingGrace = TimeSpan.FromMinutes(5);
+    /// <summary>How long an order the exchange has no record of stays pending before it counts as never placed.</summary>
+    public static TimeSpan PendingGrace => PendingOrders.Grace;
 
     /// <summary>How many stores convert at the same time, so one slow exchange doesn't hold up the others.</summary>
     public const int MaxParallelStores = 4;
@@ -132,6 +130,9 @@ public class ConvertService(ISweepSellRepository repository, SecretProtector pro
         }
 
         var target = convert.TargetAsset;
+        // What this run's dry-run checks would have sold, so the cap applies across assets as in a live run.
+        // By UTC day, like the live totals: a dry run that crosses midnight gets the new day's cap.
+        var simulated = new DailyTotals();
         var slippage = Math.Clamp(convert.MaxSlippagePercent, ConvertSettings.MinSlippageLimit, ConvertSettings.MaxSlippageLimit) / 100m;
         foreach (var asset in convert.Assets.Where(a => !string.Equals(a, target, StringComparison.OrdinalIgnoreCase)))
         {
@@ -158,7 +159,7 @@ public class ConvertService(ISweepSellRepository repository, SecretProtector pro
                 var wanted = available;
                 if (convert.DailyCap > 0)
                 {
-                    var left = convert.DailyCap - state.SoldOn(clock.GetUtcNow(), target);
+                    var left = convert.DailyCap - state.SoldOn(clock.GetUtcNow(), target) - simulated.On(clock.GetUtcNow(), target);
                     if (left <= 0)
                     {
                         Record(storeId, state, asset, ActivityOutcome.Waiting,
@@ -188,6 +189,7 @@ public class ConvertService(ISweepSellRepository repository, SecretProtector pro
                 try
                 {
                     var check = await exchange.SellAsync(credentials, asset, target, amount, limitPrice, Guid.NewGuid(), validateOnly: true, cancellationToken);
+                    simulated.Add(clock.GetUtcNow(), target, amount * reference);
                     Record(storeId, state, asset, ActivityOutcome.DryRun,
                         $"Dry run: would sell up to {Amount(amount)} {asset} for {target} at {Amount(limitPrice)} or better ({check.Description}). {exchange.Name} accepted the order check; nothing was sold.");
                 }
@@ -207,8 +209,7 @@ public class ConvertService(ISweepSellRepository repository, SecretProtector pro
                 Asset = asset,
                 TargetAsset = target,
                 Amount = amount,
-                ReferencePrice = reference,
-                SentAt = clock.GetUtcNow()
+                ReferencePrice = reference
             };
             OrderResult result;
             // Settings saves take the same lock, so a pause, a new key or other changes saved during the run apply before
@@ -223,6 +224,8 @@ public class ConvertService(ISweepSellRepository repository, SecretProtector pro
                         "The settings changed during the run (paused, conversion or its options changed, or another key); nothing more is sent this run.");
                     return;
                 }
+                // Stamped once the lock is held, just before sending: the fill's day and the lookup grace count from here.
+                pending.SentAt = clock.GetUtcNow();
                 state.Pending.Add(pending);
                 await repository.SaveConvertStateAsync(storeId, state);
                 try
@@ -250,6 +253,8 @@ public class ConvertService(ISweepSellRepository repository, SecretProtector pro
                 settingsLock.Release();
             }
             pending.OrderIds = result.OrderIds.ToList();
+            // Saved straight away: once the exchange confirmed the order, a restart must never treat it as unplaced.
+            await repository.SaveConvertStateAsync(storeId, state);
 
             // An immediate-or-cancel order closes straight away; look up how much filled, for the record and the cap.
             OrderLookup? fill = null;
@@ -272,6 +277,11 @@ public class ConvertService(ISweepSellRepository repository, SecretProtector pro
                     $"Placed a sell of up to {Amount(amount)} {asset} for {target} at {Amount(limitPrice)} or better ({orders}). Waiting for {exchange.Name} to report it closed before selling more.");
                 return;
             }
+            if (PendingOrders.Implausible(fill, pending, exchange.Name) is { } bad)
+            {
+                Record(storeId, state, asset, ActivityOutcome.Failed, bad);
+                return;
+            }
             state.Pending.Remove(pending);
             if (fill.ExecutedAmount == 0)
             {
@@ -280,7 +290,7 @@ public class ConvertService(ISweepSellRepository repository, SecretProtector pro
             }
             else
             {
-                state.AddSold(pending.SentAt, target, fill.ExecutedAmount * reference);
+                state.AddSold(PendingOrders.CountedAt(pending, clock.GetUtcNow()), target, fill.ExecutedAmount * reference);
                 Record(storeId, state, asset, ActivityOutcome.Sold,
                     $"Sold {Amount(fill.ExecutedAmount)} of {Amount(amount)} {asset} for {target} at {Amount(limitPrice)} or better ({orders}).");
             }
@@ -288,74 +298,13 @@ public class ConvertService(ISweepSellRepository repository, SecretProtector pro
     }
 
     /// <summary>Looks up every pending order. True when none is left, so selling may continue.</summary>
-    async Task<bool> ReconcileAsync(string storeId, ConvertState state, IExchangeConnector exchange, ExchangeCredentials credentials,
-        CancellationToken cancellationToken)
-    {
-        var fingerprint = credentials.Fingerprint();
-        foreach (var pending in state.Pending.ToList())
-        {
-            if (pending.ExchangeId != exchange.Id || pending.KeyFingerprint != fingerprint)
-            {
-                // Another account would report no such order, and the order would wrongly count as never placed.
-                Record(storeId, state, pending.Asset, ActivityOutcome.Failed,
-                    $"The earlier sell of {Amount(pending.Amount)} {pending.Asset} (client order {pending.ClientOrderId:D}) was sent with a different exchange key, so it can't be checked with this one. " +
-                    "Put that key back, or check the order in your exchange yourself and then remove it under Pending orders. Nothing is sold until then.");
-                return false;
-            }
-            OrderLookup? lookup;
-            try
-            {
-                lookup = await exchange.FindOrderAsync(credentials, pending.ClientOrderId, cancellationToken);
-            }
-            catch (Exception e) when (IsRecordedFailure(e, cancellationToken))
-            {
-                Record(storeId, state, pending.Asset, ActivityOutcome.Failed,
-                    $"Could not look up the earlier sell of {Amount(pending.Amount)} {pending.Asset} on {exchange.Name}: {e.Message}. Nothing is sold until it is found.");
-                return false;
-            }
-            if (lookup is null)
-            {
-                if (pending.OrderIds.Count > 0)
-                {
-                    // The exchange confirmed this order, so it exists; it is never treated as unplaced and sold again.
-                    Record(storeId, state, pending.Asset, clock.GetUtcNow() - pending.SentAt < PendingGrace ? ActivityOutcome.Waiting : ActivityOutcome.Failed,
-                        $"The sell of {Amount(pending.Amount)} {pending.Asset} ({string.Join(", ", pending.OrderIds)}) was placed but {exchange.Name} doesn't list it. " +
-                        "If this lasts, check it in your exchange and remove it under Pending orders. Nothing is sold until then.");
-                    continue;
-                }
-                if (clock.GetUtcNow() - pending.SentAt < PendingGrace)
-                {
-                    Record(storeId, state, pending.Asset, ActivityOutcome.Waiting,
-                        $"The earlier {pending.Asset} sell isn't on {exchange.Name} yet. Checking again on the next run.");
-                    continue;
-                }
-                state.Pending.Remove(pending);
-                Record(storeId, state, pending.Asset, ActivityOutcome.Failed,
-                    $"The earlier sell of {Amount(pending.Amount)} {pending.Asset} was never placed on {exchange.Name}. It will be tried again.");
-                continue;
-            }
-            if (lookup.Open)
-            {
-                Record(storeId, state, pending.Asset, ActivityOutcome.Waiting,
-                    $"The earlier {pending.Asset} sell ({string.Join(", ", lookup.OrderIds)}) is still open on {exchange.Name}.");
-                continue;
-            }
-            state.Pending.Remove(pending);
-            var orders = string.Join(", ", lookup.OrderIds);
-            if (lookup.ExecutedAmount <= 0)
-            {
-                // Closed without a fill: no buyer at the floor, canceled or expired. Nothing was sold, so selling may retry.
-                Record(storeId, state, pending.Asset, ActivityOutcome.Waiting,
-                    $"The earlier sell of {Amount(pending.Amount)} {pending.Asset} ({orders}) closed on {exchange.Name} without selling anything. It will be tried again.");
-                continue;
-            }
-            // Counted on the day it was sent: an immediate-or-cancel order fills when it arrives, however late it is found.
-            state.AddSold(pending.SentAt, pending.TargetAsset, lookup.ExecutedAmount * pending.ReferencePrice);
-            Record(storeId, state, pending.Asset, ActivityOutcome.Sold,
-                $"Found the earlier sell on {exchange.Name}: {Amount(lookup.ExecutedAmount)} of {Amount(pending.Amount)} {pending.Asset} sold for {pending.TargetAsset} ({orders}).");
-        }
-        return state.Pending.Count == 0;
-    }
+    Task<bool> ReconcileAsync(string storeId, ConvertState state, IExchangeConnector exchange, ExchangeCredentials credentials,
+        CancellationToken cancellationToken) =>
+        PendingOrders.ReconcileAsync(state.Pending, exchange, credentials, clock.GetUtcNow(),
+            // Counted when it last could have filled, however late it is found.
+            (order, executed) => state.AddSold(PendingOrders.CountedAt(order, clock.GetUtcNow()), order.TargetAsset, executed * order.ReferencePrice),
+            (asset, outcome, message) => Record(storeId, state, asset, outcome, message),
+            e => IsRecordedFailure(e, cancellationToken), cancellationToken);
 
     /// <summary>
     /// Drops a pending order the owner has checked on the exchange themselves. Waits for a running job of the store,

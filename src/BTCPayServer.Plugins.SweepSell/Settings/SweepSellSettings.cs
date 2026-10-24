@@ -20,5 +20,7 @@ public class SweepSellSettings
 
     public SweepSettings Sweep { get; set; } = new();
 
+    public HedgeSettings Hedge { get; set; } = new();
+
     public bool HasCredentials => !string.IsNullOrEmpty(ProtectedApiKey) && !string.IsNullOrEmpty(ProtectedApiSecret);
 }

@@ -54,6 +54,17 @@ public class ConvertTests
     }
 
     [Fact]
+    public async Task ConfirmedOrderIdsAreSavedBeforeTheFillIsLookedUp()
+    {
+        Configure(assets: "DOGE");
+        _exchange.Balances["DOGE"] = 100m;
+        IReadOnlyList<string>? saved = null;
+        _exchange.OnFind = _ => saved = _repository.States[StoreId].Pending.Single().OrderIds;
+        await Service().RunAsync(StoreId, Ct);
+        Assert.Equal(["OAAAAA-BBBBB-CCCCCC"], saved); // a restart here would still know the order exists
+    }
+
+    [Fact]
     public async Task OrdersAreImmediateLimitsAtTheFloorBelowTheDailyAverage()
     {
         Configure(); // 2% default
@@ -100,6 +111,52 @@ public class ConvertTests
         await Service().RunAsync(StoreId, Ct);
         Assert.Contains("Sold 150 of 300 DOGE", State.Activity[0].Message);
         Assert.Equal(0.15m, State.SoldOn(_clock.GetUtcNow(), "BTC")); // 150 x 0.001
+    }
+
+    [Fact]
+    public async Task DryRunAppliesTheCapAcrossAssets()
+    {
+        Configure(dryRun: true);
+        _repository.Settings[StoreId].Convert.DailyCap = 0.1m; // 100 DOGE or 100 LTC at 0.001
+        _exchange.Balances["DOGE"] = 100m;
+        _exchange.Balances["LTC"] = 100m;
+        await Service().RunAsync(StoreId, Ct);
+        Assert.Equal([("DOGE", 100m)], _exchange.Orders.Select(o => (o.Base, o.Amount)));
+        Assert.Contains("Today's cap", State.Activity[0].Message);
+    }
+
+    [Fact]
+    public async Task ADryRunThatCrossesMidnightGetsTheNewDaysCap()
+    {
+        Configure(dryRun: true);
+        _repository.Settings[StoreId].Convert.DailyCap = 0.1m;
+        _exchange.Balances["DOGE"] = 100m;
+        _exchange.Balances["LTC"] = 100m;
+        _clock.Advance(TimeSpan.FromHours(23) + TimeSpan.FromMinutes(59)); // 23:59 UTC
+        var prices = 0;
+        _exchange.OnPrice = () =>
+        {
+            if (++prices == 2)
+                _clock.Advance(TimeSpan.FromMinutes(2)); // the second asset is checked after midnight
+        };
+        await Service().RunAsync(StoreId, Ct);
+        Assert.Equal([("DOGE", 100m), ("LTC", 100m)], _exchange.Orders.Select(o => (o.Base, o.Amount)));
+    }
+
+    [Fact]
+    public async Task ImpossibleFillsAreNeverCounted()
+    {
+        Configure();
+        _exchange.FillRatio = -1m;
+        _exchange.Balances["DOGE"] = 100m;
+        var service = Service();
+        await service.RunAsync(StoreId, Ct);
+        Assert.Single(State.Pending);
+        Assert.Contains("can't be right", State.Activity[0].Message);
+        await service.RunAsync(StoreId, Ct); // the lookup on the next run gets the same answer
+        Assert.Single(State.Pending);
+        Assert.Single(_exchange.Orders);
+        Assert.Equal(0m, State.SoldOn(_clock.GetUtcNow(), "BTC"));
     }
 
     [Fact]
@@ -545,6 +602,24 @@ public class ConvertTests
         await Service().RunAsync(StoreId, Ct);
         // Yesterday's sale doesn't use today's cap: today's 300 DOGE still sells.
         Assert.Equal(300m, Assert.Single(_exchange.Orders).Amount);
+        Assert.Equal(0.3m, State.SoldOn(_clock.GetUtcNow(), "BTC"));
+    }
+
+    [Fact]
+    public async Task FillOfAnOrderSentJustBeforeMidnightCountsOnTheNewDay()
+    {
+        Configure(assets: "DOGE");
+        _repository.Settings[StoreId].Convert.DailyCap = 0.3m;
+        _clock.Advance(TimeSpan.FromHours(24) - TimeSpan.FromSeconds(30)); // 23:59:30 UTC
+        var id = Guid.NewGuid();
+        var pending = Pending(id);
+        pending.ReferencePrice = 0.001m;
+        _repository.States[StoreId] = new ConvertState { Pending = [pending] };
+        _exchange.Found[id] = new OrderLookup(["OLATE0-NIGHT-ORDER1"], Open: false, ExecutedAmount: 300m);
+        _clock.Advance(TimeSpan.FromMinutes(5)); // found after midnight: it may have filled after it, so today's cap is used
+        _exchange.Balances["DOGE"] = 300m;
+        await Service().RunAsync(StoreId, Ct);
+        Assert.Empty(_exchange.Orders);
         Assert.Equal(0.3m, State.SoldOn(_clock.GetUtcNow(), "BTC"));
     }
 

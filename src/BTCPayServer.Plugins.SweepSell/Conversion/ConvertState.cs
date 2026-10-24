@@ -92,6 +92,12 @@ public class PendingOrder
 
     /// <summary>The exchange's IDs once it confirmed the order. A confirmed order exists, so it is never treated as unplaced.</summary>
     public List<string> OrderIds { get; set; } = [];
+
+    /// <summary>
+    /// Hedge sells only: when hedging was turned on for the invoices the order sold for. Its fill only counts against
+    /// invoices of that period, so an order outliving a turn off and on can't hedge invoices taken after it was sent.
+    /// </summary>
+    public DateTimeOffset? HedgeEnabledSince { get; set; }
 }
 
 public enum ActivityOutcome

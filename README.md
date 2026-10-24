@@ -3,7 +3,7 @@
 Sweep your store's wallets to your exchange and sell what comes in, automatically.
 
 > Early development. In place: the per-store settings page, encrypted exchange keys, the Kraken
-> connector, sweeping to the exchange and conversion at the exchange. Hedging comes next.
+> connector, sweeping, hedging on payment and conversion at the exchange.
 
 ## Features
 
@@ -21,11 +21,14 @@ Sweep your store's wallets to your exchange and sell what comes in, automaticall
   thin market can't take your coins cheaply. Optional daily cap. Starts in dry run, where each order
   is checked with the exchange but not placed. Every run is listed under Recent activity.
 
-## Planned features
-
-- **Hedge on payment:** when an invoice reaches the status you pick (Processing or Settled), sell the
-  BTC it brought in on your exchange straight away.
-- **Safety:** dry run for every feature, daily caps, a pause switch per store, and an activity log.
+- **Hedge on payment:** when an invoice reaches the status you pick (paid in full or settled), sell the
+  BTC it brought in on your exchange straight away, to lock in its price. Each invoice is hedged once,
+  into the market you choose per invoice currency (e.g. GBP invoices into CAD). Sells come from BTC
+  already on the exchange and never borrow; amounts below the minimum order wait until they add up.
+  Same price floor and optional daily cap as convert, and dry run by default. Invoices created before
+  hedging was turned on are never hedged.
+- **Safety:** dry run for every feature, daily caps, a pause switch per store, and an activity log for
+  each feature.
 
 ## Exchanges
 
