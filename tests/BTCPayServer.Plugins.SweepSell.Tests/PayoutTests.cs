@@ -489,6 +489,45 @@ public class PayoutTests
     }
 
     [Fact]
+    public async Task ANewKeyForTheSameAccountStillHoldsBackALongHeldWithdrawal()
+    {
+        Configure(minimum: 10m);
+        _exchange.Balance = 500m;
+        await Service().RunAsync(StoreId, Ct);
+        _clock.Advance(TimeSpan.FromMinutes(1));
+        await Service().RunAsync(StoreId, Ct); // listed, still in progress
+        Assert.Single(State.Unsettled);
+
+        // The owner rotates the payout key (same exchange account), and the withdrawal stays on hold past the usual history.
+        _payouts.Settings[StoreId].ProtectedApiKey = Protector.Protect("test-rotated-payout-key");
+        _exchange.Balance = 500m;
+        _clock.Advance(PayoutService.History + TimeSpan.FromDays(1));
+        await Service().RunAsync(StoreId, Ct);
+        Assert.Single(_exchange.Withdrawals);
+        Assert.Contains("500 in withdrawals still in progress", State.Activity[0].Message);
+    }
+
+    [Fact]
+    public async Task AWithdrawalAnotherAccountsKeyDoesntListHoldsNothingBack()
+    {
+        Configure(minimum: 10m);
+        _exchange.Balance = 500m;
+        await Service().RunAsync(StoreId, Ct);
+        _clock.Advance(TimeSpan.FromMinutes(1));
+        await Service().RunAsync(StoreId, Ct);
+        Assert.Single(State.Unsettled);
+
+        // A key for another account on the same exchange: its list doesn't have the withdrawal, and its balance never held it.
+        _payouts.Settings[StoreId].ProtectedApiKey = Protector.Protect("test-other-account-key");
+        _exchange.Records.Clear();
+        _exchange.Balance = 300m;
+        _clock.Advance(TimeSpan.FromDays(1));
+        await Service().RunAsync(StoreId, Ct);
+        Assert.Equal(300m, _exchange.Withdrawals[1].Amount);
+        Assert.DoesNotContain(State.Unsettled, u => u.Reference == "REF-1");
+    }
+
+    [Fact]
     public async Task ATradingKeySavedDuringTheRunIsCheckedBeforeWithdrawing()
     {
         Configure();
