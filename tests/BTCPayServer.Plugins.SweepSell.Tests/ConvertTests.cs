@@ -88,7 +88,7 @@ public class ConvertTests
         Assert.Single(_exchange.Orders);
         Assert.Equal(ActivityOutcome.Waiting, State.Activity[0].Outcome);
         Assert.Contains("No buyer", State.Activity[0].Message);
-        Assert.Equal(0m, State.SoldOn(_clock.GetUtcNow()));
+        Assert.Equal(0m, State.SoldOn(_clock.GetUtcNow(), "BTC"));
     }
 
     [Fact]
@@ -99,7 +99,7 @@ public class ConvertTests
         _exchange.Balances["DOGE"] = 300m;
         await Service().RunAsync(StoreId, Ct);
         Assert.Contains("Sold 150 of 300 DOGE", State.Activity[0].Message);
-        Assert.Equal(0.15m, State.SoldOn(_clock.GetUtcNow())); // 150 x 0.001
+        Assert.Equal(0.15m, State.SoldOn(_clock.GetUtcNow(), "BTC")); // 150 x 0.001
     }
 
     [Fact]
@@ -123,16 +123,123 @@ public class ConvertTests
         Assert.Equal(100m, _exchange.Orders[1].Amount);
     }
 
-    [Fact]
-    public async Task UnknownFillCountsTheWholeOrderAgainstTheCap()
+    [Theory]
+    [InlineData(false)] // not listed yet
+    [InlineData(true)] // listed, still open
+    public async Task PlacedOrderStaysPendingUntilItCloses(bool listedOpen)
     {
         Configure();
         _repository.Settings[StoreId].Convert.DailyCap = 1m;
         _exchange.FillUnknown = true;
+        _exchange.OnSell = () =>
+        {
+            if (listedOpen)
+                _exchange.Found[_exchange.Orders[^1].Id] = new OrderLookup(["OAAAAA-BBBBB-CCCCCC"], Open: true, ExecutedAmount: 0m);
+        };
         _exchange.Balances["DOGE"] = 300m;
+        _exchange.Balances["LTC"] = 2m;
         await Service().RunAsync(StoreId, Ct);
-        Assert.Equal(0.3m, State.SoldOn(_clock.GetUtcNow()));
-        Assert.Contains("isn't known yet", State.Activity[0].Message);
+        // LTC waits: the DOGE order's final fill must be counted against the cap first.
+        Assert.Single(_exchange.Orders);
+        var pending = Assert.Single(State.Pending);
+        Assert.Equal(["OAAAAA-BBBBB-CCCCCC"], pending.OrderIds);
+        Assert.Contains("Waiting for Fake Exchange to report it closed", State.Activity[0].Message);
+
+        // It closes; the next run counts the fill and moves on.
+        _exchange.OnSell = null;
+        _exchange.FillUnknown = false;
+        _exchange.Found[pending.ClientOrderId] = new OrderLookup(["OAAAAA-BBBBB-CCCCCC"], Open: false, ExecutedAmount: 300m);
+        _exchange.Balances.Remove("DOGE");
+        _clock.Advance(TimeSpan.FromMinutes(15));
+        await Service().RunAsync(StoreId, Ct);
+        Assert.Empty(State.Pending);
+        Assert.Equal(2, _exchange.Orders.Count);
+        Assert.Equal("LTC", _exchange.Orders[1].Base);
+    }
+
+    [Fact]
+    public async Task ConfirmedOrderIsNeverTreatedAsUnplaced()
+    {
+        Configure();
+        var id = Guid.NewGuid();
+        var pending = Pending(id);
+        pending.OrderIds = ["OAAAAA-BBBBB-CCCCCC"];
+        _repository.States[StoreId] = new ConvertState { Pending = [pending] };
+        _exchange.Balances["DOGE"] = 300m;
+        _clock.Advance(TimeSpan.FromHours(1)); // well past the grace period, and the exchange doesn't list it
+        await Service().RunAsync(StoreId, Ct);
+        Assert.Empty(_exchange.Orders);
+        Assert.Single(State.Pending);
+        Assert.Equal(ActivityOutcome.Failed, State.Activity[0].Outcome);
+        Assert.Contains("was placed but", State.Activity[0].Message);
+    }
+
+    [Fact]
+    public async Task CapIsCountedInTheAssetItWasSoldFor()
+    {
+        Configure(assets: "DOGE");
+        _repository.Settings[StoreId].Convert.DailyCap = 0.1m;
+        _exchange.Balances["DOGE"] = 100m;
+        await Service().RunAsync(StoreId, Ct);
+        Assert.Equal(0.1m, State.SoldOn(_clock.GetUtcNow(), "BTC"));
+
+        // Switched to another target the same day: BTC sold isn't mistaken for the new asset, and BTC's total is kept.
+        _repository.Settings[StoreId].Convert.TargetAsset = "ETH";
+        _repository.Settings[StoreId].Convert.DailyCap = 2m;
+        _exchange.Balances["DOGE"] = 100m;
+        _clock.Advance(TimeSpan.FromMinutes(15));
+        await Service().RunAsync(StoreId, Ct);
+        Assert.Equal(0.1m, State.SoldOn(_clock.GetUtcNow(), "ETH"));
+        Assert.Equal(0.1m, State.SoldOn(_clock.GetUtcNow(), "BTC"));
+    }
+
+    [Fact]
+    public async Task RemovingAPendingOrderByHandCountsItAgainstTheCap()
+    {
+        Configure(assets: "DOGE");
+        _repository.Settings[StoreId].Convert.DailyCap = 0.4m;
+        var id = Guid.NewGuid();
+        var pending = Pending(id, apiKey: "earlier-api-key");
+        pending.ReferencePrice = 0.001m;
+        _repository.States[StoreId] = new ConvertState { Pending = [pending] };
+        var service = Service();
+        Assert.True(await service.RemovePendingAsync(StoreId, id, Ct));
+        Assert.Equal(0.3m, State.SoldOn(_clock.GetUtcNow(), "BTC")); // 300 DOGE at 0.001, whatever it sold
+
+        _exchange.Balances["DOGE"] = 300m;
+        await service.RunAsync(StoreId, Ct);
+        Assert.Equal(100m, Assert.Single(_exchange.Orders).Amount); // only what is left of the cap
+    }
+
+    [Fact]
+    public async Task OneSlowStoreDoesNotHoldUpTheOthers()
+    {
+        Configure(assets: "DOGE");
+        _repository.Settings["other-store"] = new SweepSellSettings
+        {
+            ExchangeId = FakeExchange.ExchangeId,
+            ProtectedApiKey = Protector.Protect("test-api-key"),
+            ProtectedApiSecret = Protector.Protect("test-api-secret"),
+            Convert = new ConvertSettings { Enabled = true, DryRun = false, Assets = ["LTC"], TargetAsset = "BTC", IntervalMinutes = 15 }
+        };
+        _exchange.Balances["DOGE"] = 300m;
+        _exchange.Balances["LTC"] = 2m;
+        var gate = new TaskCompletionSource();
+        _exchange.SellGates["DOGE"] = gate.Task;
+        var run = Service().RunDueAsync(Ct);
+        try
+        {
+            while (!_repository.States.TryGetValue("other-store", out var other) || other.LastRun is null || other.Activity.Count == 0)
+                await Task.Delay(10, Ct);
+            Assert.False(run.IsCompleted);
+            Assert.Contains(_repository.States["other-store"].Activity, a => a.Outcome == ActivityOutcome.Sold && a.Asset == "LTC");
+        }
+        finally
+        {
+            gate.TrySetResult(); // never leave the store's job holding its lock
+        }
+        await run;
+        Assert.Contains(State.Activity, a => a.Outcome == ActivityOutcome.Sold && a.Asset == "DOGE");
     }
 
     [Fact]
@@ -313,7 +420,7 @@ public class ConvertTests
         _exchange.Found[id] = new OrderLookup(["OPARTI-ALFIL-LORDER"], Open: false, ExecutedAmount: 120m);
         await Service().RunAsync(StoreId, Ct);
         Assert.Contains(State.Activity, a => a.Outcome == ActivityOutcome.Sold && a.Message.Contains("120 of 300 DOGE"));
-        Assert.Equal(0.12m, State.SoldOn(_clock.GetUtcNow()));
+        Assert.Equal(0.12m, State.SoldOn(_clock.GetUtcNow(), "BTC"));
     }
 
     [Fact]
@@ -363,20 +470,27 @@ public class ConvertTests
         Configure(assets: "DOGE");
         _exchange.Balances["DOGE"] = 300m;
         var gate = new TaskCompletionSource();
-        _exchange.SellGate = gate.Task;
+        _exchange.SellGates["DOGE"] = gate.Task;
         var service = Service();
         var run = service.RunAsync(StoreId, Ct);
-        while (_exchange.Orders.Count == 0)
-            await Task.Delay(10, Ct);
         var pendingSeen = -1;
-        var locked = service.WithStoreLockAsync(StoreId, async () =>
+        Task<bool> locked;
+        try
         {
-            pendingSeen = (await _repository.GetConvertStateAsync(StoreId)).Pending.Count;
-            return true;
-        }, Ct);
-        await Task.Delay(50, Ct);
-        Assert.False(locked.IsCompleted);
-        gate.SetResult();
+            while (_exchange.Orders.Count == 0)
+                await Task.Delay(10, Ct);
+            locked = service.WithStoreLockAsync(StoreId, async () =>
+            {
+                pendingSeen = (await _repository.GetConvertStateAsync(StoreId)).Pending.Count;
+                return true;
+            }, Ct);
+            await Task.Delay(50, Ct);
+            Assert.False(locked.IsCompleted);
+        }
+        finally
+        {
+            gate.TrySetResult(); // never leave the store's job holding its lock
+        }
         Assert.Equal(ConvertRunResult.Ran, await run);
         await locked;
         Assert.Equal(0, pendingSeen); // ran after the order was settled, never in between
@@ -429,6 +543,21 @@ public class ConvertTests
         Assert.Equal($"sale {ConvertState.MaxActivity + 9}", state.Activity[0].Message);
     }
 
+    [Fact]
+    public void SeveralCoinsWaitingDoNotPushOutHistory()
+    {
+        var state = new ConvertState();
+        state.Add(new ActivityEntry { Asset = "DOGE", Outcome = ActivityOutcome.Sold, Message = "sold" });
+        for (var i = 0; i < ConvertState.MaxActivity * 2; i++)
+        {
+            state.Add(new ActivityEntry { At = DateTimeOffset.UnixEpoch.AddMinutes(i), Asset = "LTC", Outcome = ActivityOutcome.Waiting, Message = "below minimum" });
+            state.Add(new ActivityEntry { At = DateTimeOffset.UnixEpoch.AddMinutes(i), Asset = "XRP", Outcome = ActivityOutcome.Waiting, Message = "bid too low" });
+        }
+        Assert.Equal(3, state.Activity.Count);
+        Assert.Equal(["XRP", "LTC", "DOGE"], state.Activity.Select(a => a.Asset));
+        Assert.Equal(DateTimeOffset.UnixEpoch.AddMinutes(ConvertState.MaxActivity * 2 - 1), state.Activity[0].At);
+    }
+
     sealed class ManualClock(DateTimeOffset now) : TimeProvider
     {
         DateTimeOffset _now = now;
@@ -438,8 +567,8 @@ public class ConvertTests
 
     sealed class MemoryRepository : ISweepSellRepository
     {
-        public Dictionary<string, SweepSellSettings> Settings { get; } = new();
-        public Dictionary<string, ConvertState> States { get; } = new();
+        public System.Collections.Concurrent.ConcurrentDictionary<string, SweepSellSettings> Settings { get; } = new();
+        public System.Collections.Concurrent.ConcurrentDictionary<string, ConvertState> States { get; } = new();
 
         public Task<SweepSellSettings> GetAsync(string storeId) => Task.FromResult(Settings.GetValueOrDefault(storeId) ?? new SweepSellSettings());
         public Task SaveAsync(string storeId, SweepSellSettings settings) { Settings[storeId] = settings; return Task.CompletedTask; }
@@ -476,7 +605,8 @@ public class ConvertTests
         public List<string> Calls { get; } = [];
         public Exception? BalanceError { get; set; }
         public Action? OnSell { get; set; }
-        public Task SellGate { get; set; } = Task.CompletedTask;
+        /// <summary>Sells of a coin listed here wait for its task.</summary>
+        public System.Collections.Concurrent.ConcurrentDictionary<string, Task> SellGates { get; } = new();
         public Exception? FindError { get; set; }
 
         public Task<IReadOnlyDictionary<string, decimal>> GetAvailableBalancesAsync(ExchangeCredentials credentials, CancellationToken cancellationToken)
@@ -495,9 +625,12 @@ public class ConvertTests
         public async Task<OrderResult> SellAsync(ExchangeCredentials credentials, string baseAsset, string quoteAsset, decimal amount, decimal limitPrice,
             Guid clientOrderId, bool validateOnly, CancellationToken cancellationToken)
         {
-            Calls.Add("sell");
-            Orders.Add((baseAsset, quoteAsset, amount, validateOnly, clientOrderId, limitPrice));
-            await SellGate;
+            lock (Orders)
+            {
+                Calls.Add("sell");
+                Orders.Add((baseAsset, quoteAsset, amount, validateOnly, clientOrderId, limitPrice));
+            }
+            await SellGates.GetValueOrDefault(baseAsset, Task.CompletedTask);
             OnSell?.Invoke();
             if (!validateOnly && !FillUnknown)
                 Found[clientOrderId] = new OrderLookup(["OAAAAA-BBBBB-CCCCCC"], Open: false, ExecutedAmount: amount * FillRatio);
