@@ -173,6 +173,12 @@ public class SweepService(ISweepSellRepository repository, SecretProtector prote
         {
             if (earlier is not null && !await SettlePendingAsync(storeId, state, earlier, cancellationToken))
                 return;
+            if (state.Stopped.TryGetValue(code.ToUpperInvariant(), out var stopped))
+            {
+                Record(storeId, state, code, ActivityOutcome.Waiting,
+                    $"Sweeping {code} is stopped since the exchange failed or returned the deposit of {stopped.Txid}. Resume it under Stopped coins once that is sorted out.");
+                return;
+            }
             if (wallet is null)
             {
                 Record(storeId, state, code, ActivityOutcome.Failed, $"This store has no {code} on-chain wallet to sweep.");
@@ -396,8 +402,10 @@ public class SweepService(ISweepSellRepository repository, SecretProtector prote
                 Txid = pending.Txid,
                 Amount = pending.ToExchange,
                 ExchangeId = pending.ExchangeId,
-                // Watched from when it is known sent, so a sweep settled late still gets the full watch.
-                SentAt = now
+                // Watched from when it is known sent, so a sweep settled late still gets the full watch, but searched for
+                // from when it was signed: a broadcast found late may have been credited long before.
+                SentAt = now,
+                SignedAt = pending.CreatedAt
             });
         }
         Record(storeId, state, pending.CryptoCode, ActivityOutcome.Sent, $"Sent {what} ({pending.Txid}).");
@@ -465,12 +473,14 @@ public class SweepService(ISweepSellRepository repository, SecretProtector prote
                     {
                         try
                         {
-                            status = await exchange.FindDepositAsync(credentials, awaiting.Asset, awaiting.Txid, awaiting.SentAt, cancellationToken);
+                            status = await exchange.FindDepositAsync(credentials, awaiting.Asset, awaiting.Txid, awaiting.SignedAt ?? awaiting.SentAt, cancellationToken);
                         }
                         catch (Exception e) when (IsRecordedFailure(e, cancellationToken))
                         {
+                            // Never expired on a failed check: the deposit may be credited, and is converted once the check works.
                             Record(storeId, state, awaiting.Asset, ActivityOutcome.Failed,
                                 $"Could not check the {Amount(awaiting.Amount)} {awaiting.Asset} deposit ({awaiting.Txid}) on {exchange.Name}: {e.Message}. Trying again in a minute.");
+                            continue;
                         }
                     }
                     switch (status?.State)
@@ -483,8 +493,11 @@ public class SweepService(ISweepSellRepository repository, SecretProtector prote
                             break;
                         case DepositState.Failed:
                             state.Awaiting.Remove(awaiting);
+                            // Funds sent back would land in the hot wallet and be swept straight back, again and again.
+                            state.Stopped[awaiting.Asset.ToUpperInvariant()] = new StoppedSweep { Txid = awaiting.Txid, At = now };
                             Record(storeId, state, awaiting.Asset, ActivityOutcome.Failed,
-                                $"{exchange!.Name} reports the {Amount(awaiting.Amount)} {awaiting.Asset} deposit ({awaiting.Txid}) as failed or being returned. Contact {exchange.Name} about it.");
+                                $"{exchange!.Name} reports the {Amount(awaiting.Amount)} {awaiting.Asset} deposit ({awaiting.Txid}) as failed or being returned. " +
+                                $"Sweeping {awaiting.Asset} is stopped so returned funds aren't sent straight back. Contact {exchange.Name} about it, then resume {awaiting.Asset} under Stopped coins.");
                             break;
                         default:
                             if (now - awaiting.SentAt >= DepositWatchLimit)
@@ -553,16 +566,38 @@ public class SweepService(ISweepSellRepository repository, SecretProtector prote
         }
     }
 
+    /// <summary>The owner resumes sweeping a coin stopped by a failed deposit. False when it isn't stopped.</summary>
+    public async Task<bool> ResumeCoinAsync(string storeId, string cryptoCode, CancellationToken cancellationToken)
+    {
+        var storeLock = StoreLock(storeId);
+        await storeLock.WaitAsync(cancellationToken);
+        try
+        {
+            var state = await repository.GetSweepStateAsync(storeId);
+            if (!state.Stopped.Remove(cryptoCode.ToUpperInvariant()))
+                return false;
+            Record(storeId, state, cryptoCode.ToUpperInvariant(), ActivityOutcome.Changed, $"Sweeping {cryptoCode.ToUpperInvariant()} was resumed by hand after a failed deposit.");
+            await repository.SaveSweepStateAsync(storeId, state);
+            return true;
+        }
+        finally
+        {
+            storeLock.Release();
+        }
+    }
+
     /// <summary>
     /// Writes a change to where sweeps go (cold wallet or its share) to the sweep activity, so a changed destination is
     /// visible to everyone who manages the store, not only to whoever changed it.
     /// </summary>
     public async Task RecordDestinationChangesAsync(string storeId, SweepSettings before, SweepSettings after, CancellationToken cancellationToken)
     {
-        var changes = after.Rules
-            .Select(rule => (rule, old: before.Rules.FirstOrDefault(r => string.Equals(r.CryptoCode, rule.CryptoCode, StringComparison.OrdinalIgnoreCase))))
-            .Where(c => (c.old?.ColdDestination ?? "") != (c.rule.ColdDestination ?? "") || (c.old?.ColdPercent ?? 0) != c.rule.ColdPercent ||
-                        (c.old?.ColdStartIndex ?? 0) != c.rule.ColdStartIndex)
+        // Every coin in either version: a rule left out of the save is removed, and its cold wallet with it.
+        static SweepRule? Find(SweepSettings settings, string code) =>
+            settings.Rules.FirstOrDefault(r => string.Equals(r.CryptoCode, code, StringComparison.OrdinalIgnoreCase));
+        var changes = before.Rules.Concat(after.Rules).Select(r => r.CryptoCode.ToUpperInvariant()).Distinct().Order(StringComparer.Ordinal)
+            .Select(code => (code, old: Find(before, code), rule: Find(after, code)))
+            .Where(c => Destination(c.old) != Destination(c.rule))
             .ToList();
         if (changes.Count == 0)
             return;
@@ -571,11 +606,8 @@ public class SweepService(ISweepSellRepository repository, SecretProtector prote
         try
         {
             var state = await repository.GetSweepStateAsync(storeId);
-            foreach (var (rule, old) in changes)
-            {
-                Record(storeId, state, rule.CryptoCode, ActivityOutcome.Changed,
-                    $"Cold wallet changed from {Destination(old)} to {Destination(rule)}.");
-            }
+            foreach (var (code, old, rule) in changes)
+                Record(storeId, state, code, ActivityOutcome.Changed, $"Cold wallet changed from {Destination(old)} to {Destination(rule)}.");
             await repository.SaveSweepStateAsync(storeId, state);
         }
         finally

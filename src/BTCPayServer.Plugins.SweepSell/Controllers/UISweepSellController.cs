@@ -228,6 +228,20 @@ public class UISweepSellController(ISweepSellRepository repository, SecretProtec
         return RedirectToAction(nameof(Settings), new { storeId });
     }
 
+    [HttpPost("sweep/stopped/{cryptoCode}/resume")]
+    public async Task<IActionResult> ResumeSweep(string storeId, string cryptoCode, CancellationToken cancellationToken)
+    {
+        if (!await CanSpendAsync(storeId))
+            return Forbid();
+        var resumed = await sweep.ResumeCoinAsync(storeId, cryptoCode, cancellationToken);
+        TempData.SetStatusMessageModel(new StatusMessageModel
+        {
+            Severity = resumed ? StatusMessageModel.StatusSeverity.Success : StatusMessageModel.StatusSeverity.Warning,
+            Message = resumed ? $"Sweeping {cryptoCode.ToUpperInvariant()} resumes on the next run." : "That coin isn't stopped."
+        });
+        return RedirectToAction(nameof(Settings), new { storeId });
+    }
+
     /// <summary>
     /// Whether a save puts a different key (or exchange) in place, which pending orders must be checked against.
     /// Removing the key isn't a change here: with no key nothing runs, and removing it must never be blocked.
@@ -451,6 +465,7 @@ public class UISweepSellController(ISweepSellRepository repository, SecretProtec
             SweepLastRun = sweepState.LastRun,
             SweepPending = sweepState.Pending,
             SweepAwaiting = sweepState.Awaiting,
+            SweepStopped = sweepState.Stopped,
             SweepActivity = sweepState.Activity,
             CanSpend = await CanSpendAsync(storeId),
             // Saved but undecryptable (e.g. restored on a server with other data-protection keys) counts as not saved.
@@ -535,6 +550,8 @@ public class SweepSellSettingsViewModel
     public List<PendingSweep> SweepPending { get; set; } = [];
 
     public List<AwaitingDeposit> SweepAwaiting { get; set; } = [];
+
+    public Dictionary<string, StoppedSweep> SweepStopped { get; set; } = new();
 
     public List<ActivityEntry> SweepActivity { get; set; } = [];
 

@@ -21,6 +21,12 @@ public class SweepState
     /// <summary>Sweeps sent to the exchange, watched until the exchange credits them; then the store converts straight away.</summary>
     public List<AwaitingDeposit> Awaiting { get; set; } = [];
 
+    /// <summary>
+    /// Coins whose sweeps are stopped, by coin, because the exchange failed or is returning a deposit: a returned deposit
+    /// landing in the hot wallet must not be swept straight back. Only the owner resumes a coin.
+    /// </summary>
+    public Dictionary<string, StoppedSweep> Stopped { get; set; } = new(StringComparer.OrdinalIgnoreCase);
+
     /// <summary>A deposit was credited but the convert run couldn't start yet (e.g. one was in progress); retried every minute.</summary>
     public bool ConvertRequested { get; set; }
 
@@ -74,7 +80,19 @@ public class AwaitingDeposit
     /// <summary>The exchange the sweep went to: its deposits are only looked up there.</summary>
     public string? ExchangeId { get; set; }
 
+    /// <summary>When the watch started: it ends <see cref="SweepService.DepositWatchLimit"/> after.</summary>
     public DateTimeOffset SentAt { get; set; }
+
+    /// <summary>When the sweep was signed, before it was broadcast: the exchange's deposits are searched from then.</summary>
+    public DateTimeOffset? SignedAt { get; set; }
+}
+
+public class StoppedSweep
+{
+    /// <summary>The sweep whose deposit failed.</summary>
+    public string Txid { get; set; } = "";
+
+    public DateTimeOffset At { get; set; }
 }
 
 /// <summary>Totals per key for one UTC day; a total from an earlier day never counts against a later one.</summary>

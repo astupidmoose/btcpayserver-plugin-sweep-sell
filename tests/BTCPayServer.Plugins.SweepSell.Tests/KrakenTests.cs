@@ -588,6 +588,19 @@ public class KrakenTests
     static readonly DateTimeOffset SweptAt = new(2030, 1, 1, 12, 0, 0, TimeSpan.Zero);
 
     [Fact]
+    public async Task DepositCreditedWithNothingIsAnError()
+    {
+        var http = new FakeHttp();
+        http.Responses["/0/private/DepositMethods"] = """{"error":[],"result":[{"method":"Bitcoin","gen-address":true,"minimum":"0.0001"}]}""";
+        http.Responses["/0/private/DepositStatus"] = $$"""
+            {"error":[],"result":[{"method":"Bitcoin","asset":"XXBT","txid":"{{DepositTxid}}","amount":"0","status":"Success"}]}
+            """;
+        var e = await Assert.ThrowsAsync<ExchangeException>(() =>
+            new KrakenConnector(http.Client()).FindDepositAsync(Credentials, "BTC", DepositTxid, SweptAt, TestContext.Current.CancellationToken));
+        Assert.Contains("can't be right", e.Message);
+    }
+
+    [Fact]
     public async Task FindDepositFollowsKrakensPages()
     {
         var http = new PagedDeposits();

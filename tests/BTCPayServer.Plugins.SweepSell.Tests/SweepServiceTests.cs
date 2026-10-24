@@ -263,6 +263,7 @@ public class SweepServiceTests
         Configure(rule: r => r.DailyCap = 5m);
         _wallets.BroadcastResults.Enqueue(() => throw new HttpRequestException("timeout"));
         var service = Service();
+        var signedAt = _clock.GetUtcNow();
         await service.RunAsync(_storeId, wait: false, Ct);
         _clock.Advance(TimeSpan.FromDays(2));
         await service.RunAsync(_storeId, wait: false, Ct); // rebroadcast accepted two days later
@@ -270,6 +271,7 @@ public class SweepServiceTests
         Assert.Equal(_clock.GetUtcNow(), Assert.Single(State.Awaiting).SentAt);
         await service.WatchDepositsAsync(Ct);
         Assert.Single(State.Awaiting); // not timed out straight away
+        Assert.Equal(signedAt, _exchange.DepositSearchesSince.Single()); // but searched for from when it was signed: it may have arrived long ago
     }
 
     [Fact]
@@ -527,17 +529,36 @@ public class SweepServiceTests
     }
 
     [Fact]
-    public async Task FailedOrLongUncreditedDepositsAreReported()
+    public async Task FailedDepositStopsTheCoinUntilTheOwnerResumesIt()
     {
         Configure();
         var service = Service();
         await service.RunAsync(_storeId, wait: false, Ct);
-        _exchange.Deposits[State.Awaiting[0].Txid] = new DepositStatus(DepositState.Failed, 0.9999m);
+        var txid = State.Awaiting[0].Txid;
+        _exchange.Deposits[txid] = new DepositStatus(DepositState.Failed, 0.9999m);
         await service.WatchDepositsAsync(Ct);
         Assert.Empty(State.Awaiting);
-        Assert.Contains("as failed", State.Activity[0].Message);
+        Assert.Contains("as failed or being returned", State.Activity[0].Message);
+        Assert.Equal(txid, State.Stopped["BTC"].Txid);
 
+        // The returned funds land in the hot wallet: they aren't swept straight back.
         _wallets.Balances[$"{_storeId}:BTC"] = 1m;
+        await service.RunAsync(_storeId, wait: false, Ct);
+        Assert.Single(_wallets.Broadcasts);
+        Assert.Contains("Sweeping BTC is stopped", State.Activity[0].Message);
+
+        Assert.True(await service.ResumeCoinAsync(_storeId, "btc", Ct));
+        Assert.False(await service.ResumeCoinAsync(_storeId, "BTC", Ct));
+        Assert.Equal(ActivityOutcome.Changed, State.Activity[0].Outcome);
+        await service.RunAsync(_storeId, wait: false, Ct);
+        Assert.Equal(2, _wallets.Broadcasts.Count);
+    }
+
+    [Fact]
+    public async Task UncreditedDepositsAreReportedOnlyAfterALookupWorks()
+    {
+        Configure();
+        var service = Service();
         await service.RunAsync(_storeId, wait: false, Ct);
         _exchange.DepositError = new ExchangeException("EService:Unavailable");
         await service.WatchDepositsAsync(Ct);
@@ -546,8 +567,14 @@ public class SweepServiceTests
 
         _clock.Advance(SweepService.DepositWatchLimit);
         await service.WatchDepositsAsync(Ct);
+        Assert.Single(State.Awaiting); // the exchange couldn't be checked: still watched
+        Assert.Contains("Trying again in a minute", State.Activity[0].Message);
+
+        _exchange.DepositError = null;
+        await service.WatchDepositsAsync(Ct);
         Assert.Empty(State.Awaiting);
         Assert.Contains("wasn't credited within 24 hours", State.Activity[0].Message);
+        Assert.Empty(State.Stopped); // not a failure the exchange reported
     }
 
     [Fact]
@@ -570,6 +597,10 @@ public class SweepServiceTests
 
         await service.RecordDestinationChangesAsync(_storeId, after, after, Ct);
         Assert.Single(State.Activity);
+
+        // A rule left out of a save (e.g. a stale form) takes its cold wallet with it.
+        await service.RecordDestinationChangesAsync(_storeId, after, new SweepSettings { Rules = [after.Rules[1]] }, Ct);
+        Assert.Equal(("BTC", "Cold wallet changed from 10% to xpub-other from address 3 to none."), (State.Activity[0].Asset, State.Activity[0].Message));
     }
 
     [Fact]

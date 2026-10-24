@@ -171,6 +171,9 @@ public class KrakenConnector(HttpClient http, TimeProvider? clock = null) : IExc
             ("Success", null or "") => DepositState.Credited,
             _ => DepositState.Pending
         };
+        // A credit of nothing can't be right: reported as an error, so the deposit stays watched instead of counting as credited.
+        if (state == DepositState.Credited && amount <= 0)
+            throw new ExchangeException($"Kraken reports the {asset} deposit as credited with an amount of {amount.ToString(CultureInfo.InvariantCulture)}, which can't be right.");
         return new DepositStatus(state, amount);
     }
 
