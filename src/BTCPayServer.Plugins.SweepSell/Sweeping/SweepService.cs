@@ -402,22 +402,34 @@ public class SweepService(ISweepSellRepository repository, SecretProtector prote
         // Counted when known sent, not when signed: a sweep settled a day late still counts against the day it is found.
         state.Swept.Add(now, pending.CryptoCode, pending.Spent);
         UseColdAddress(state, pending);
-        if (pending.ToExchange > 0)
-        {
-            state.Awaiting.Add(new AwaitingDeposit
-            {
-                Asset = pending.CryptoCode,
-                Txid = pending.Txid,
-                Amount = pending.ToExchange,
-                ExchangeId = pending.ExchangeId,
-                // Watched from when it is known sent, so a sweep settled late still gets the full watch, but searched for
-                // from when it was signed: a broadcast found late may have been credited long before.
-                SentAt = now,
-                SignedAt = pending.CreatedAt
-            });
-        }
+        Watch(state, pending, now);
         Record(storeId, state, pending.CryptoCode, ActivityOutcome.Sent, $"Sent {what} ({pending.Txid}).");
     }
+
+    /// <summary>Watches the exchange for the deposit of a sweep that was, or may have been, sent.</summary>
+    static void Watch(SweepState state, PendingSweep pending, DateTimeOffset now)
+    {
+        if (pending.ToExchange <= 0)
+            return;
+        state.Awaiting.Add(new AwaitingDeposit
+        {
+            Asset = pending.CryptoCode,
+            Txid = pending.Txid,
+            Amount = pending.ToExchange,
+            ExchangeId = pending.ExchangeId,
+            // Watched from when it is known sent, so a sweep settled late still gets the full watch, but searched for
+            // from when it was signed: a broadcast found late may have been credited long before.
+            SentAt = now,
+            SignedAt = pending.CreatedAt
+        });
+    }
+
+    /// <summary>
+    /// Stops sweeping a coin whose deposit wasn't credited: funds the exchange sends back would land in the hot wallet and be
+    /// swept straight back, again and again. Only the owner resumes it.
+    /// </summary>
+    static void Stop(SweepState state, AwaitingDeposit deposit, DateTimeOffset now) =>
+        state.Stopped[deposit.Asset.ToUpperInvariant()] = new StoppedSweep { Txid = deposit.Txid, At = now };
 
     static void UseColdAddress(SweepState state, PendingSweep pending)
     {
@@ -501,8 +513,7 @@ public class SweepService(ISweepSellRepository repository, SecretProtector prote
                             break;
                         case DepositState.Failed:
                             state.Awaiting.Remove(awaiting);
-                            // Funds sent back would land in the hot wallet and be swept straight back, again and again.
-                            state.Stopped[awaiting.Asset.ToUpperInvariant()] = new StoppedSweep { Txid = awaiting.Txid, At = now };
+                            Stop(state, awaiting, now);
                             Record(storeId, state, awaiting.Asset, ActivityOutcome.Failed,
                                 $"{exchange!.Name} reports the {Amount(awaiting.Amount)} {awaiting.Asset} deposit ({awaiting.Txid}) as failed or being returned. " +
                                 $"Sweeping {awaiting.Asset} is stopped so returned funds aren't sent straight back. Contact {exchange.Name} about it, then resume {awaiting.Asset} under Stopped coins.");
@@ -511,9 +522,12 @@ public class SweepService(ISweepSellRepository repository, SecretProtector prote
                             if (now - awaiting.SentAt >= DepositWatchLimit)
                             {
                                 state.Awaiting.Remove(awaiting);
+                                // No longer watched, so a later return couldn't be seen: stopped like a failed deposit.
+                                Stop(state, awaiting, now);
                                 Record(storeId, state, awaiting.Asset, ActivityOutcome.Failed,
                                     $"The {Amount(awaiting.Amount)} {awaiting.Asset} deposit ({awaiting.Txid}) wasn't credited within {DepositWatchLimit.TotalHours:0} hours. " +
-                                    "Check it on the exchange; the scheduled convert still sells it once it arrives.");
+                                    $"Sweeping {awaiting.Asset} is stopped so funds the exchange may send back aren't sent straight back. Check it on the exchange, then resume {awaiting.Asset} under Stopped coins; " +
+                                    "the scheduled convert still sells it if it arrives.");
                             }
                             break;
                     }
@@ -562,9 +576,11 @@ public class SweepService(ISweepSellRepository repository, SecretProtector prote
             // cold address isn't used again.
             state.Swept.Add(clock.GetUtcNow(), pending.CryptoCode, pending.Spent);
             UseColdAddress(state, pending);
+            // Watched like a sent sweep: if it did go through and the exchange returns it, the coin is stopped.
+            Watch(state, pending, clock.GetUtcNow());
             Record(storeId, state, pending.CryptoCode, ActivityOutcome.Failed,
                 $"The pending sweep of {Amount(pending.Spent)} {pending.CryptoCode} ({pending.Txid}) was removed by hand. " +
-                "It counts against today's cap, since whether it went through isn't known. Sweeping resumes.");
+                "It counts against today's cap, since whether it went through isn't known, and its deposit is watched on the exchange in case it did. Sweeping resumes.");
             await repository.SaveSweepStateAsync(storeId, state);
             return true;
         }

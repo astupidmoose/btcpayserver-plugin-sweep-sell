@@ -314,8 +314,15 @@ public class SweepServiceTests
         Assert.True(await service.RemovePendingAsync(_storeId, pending.Txid, Ct));
         Assert.Equal(1m, State.Swept.On(_clock.GetUtcNow(), "BTC"));
         Assert.Equal(1, State.NextColdIndex["xpub-cold"]);
+        // It may have gone through, so its deposit is watched: a return would stop the coin.
+        var watched = Assert.Single(State.Awaiting);
+        Assert.Equal((pending.Txid, pending.ToExchange, pending.CreatedAt), (watched.Txid, watched.Amount, watched.SignedAt));
         await service.RunAsync(_storeId, wait: false, Ct);
         Assert.Equal("xpub-cold/1", _wallets.Built[1].ColdAddress);
+
+        _exchange.Deposits[pending.Txid] = new DepositStatus(DepositState.Failed, pending.ToExchange);
+        await service.WatchDepositsAsync(Ct);
+        Assert.Equal(pending.Txid, State.Stopped["BTC"].Txid);
     }
 
     [Fact]
@@ -597,7 +604,8 @@ public class SweepServiceTests
         await service.WatchDepositsAsync(Ct);
         Assert.Empty(State.Awaiting);
         Assert.Contains("wasn't credited within 24 hours", State.Activity[0].Message);
-        Assert.Empty(State.Stopped); // not a failure the exchange reported
+        // No longer watched, so a later return couldn't be seen: the coin stops until the owner resumes it.
+        Assert.True(State.Stopped.ContainsKey("BTC"));
     }
 
     [Fact]
