@@ -8,8 +8,13 @@ places market orders on exchanges. Review every change as if a mistake costs fun
 - `src/BTCPayServer.Plugins.SweepSell`: the plugin.
   - `Exchanges/`: `IExchangeConnector` and one folder per exchange (`Kraken/`).
   - `Settings/`: per-store settings and `SecretProtector`, which encrypts exchange credentials.
+  - `Conversion/`: the convert job (sells exchange balances).
+  - `Sweeping/`: the sweep job. `SweepBuilder` builds and signs the transaction (pure NBitcoin);
+    `IStoreWallets` is the wallet boundary, implemented with BTCPay's services in `BtcPayStoreWallets`.
   - `Controllers/`, `Views/SweepSell/`: the store settings page.
-- `tests/BTCPayServer.Plugins.SweepSell.Tests`: xUnit tests. Exchange calls use `FakeHttp`; nothing reaches a real exchange.
+- `tests/BTCPayServer.Plugins.SweepSell.Tests`: xUnit tests. Exchange calls use `FakeHttp`, jobs use the fakes in
+  `Fakes.cs` (`FakeExchange`, `FakeWallets`); nothing reaches a real exchange or node. Sweep transactions are
+  built and signed on regtest with invented keys.
 - `submodules/btcpayserver`: BTCPay Server, pinned. Don't change it in a feature PR.
 - `docs/threat-model.md`: assets, threats and mitigations. Update it when a change adds an attack surface.
 
@@ -42,7 +47,8 @@ dotnet test --project tests/BTCPayServer.Plugins.SweepSell.Tests
    surfaced to the store owner. Never swallow an exchange error and continue as if it worked.
 8. **Amounts are `decimal`,** rounded down to the market's precision. Never `double` for money.
 9. **Store isolation.** A store's settings, keys and wallets are only reachable by users with
-   `CanModifyStoreSettings` on that store.
+   `CanModifyStoreSettings` on that store. Anything that decides what a sweep spends or where it goes also
+   needs BTCPay's wallet signing and broadcasting permissions on the store.
 10. **Every sale has a price floor.** Never send an unpriced market order. Sells are
     immediate-or-cancel limit orders at a floor derived from a reference price one trade can't move
     (e.g. the 24-hour average), and money-moving features offer a daily cap.

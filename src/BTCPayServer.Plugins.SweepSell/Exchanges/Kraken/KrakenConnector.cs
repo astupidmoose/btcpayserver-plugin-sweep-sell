@@ -109,20 +109,75 @@ public class KrakenConnector(HttpClient http, TimeProvider? clock = null) : IExc
         if (fresh && IsTrue(method["gen-address"]))
             parameters.Add(new("new", "true"));
         var result = Expect<JArray>(await PrivateAsync(credentials, "DepositAddresses", parameters, cancellationToken), "DepositAddresses");
-        var now = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
         var usable = result.OfType<JObject>()
             .Where(a => !string.IsNullOrEmpty(Text(a["address"])))
-            // expiretm 0 means the address never expires; an entry without one is not trusted.
-            .Where(a => long.TryParse(Text(a["expiretm"]), NumberStyles.None, CultureInfo.InvariantCulture, out var expires) && (expires == 0 || expires > now))
+            // Only addresses that never expire (expiretm 0): Kraken doesn't guarantee credit to one marked to expire, and a
+            // sweep may confirm well after it is built. An entry without an expiry is not trusted either.
+            .Where(a => long.TryParse(Text(a["expiretm"]), NumberStyles.None, CultureInfo.InvariantCulture, out var expires) && expires == 0)
             .ToList();
         var entry = parameters.Any(p => p.Key == "new")
             ? usable.FirstOrDefault(a => IsTrue(a["new"]))
               ?? throw new ExchangeException($"Kraken did not return the new {asset} deposit address it was asked for.")
             : usable.FirstOrDefault()
-              ?? throw new ExchangeException($"Kraken returned no unexpired {asset} deposit address. Create one in Kraken first.");
+              ?? throw new ExchangeException($"Kraken returned no {asset} deposit address that never expires. Create one in Kraken first.");
         // Kraken returns a destination tag (XRP) or memo (e.g. XLM) beside the address when the asset needs one.
         var tag = new[] { Text(entry["tag"]), Text(entry["memo"]) }.FirstOrDefault(t => !string.IsNullOrEmpty(t));
         return new DepositDestination(Text(entry["address"])!, tag);
+    }
+
+    /// <summary>Most pages of deposits read to find one (newest first), so a busy account can't make a lookup run forever.</summary>
+    public const int MaxDepositPages = 20;
+
+    public async Task<DepositStatus?> FindDepositAsync(ExchangeCredentials credentials, string asset, string txid, DateTimeOffset since,
+        CancellationToken cancellationToken)
+    {
+        if (string.IsNullOrWhiteSpace(txid))
+            throw new ArgumentException("A transaction ID is needed.", nameof(txid));
+        var method = Text((await DepositMethodAsync(credentials, asset, cancellationToken))["method"])!;
+        // Kraken lists deposits newest first, a page at a time: follow the pages back to when the sweep was sent.
+        // An hour of slack covers a difference between our clock and Kraken's.
+        var start = since.AddHours(-1).ToUnixTimeSeconds().ToString(CultureInfo.InvariantCulture);
+        var cursor = "true";
+        for (var page = 0; page < MaxDepositPages; page++)
+        {
+            var result = await PrivateAsync(credentials, "DepositStatus",
+                [new("asset", ToKraken(asset)), new("method", method), new("start", start), new("cursor", cursor)], cancellationToken);
+            var (deposits, next) = result switch
+            {
+                JArray list => (list, null),
+                JObject paged when paged["deposit"] is JArray list => (list, Text(paged["next_cursor"])),
+                _ => throw new ExchangeException("Kraken sent an unexpected DepositStatus response.")
+            };
+            // Every entry is checked: one that can't be read could be the deposit, so it is never taken as "not there".
+            if (deposits.Any(d => d is not JObject o || o["txid"]?.Type != JTokenType.String || string.IsNullOrWhiteSpace(Text(o["txid"]))))
+                throw new ExchangeException("Kraken sent a deposit without a usable transaction ID.");
+            var entry = deposits.Cast<JObject>().FirstOrDefault(d => string.Equals(Text(d["txid"]), txid, StringComparison.OrdinalIgnoreCase));
+            if (entry is not null)
+                return Deposit(entry, asset);
+            if (deposits.Count == 0 || string.IsNullOrEmpty(next) || next == cursor)
+                return null;
+            cursor = next;
+        }
+        return null;
+    }
+
+    static DepositStatus Deposit(JObject entry, string asset)
+    {
+        var amount = RequiredDecimal(entry["amount"], $"{asset} deposit amount");
+        var prop = Text(entry["status-prop"]);
+        // Only a plain "Success" is credited. "Failure", or a deposit Kraken is sending back ("return"), won't be; on hold
+        // or any other status property isn't credited yet.
+        var state = (Text(entry["status"]), prop) switch
+        {
+            ("Failure", _) => DepositState.Failed,
+            (_, "return") => DepositState.Failed,
+            ("Success", null or "") => DepositState.Credited,
+            _ => DepositState.Pending
+        };
+        // A credit of nothing can't be right: reported as an error, so the deposit stays watched instead of counting as credited.
+        if (state == DepositState.Credited && amount <= 0)
+            throw new ExchangeException($"Kraken reports the {asset} deposit as credited with an amount of {amount.ToString(CultureInfo.InvariantCulture)}, which can't be right.");
+        return new DepositStatus(state, amount);
     }
 
     public async Task<decimal> GetMinimumDepositAsync(ExchangeCredentials credentials, string asset, CancellationToken cancellationToken)

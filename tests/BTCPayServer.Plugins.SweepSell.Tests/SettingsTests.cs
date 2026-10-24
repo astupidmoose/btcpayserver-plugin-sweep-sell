@@ -3,6 +3,7 @@ using BTCPayServer.Plugins.SweepSell.Controllers;
 using BTCPayServer.Plugins.SweepSell.Exchanges;
 using BTCPayServer.Plugins.SweepSell.Exchanges.Kraken;
 using BTCPayServer.Plugins.SweepSell.Settings;
+using BTCPayServer.Plugins.SweepSell.Sweeping;
 using Microsoft.AspNetCore.DataProtection;
 using Newtonsoft.Json;
 
@@ -213,5 +214,188 @@ public class SettingsTests
     {
         var other = new SecretProtector(new EphemeralDataProtectionProvider());
         Assert.Null(other.Credentials(Saved()));
+    }
+
+    [Fact]
+    public void SweepSettingsAreParsedAndSaved()
+    {
+        var settings = UISweepSellController.Apply(Saved(), new SweepSellSettingsViewModel
+        {
+            ExchangeId = "kraken",
+            SweepEnabled = true,
+            SweepDryRun = false,
+            SweepIntervalMinutes = 30,
+            SweepFeeTargetBlocks = 3,
+            SweepRules =
+            [
+                new SweepRuleViewModel
+                {
+                    CryptoCode = " btc ", Enabled = true, MinimumBalance = 0.01m, ColdPercent = 25, ColdDestination = " xpub-cold ",
+                    ColdStartIndex = 4, DailyCap = 0.5m, IncludeUnconfirmed = true, WalletStatus = "Hot wallet"
+                },
+                new SweepRuleViewModel { CryptoCode = "LTC", ColdDestination = " " }
+            ]
+        }, Protector);
+        Assert.Equal((true, false, 30, 3), (settings.Sweep.Enabled, settings.Sweep.DryRun, settings.Sweep.IntervalMinutes, settings.Sweep.FeeTargetBlocks));
+        var btc = settings.Sweep.Rules[0];
+        Assert.Equal(("BTC", true, 0.01m, 25m, "xpub-cold", 4, 0.5m, true),
+            (btc.CryptoCode, btc.Enabled, btc.MinimumBalance, btc.ColdPercent, btc.ColdDestination, btc.ColdStartIndex, btc.DailyCap, btc.IncludeUnconfirmed));
+        Assert.Equal(("LTC", false, null), (settings.Sweep.Rules[1].CryptoCode, settings.Sweep.Rules[1].Enabled, settings.Sweep.Rules[1].ColdDestination));
+    }
+
+    [Fact]
+    public void SweepIsOffAndDryRunByDefault()
+    {
+        var sweep = new SweepSellSettings().Sweep;
+        Assert.False(sweep.Enabled);
+        Assert.True(sweep.DryRun);
+        Assert.True(new SweepSellSettingsViewModel().SweepDryRun);
+        Assert.False(new SweepRule().IncludeUnconfirmed);
+    }
+
+    static SweepSellSettingsViewModel SweepForm(Action<SweepRuleViewModel>? rule = null, Action<SweepSellSettingsViewModel>? form = null)
+    {
+        var btc = new SweepRuleViewModel { CryptoCode = "BTC", Enabled = true, MinimumBalance = 0.01m };
+        rule?.Invoke(btc);
+        var vm = new SweepSellSettingsViewModel { ExchangeId = "kraken", SweepEnabled = true, SweepRules = [btc] };
+        form?.Invoke(vm);
+        return vm;
+    }
+
+    static List<string> SweepErrors(SweepSellSettingsViewModel vm) =>
+        UISweepSellController.ValidateSweep(vm, new FakeWallets()).Select(e => e.Field).ToList();
+
+    [Fact]
+    public void ValidSweepFormHasNoErrors() => Assert.Empty(SweepErrors(SweepForm()));
+
+    [Theory]
+    [InlineData("min", "SweepRules[0].MinimumBalance")]
+    [InlineData("cap", "SweepRules[0].DailyCap")]
+    [InlineData("cold100", "SweepRules[0].ColdPercent")]
+    [InlineData("coldNegative", "SweepRules[0].ColdPercent")]
+    [InlineData("coldNoDestination", "SweepRules[0].ColdDestination")]
+    [InlineData("badCold", "SweepRules[0].ColdDestination")]
+    [InlineData("index", "SweepRules[0].ColdStartIndex")]
+    [InlineData("code", "SweepRules[0].CryptoCode")]
+    public void SweepRulesAreValidated(string problem, string field)
+    {
+        var vm = SweepForm(r =>
+        {
+            switch (problem)
+            {
+                case "min": r.MinimumBalance = -1; break;
+                case "cap": r.DailyCap = -1; break;
+                case "cold100": r.ColdPercent = 100; r.ColdDestination = "cold-address"; break;
+                case "coldNegative": r.ColdPercent = -1; break;
+                case "coldNoDestination": r.ColdPercent = 10; break;
+                case "badCold": r.ColdPercent = 10; r.ColdDestination = "bad-address"; break;
+                case "index": r.ColdStartIndex = -1; break;
+                default: r.CryptoCode = "B T C"; break;
+            }
+        });
+        Assert.Equal([field], SweepErrors(vm));
+    }
+
+    [Theory]
+    [InlineData("interval", "SweepIntervalMinutes")]
+    [InlineData("fee", "SweepFeeTargetBlocks")]
+    [InlineData("exchange", "SweepEnabled")]
+    [InlineData("noCoin", "SweepEnabled")]
+    [InlineData("duplicate", "SweepRules[1].CryptoCode")]
+    public void SweepOptionsAreValidated(string problem, string field)
+    {
+        var vm = SweepForm(form: f =>
+        {
+            switch (problem)
+            {
+                case "interval": f.SweepIntervalMinutes = 1; break;
+                case "fee": f.SweepFeeTargetBlocks = 0; break;
+                case "exchange": f.ExchangeId = null; break;
+                case "noCoin": f.SweepRules[0].Enabled = false; break;
+                default: f.SweepRules.Add(new SweepRuleViewModel { CryptoCode = "btc" }); break;
+            }
+        });
+        Assert.Equal([field], SweepErrors(vm));
+    }
+
+    [Fact]
+    public void SweepOffNeedsNoCoinOrExchange() =>
+        Assert.Empty(SweepErrors(SweepForm(r => r.Enabled = false, f =>
+        {
+            f.SweepEnabled = false;
+            f.ExchangeId = null;
+        })));
+
+    static SweepSellSettings Sweeping(bool enabled = true) => new()
+    {
+        ExchangeId = "kraken",
+        ProtectedApiKey = Protector.Protect("old-key"),
+        ProtectedApiSecret = Protector.Protect("old-secret"),
+        Sweep = new SweepSettings { Enabled = enabled, Rules = [new SweepRule { CryptoCode = "BTC", Enabled = true, MinimumBalance = 0.01m }] }
+    };
+
+    [Fact]
+    public void ListingAnotherWalletsCoinIsNotASweepChange()
+    {
+        var saved = Sweeping();
+        var updated = Sweeping();
+        updated.Sweep.Rules[0].MinimumBalance = 0.010m;
+        updated.Sweep.Rules.Add(new SweepRule { CryptoCode = "LTC" });
+        updated.Paused = true;
+        updated.ProtectedApiKey = saved.ProtectedApiKey;
+        updated.ProtectedApiSecret = saved.ProtectedApiSecret;
+        Assert.False(UISweepSellController.ChangesSweeps(saved, updated));
+    }
+
+    [Theory]
+    [InlineData("rule")]
+    [InlineData("cold")]
+    [InlineData("dry run")]
+    [InlineData("new rule")]
+    [InlineData("key")]
+    [InlineData("exchange")]
+    public void SweepChangesAreDetected(string change)
+    {
+        var saved = Sweeping();
+        var updated = Sweeping();
+        updated.ProtectedApiKey = saved.ProtectedApiKey;
+        updated.ProtectedApiSecret = saved.ProtectedApiSecret;
+        switch (change)
+        {
+            case "rule": updated.Sweep.Rules[0].MinimumBalance = 0.02m; break;
+            case "cold": updated.Sweep.Rules[0].ColdPercent = 10; updated.Sweep.Rules[0].ColdDestination = "cold-address"; break;
+            case "dry run": updated.Sweep.DryRun = false; break;
+            case "new rule": updated.Sweep.Rules.Add(new SweepRule { CryptoCode = "LTC", Enabled = true }); break;
+            case "key": updated.ProtectedApiSecret = Protector.Protect("new-secret"); break;
+            default: updated.ExchangeId = "other"; break;
+        }
+        Assert.True(UISweepSellController.ChangesSweeps(saved, updated));
+    }
+
+    [Fact]
+    public void ResumingWhileSweepingIsOnIsASweepChange()
+    {
+        var saved = Sweeping();
+        saved.Paused = true;
+        var resumed = Sweeping();
+        (resumed.ProtectedApiKey, resumed.ProtectedApiSecret) = (saved.ProtectedApiKey, saved.ProtectedApiSecret);
+        Assert.True(UISweepSellController.ChangesSweeps(saved, resumed));
+        // Pausing never needs wallet permissions, and resuming with sweeping off doesn't let anything be swept.
+        Assert.False(UISweepSellController.ChangesSweeps(resumed, saved));
+        var off = Sweeping(enabled: false);
+        off.Paused = true;
+        var offResumed = Sweeping(enabled: false);
+        (offResumed.ProtectedApiKey, offResumed.ProtectedApiSecret) = (off.ProtectedApiKey, off.ProtectedApiSecret);
+        Assert.False(UISweepSellController.ChangesSweeps(off, offResumed));
+    }
+
+    [Fact]
+    public void KeyChangesWhileSweepingIsOffAreNotSweepChanges()
+    {
+        var saved = Sweeping(enabled: false);
+        var updated = Sweeping(enabled: false);
+        Assert.True(UISweepSellController.KeyChanges(saved, updated)); // a new key, but nothing is swept to it
+        Assert.False(UISweepSellController.ChangesSweeps(saved, updated));
+        Assert.False(UISweepSellController.ChangesSweeps(saved, new SweepSellSettings { Sweep = saved.Sweep })); // removing the key
     }
 }

@@ -5,14 +5,16 @@ using BTCPayServer.Plugins.SweepSell.Conversion;
 using BTCPayServer.Plugins.SweepSell.Exchanges;
 using BTCPayServer.Plugins.SweepSell.Exchanges.Kraken;
 using BTCPayServer.Plugins.SweepSell.Settings;
+using BTCPayServer.Plugins.SweepSell.Sweeping;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.DependencyInjection.Extensions;
+using Microsoft.Extensions.Hosting;
 
 namespace BTCPayServer.Plugins.SweepSell;
 
 /// <summary>
 /// Sweep store wallets to an exchange and sell what comes in. Holds the store settings, the encrypted
-/// exchange key and the exchange connectors, and runs the convert job; sweep and hedge build on the same parts.
+/// exchange key and the exchange connectors, and runs the convert and sweep jobs; hedge builds on the same parts.
 /// </summary>
 public class SweepSellPlugin : BaseBTCPayServerPlugin
 {
@@ -37,6 +39,13 @@ public class SweepSellPlugin : BaseBTCPayServerPlugin
 
         services.AddSingleton<ConvertService>();
         services.AddScheduledTask<ConvertTask>(System.TimeSpan.FromMinutes(1));
+
+        services.AddSingleton<IStoreWallets, BtcPayStoreWallets>();
+        services.AddSingleton<SweepService>();
+        services.AddScheduledTask<SweepTask>(System.TimeSpan.FromMinutes(1));
+        services.AddScheduledTask<DepositWatchTask>(System.TimeSpan.FromMinutes(1));
+        services.AddSingleton<SweepWalletListener>();
+        services.AddSingleton<IHostedService>(provider => provider.GetRequiredService<SweepWalletListener>());
 
         services.AddUIExtension("store-integrations-nav", $"{ViewsDirectory}/StoreNavExtension.cshtml");
     }

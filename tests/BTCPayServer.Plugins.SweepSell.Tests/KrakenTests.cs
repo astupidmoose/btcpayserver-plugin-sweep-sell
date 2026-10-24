@@ -239,6 +239,7 @@ public class KrakenTests
 
     [Theory]
     [InlineData("""{"address":"DExpired","expiretm":"1000"}""")]
+    [InlineData("""{"address":"DExpiresLater","expiretm":"4102444800"}""")] // marked to expire, even in the future
     [InlineData("""{"address":"DNoExpiry"}""")] // no expiry information: not trusted
     [InlineData("""{"address":"DNullExpiry","expiretm":null}""")]
     public async Task ExpiredOrUndatedAddressesAreNeverReturned(string entry)
@@ -518,6 +519,7 @@ public class KrakenTests
     [Theory]
     [InlineData("/0/private/DepositMethods", """{"error":[],"result":[{"method":"Bitcoin","gen-address":true}]}""")]
     [InlineData("/0/private/DepositMethods", """{"error":[],"result":[{"method":"Bitcoin","gen-address":true,"minimum":"abc"}]}""")]
+    [InlineData("/0/private/DepositMethods", """{"error":[],"result":[{"method":"Bitcoin","gen-address":true,"minimum":"-0.0001"}]}""")]
     public async Task MissingOrMalformedMinimumDepositFails(string path, string json)
     {
         var http = new FakeHttp();
@@ -552,6 +554,107 @@ public class KrakenTests
         Assert.Equal(D(expected), new MarketRules("X", "Y", 0, 0, 8, priceDecimals).LimitPriceAtLeast(D(floor)));
 
     static decimal D(string value) => decimal.Parse(value, System.Globalization.CultureInfo.InvariantCulture);
+
+    const string DepositTxid = "00000000000000000000000000000000000000000000000000000000000000ab";
+
+    [Theory]
+    [InlineData("Success", null, DepositState.Credited)]
+    [InlineData("Success", "onhold", DepositState.Pending)]
+    [InlineData("Settled", null, DepositState.Pending)]
+    [InlineData("Pending", null, DepositState.Pending)]
+    [InlineData("Failure", null, DepositState.Failed)]
+    [InlineData("Success", "return", DepositState.Failed)] // Kraken is sending it back
+    [InlineData("Pending", "return", DepositState.Failed)]
+    [InlineData("EarlyConfirmed", null, DepositState.Pending)]
+    [InlineData("Success", "something-new", DepositState.Pending)]
+    public async Task FindDepositMapsKrakensStatus(string status, string? statusProp, DepositState expected)
+    {
+        var http = new FakeHttp();
+        http.Responses["/0/private/DepositMethods"] = """{"error":[],"result":[{"method":"Bitcoin","gen-address":true,"minimum":"0.0001"}]}""";
+        var prop = statusProp is null ? "" : $",\"status-prop\":\"{statusProp}\"";
+        http.Responses["/0/private/DepositStatus"] = $$"""
+            {"error":[],"result":[
+              {"method":"Bitcoin","asset":"XXBT","txid":"ff00000000000000000000000000000000000000000000000000000000000000","amount":"9","status":"Success"},
+              {"method":"Bitcoin","asset":"XXBT","txid":"{{DepositTxid.ToUpperInvariant()}}","amount":"0.25","status":"{{status}}"{{prop}}}]}
+            """;
+        var deposit = await new KrakenConnector(http.Client()).FindDepositAsync(Credentials, "BTC", DepositTxid, SweptAt, TestContext.Current.CancellationToken);
+        Assert.Equal(new DepositStatus(expected, 0.25m), deposit);
+        var query = http.Sent.Single(s => s.Request.RequestUri!.AbsolutePath == "/0/private/DepositStatus").Body;
+        Assert.Contains("asset=XBT", query);
+        Assert.Contains("method=Bitcoin", query);
+        Assert.Contains($"start={SweptAt.AddHours(-1).ToUnixTimeSeconds()}", query);
+        Assert.Contains("cursor=true", query);
+    }
+
+    static readonly DateTimeOffset SweptAt = new(2030, 1, 1, 12, 0, 0, TimeSpan.Zero);
+
+    [Fact]
+    public async Task DepositCreditedWithNothingIsAnError()
+    {
+        var http = new FakeHttp();
+        http.Responses["/0/private/DepositMethods"] = """{"error":[],"result":[{"method":"Bitcoin","gen-address":true,"minimum":"0.0001"}]}""";
+        http.Responses["/0/private/DepositStatus"] = $$"""
+            {"error":[],"result":[{"method":"Bitcoin","asset":"XXBT","txid":"{{DepositTxid}}","amount":"0","status":"Success"}]}
+            """;
+        var e = await Assert.ThrowsAsync<ExchangeException>(() =>
+            new KrakenConnector(http.Client()).FindDepositAsync(Credentials, "BTC", DepositTxid, SweptAt, TestContext.Current.CancellationToken));
+        Assert.Contains("can't be right", e.Message);
+    }
+
+    [Fact]
+    public async Task FindDepositFollowsKrakensPages()
+    {
+        var http = new PagedDeposits();
+        var deposit = await new KrakenConnector(http.Client()).FindDepositAsync(Credentials, "BTC", DepositTxid, SweptAt, TestContext.Current.CancellationToken);
+        Assert.Equal(new DepositStatus(DepositState.Credited, 0.25m), deposit);
+        Assert.Equal(["cursor=true", "cursor=page-2"], http.Cursors);
+    }
+
+    /// <summary>Two pages of invented deposits; the sweep's is on the second.</summary>
+    class PagedDeposits : FakeHttp
+    {
+        public List<string> Cursors { get; } = [];
+
+        protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
+        {
+            if (request.RequestUri!.AbsolutePath == "/0/private/DepositMethods")
+                Responses["/0/private/DepositMethods"] = """{"error":[],"result":[{"method":"Bitcoin","gen-address":true,"minimum":"0.0001"}]}""";
+            if (request.RequestUri!.AbsolutePath == "/0/private/DepositStatus")
+            {
+                var body = await request.Content!.ReadAsStringAsync(cancellationToken);
+                var cursor = body.Split('&').Single(p => p.StartsWith("cursor="));
+                Cursors.Add(cursor);
+                Responses["/0/private/DepositStatus"] = cursor == "cursor=true"
+                    ? """{"error":[],"result":{"deposit":[{"txid":"ff00000000000000000000000000000000000000000000000000000000000000","amount":"9","status":"Success"}],"next_cursor":"page-2"}}"""
+                    : $$$"""{"error":[],"result":{"deposit":[{"txid":"{{{DepositTxid}}}","amount":"0.25","status":"Success"}]}}""";
+            }
+            return await base.SendAsync(request, cancellationToken);
+        }
+    }
+
+    [Fact]
+    public async Task FindDepositIsNullWhenKrakenHasNotSeenIt()
+    {
+        var http = new FakeHttp();
+        http.Responses["/0/private/DepositMethods"] = """{"error":[],"result":[{"method":"Bitcoin","gen-address":true,"minimum":"0.0001"}]}""";
+        http.Responses["/0/private/DepositStatus"] = """{"error":[],"result":[]}""";
+        Assert.Null(await new KrakenConnector(http.Client()).FindDepositAsync(Credentials, "BTC", DepositTxid, SweptAt, TestContext.Current.CancellationToken));
+    }
+
+    [Theory]
+    [InlineData("""{"error":[],"result":{}}""")]
+    [InlineData("""{"error":[],"result":[{"txid":"00000000000000000000000000000000000000000000000000000000000000ab","status":"Success"}]}""")] // no amount
+    [InlineData("""{"error":[],"result":["not a deposit"]}""")]
+    [InlineData("""{"error":[],"result":[{"amount":"1","status":"Success"}]}""")] // no transaction ID
+    [InlineData("""{"error":[],"result":[{"txid":7,"amount":"1","status":"Success"}]}""")]
+    public async Task FindDepositRejectsUnexpectedShapes(string response)
+    {
+        var http = new FakeHttp();
+        http.Responses["/0/private/DepositMethods"] = """{"error":[],"result":[{"method":"Bitcoin","gen-address":true,"minimum":"0.0001"}]}""";
+        http.Responses["/0/private/DepositStatus"] = response;
+        await Assert.ThrowsAsync<ExchangeException>(() =>
+            new KrakenConnector(http.Client()).FindDepositAsync(Credentials, "BTC", DepositTxid, SweptAt, TestContext.Current.CancellationToken));
+    }
 
     [Fact]
     public void CredentialsNeverPrintTheirValues() =>

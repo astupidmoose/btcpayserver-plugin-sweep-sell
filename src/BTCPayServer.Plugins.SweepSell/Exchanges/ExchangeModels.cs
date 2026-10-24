@@ -86,6 +86,18 @@ public sealed record MarketRules(string BaseAsset, string QuoteAsset, decimal Mi
     }
 }
 
+public enum DepositState
+{
+    /// <summary>Seen by the exchange, not credited yet (e.g. waiting for confirmations or on hold).</summary>
+    Pending,
+    /// <summary>Credited: the amount can be traded.</summary>
+    Credited,
+    /// <summary>The exchange won't credit it (failed, or being returned); the owner has to sort it out with the exchange.</summary>
+    Failed
+}
+
+public sealed record DepositStatus(DepositState State, decimal Amount);
+
 public sealed record OrderResult(bool Placed, IReadOnlyList<string> OrderIds, string Description);
 
 /// <summary>

@@ -41,7 +41,6 @@ public class ConvertService(ISweepSellRepository repository, SecretProtector pro
     public const int MaxParallelStores = 4;
 
     static readonly ConcurrentDictionary<string, SemaphoreSlim> StoreLocks = new();
-    static readonly ConcurrentDictionary<string, SemaphoreSlim> SettingsLocks = new();
 
     /// <summary>Runs every store whose interval has passed.</summary>
     public async Task RunDueAsync(CancellationToken cancellationToken)
@@ -370,8 +369,9 @@ public class ConvertService(ISweepSellRepository repository, SecretProtector pro
             if (pending is null)
                 return false;
             state.Pending.Remove(pending);
-            // What it sold isn't known here, so its full value counts against today's cap: the cap is never exceeded.
-            state.AddSold(pending.SentAt, pending.TargetAsset, pending.Amount * pending.ReferencePrice);
+            // What it sold isn't known here, so its full value counts against today's cap (the day of removal, which an
+            // order sent on an earlier day wouldn't touch): the cap is never exceeded.
+            state.AddSold(clock.GetUtcNow(), pending.TargetAsset, pending.Amount * pending.ReferencePrice);
             Record(storeId, state, pending.Asset, ActivityOutcome.Failed,
                 $"The pending sell of {Amount(pending.Amount)} {pending.Asset} (client order {clientOrderId:D}) was removed by hand. " +
                 $"Its full value counts against today's cap, since what it sold isn't known. Selling resumes.");
@@ -423,7 +423,7 @@ public class ConvertService(ISweepSellRepository repository, SecretProtector pro
     }
 
     static SemaphoreSlim StoreLock(string storeId) => StoreLocks.GetOrAdd(storeId, _ => new SemaphoreSlim(1, 1));
-    static SemaphoreSlim SettingsLock(string storeId) => SettingsLocks.GetOrAdd(storeId, _ => new SemaphoreSlim(1, 1));
+    static SemaphoreSlim SettingsLock(string storeId) => SettingsGate.For(storeId);
 
     void Record(string storeId, ConvertState state, string? asset, ActivityOutcome outcome, string message)
     {
