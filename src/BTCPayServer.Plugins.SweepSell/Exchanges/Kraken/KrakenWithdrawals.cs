@@ -184,6 +184,9 @@ public class KrakenWithdrawals(KrakenConnector kraken) : IWithdrawalConnector
         ["close-trades"] = "This key can cancel or close orders."
     };
 
+    public Task<string?> GetAccountIdAsync(ExchangeCredentials credentials, CancellationToken cancellationToken) =>
+        kraken.GetAccountIdAsync(credentials, cancellationToken);
+
     public Task<IReadOnlyList<string>> GetOtherKeyProblemsAsync(ExchangeCredentials credentials, CancellationToken cancellationToken) =>
         kraken.GetDestinationPermissionProblemsAsync(credentials, cancellationToken);
 

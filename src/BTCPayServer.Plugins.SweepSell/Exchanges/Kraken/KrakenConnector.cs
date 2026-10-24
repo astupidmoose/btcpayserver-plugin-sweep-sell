@@ -338,6 +338,13 @@ public class KrakenConnector(HttpClient http, TimeProvider? clock = null) : IExc
         return permissions.Select(p => (string)p!).Distinct().ToList();
     }
 
+    /// <summary>The account's internal IBAN (IIBAN) from Kraken's record of the key, the same for every key of the account.</summary>
+    internal async Task<string?> GetAccountIdAsync(ExchangeCredentials credentials, CancellationToken cancellationToken)
+    {
+        var info = Expect<JObject>(await PrivateAsync(credentials, "GetApiKeyInfo", [], cancellationToken), "GetApiKeyInfo");
+        return info["iban"] is JValue { Type: JTokenType.String } iban && (string)iban! is { Length: > 0 } id ? id : null;
+    }
+
     /// <summary>Why the key can add or change withdrawal destinations, read from Kraken's record of its permissions. Empty when it can't.</summary>
     internal async Task<IReadOnlyList<string>> GetDestinationPermissionProblemsAsync(ExchangeCredentials credentials, CancellationToken cancellationToken) =>
         (await GetPermissionsAsync(credentials, cancellationToken)).Where(DestinationPermissions.ContainsKey).Select(p => DestinationPermissions[p]).ToList();

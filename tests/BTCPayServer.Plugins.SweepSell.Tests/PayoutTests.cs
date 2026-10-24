@@ -536,12 +536,66 @@ public class PayoutTests
         _payouts.Settings["test-store-2"] = Copy(_payouts.Settings[StoreId]);
         await Service().RunAsync(StoreId, Ct);
         Assert.Empty(_exchange.Withdrawals);
-        Assert.Contains("Another store on this server pays out live with the same payout key", State.Activity[0].Message);
+        Assert.Contains("Another store on this server pays out live from the same Fake Exchange account", State.Activity[0].Message);
         Assert.DoesNotContain("test-store-2", State.Activity[0].Message);
 
         _payouts.Settings["test-store-2"].DryRun = true; // the other store only quotes, so this one may pay out
         await Service().RunAsync(StoreId, Ct);
         Assert.Single(_exchange.Withdrawals);
+    }
+
+    [Fact]
+    public async Task TwoStoresNeverPayOutOneAccountWithDifferentKeys()
+    {
+        Configure();
+        _main.Settings["test-store-2"] = Copy(_main.Settings[StoreId]);
+        _payouts.Settings["test-store-2"] = Copy(_payouts.Settings[StoreId]);
+        _payouts.Settings["test-store-2"].ProtectedApiKey = Protector.Protect("test-payout-key-2"); // another key, same account
+        await Service().RunAsync("test-store-2", Ct); // nothing to withdraw yet, but its account is saved
+
+        _exchange.Balance = 500m;
+        await Service().RunAsync(StoreId, Ct);
+        Assert.Empty(_exchange.Withdrawals);
+        Assert.Contains("pays out live from the same Fake Exchange account", State.Activity[0].Message);
+        Assert.DoesNotContain("test-account", _payouts.States[StoreId].Account!.Hash); // only a hash is kept
+
+        // The other store's key is replaced with one for another account: what it saved for the old key no longer counts.
+        _exchange.Accounts["test-payout-key-3"] = "test-account-3";
+        _payouts.Settings["test-store-2"].ProtectedApiKey = Protector.Protect("test-payout-key-3");
+        await Service().RunAsync(StoreId, Ct);
+        Assert.Single(_exchange.Withdrawals);
+    }
+
+    [Fact]
+    public async Task AnExchangeThatDoesntReportAccountsAllowsOneLiveStore()
+    {
+        Configure();
+        _exchange.Balance = 500m;
+        _exchange.Accounts["test-payout-key"] = null;
+        _main.Settings["test-store-2"] = Copy(_main.Settings[StoreId]);
+        _payouts.Settings["test-store-2"] = Copy(_payouts.Settings[StoreId]);
+        _payouts.Settings["test-store-2"].ProtectedApiKey = Protector.Protect("test-payout-key-2");
+        await Service().RunAsync(StoreId, Ct);
+        Assert.Empty(_exchange.Withdrawals);
+        Assert.Contains("doesn't say which account", State.Activity[0].Message);
+    }
+
+    [Fact]
+    public async Task ADryRunMakesTheSameFinalChecks()
+    {
+        Configure(dryRun: true, keep: 100m);
+        _exchange.Balance = 500m;
+        _exchange.OnQuote = () => _exchange.Balance = 400m;
+        await Service().RunAsync(StoreId, Ct);
+        Assert.Equal(ActivityOutcome.Waiting, State.Activity[0].Outcome);
+        Assert.Contains("balance changed during the run", State.Activity[0].Message);
+
+        _exchange.OnQuote = null;
+        await Service().RunAsync(StoreId, Ct);
+        Assert.Equal(ActivityOutcome.DryRun, State.Activity[0].Outcome);
+        Assert.Contains("would withdraw 300 USD", State.Activity[0].Message);
+        Assert.Empty(_exchange.Withdrawals);
+        Assert.Empty(State.Pending);
     }
 
     [Fact]
@@ -778,6 +832,12 @@ public class PayoutTests
 
         public Task<IReadOnlyList<string>> GetKeyProblemsAsync(ExchangeCredentials credentials, CancellationToken cancellationToken) =>
             Task.FromResult<IReadOnlyList<string>>(KeyProblems.ToList());
+
+        /// <summary>The account each key belongs to; one not listed belongs to "test-account". Null means the exchange doesn't say.</summary>
+        public Dictionary<string, string?> Accounts { get; } = [];
+
+        public Task<string?> GetAccountIdAsync(ExchangeCredentials credentials, CancellationToken cancellationToken) =>
+            Task.FromResult(Accounts.TryGetValue(credentials.ApiKey, out var account) ? account : "test-account");
 
         /// <summary>What the trading key's permissions allow that endangers payouts.</summary>
         public List<string> OtherKeyProblems { get; } = [];

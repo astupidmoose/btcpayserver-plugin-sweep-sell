@@ -152,6 +152,23 @@ public class PayoutService(IPayoutRepository payouts, ISweepSellRepository repos
         var trading = TradingKey(settings, connector);
         if (trading is not null && !await TradingKeyIsSafeAsync(storeId, state, asset, connector, trading, cancellationToken))
             return;
+        // Which exchange account the key belongs to, saved before anything is read: of two stores paying out one account,
+        // the later run always finds the earlier one's (see SharesAccountAsync).
+        PayoutAccount account;
+        try
+        {
+            account = PayoutAccount.For(connector.Id, await connector.GetAccountIdAsync(credentials, cancellationToken), credentials);
+        }
+        catch (Exception e) when (IsRecordedFailure(e, cancellationToken))
+        {
+            Record(storeId, state, asset, ActivityOutcome.Failed, $"Could not read which {connector.Name} account the payout key belongs to: {e.Message}");
+            return;
+        }
+        if (!account.Equals(state.Account))
+        {
+            state.Account = account;
+            await payouts.SaveStateAsync(storeId, state);
+        }
 
         // Withdrawals still in progress are remembered by exchange and asset (not by key, so a new key for the same account
         // still holds them back), and read back to the oldest of them.
@@ -249,13 +266,8 @@ public class PayoutService(IPayoutRepository payouts, ISweepSellRepository repos
         }
 
         var description = $"{Amount(quote.Amount)} {asset} to \"{payout.Destination}\" ({quote.Method}; {Amount(quote.NetAmount)} arrives after a {Amount(quote.Fee)} fee)";
-        if (payout.DryRun)
-        {
-            Record(storeId, state, asset, ActivityOutcome.DryRun, $"Dry run: would withdraw {description}. {connector.Name} quoted it; nothing was withdrawn.");
-            return;
-        }
 
-        // Saved before sending: if the response is lost or the server stops, the next run looks for it first.
+        // Saved before sending (a dry run stops short of that, after the same checks): if the response is lost or the server stops, the next run looks for it first.
         var pending = new PendingWithdrawal
         {
             Id = Guid.NewGuid(),
@@ -285,13 +297,12 @@ public class PayoutService(IPayoutRepository payouts, ISweepSellRepository repos
                 !await TradingKeyIsSafeAsync(storeId, state, asset, connector, tradingNow, cancellationToken))
                 return;
             // Each run pays out what its store sees of the account; a second store paying out the same account wouldn't see
-            // this one's withdrawals until they are listed, and could send them again. Checked under the lock against the
-            // saved settings, so of two stores turned on together, the later run always sees the earlier one.
-            if (await SharesPayoutKeyAsync(storeId, connector, credentials))
+            // this one's withdrawals until they are listed, and could send them again.
+            if (await SharesAccountAsync(storeId, connector, credentials, account))
             {
                 Record(storeId, state, asset, ActivityOutcome.Failed,
-                    "Another store on this server pays out live with the same payout key. Each exchange account can be paid out by one store " +
-                    "only, so give each store its own account and key. Nothing was withdrawn.");
+                    $"Another store on this server pays out live from the same {connector.Name} account (or {connector.Name} doesn't say which account " +
+                    "a key belongs to). Each exchange account can be paid out by one store only, so give each store its own account. Nothing was withdrawn.");
                 return;
             }
             // The balance and withdrawals are read again under the lock: a convert sell or another withdrawal of this asset
@@ -322,6 +333,11 @@ public class PayoutService(IPayoutRepository payouts, ISweepSellRepository repos
                 Record(storeId, state, asset, ActivityOutcome.Waiting, quote.Amount > leftNow
                     ? $"Today's cap (UTC) leaves {Amount(Math.Max(leftNow, 0))} {asset}, less than the {Amount(quote.Amount)} {asset} planned, as the day changed during the run. Nothing was withdrawn; the next run plans again."
                     : $"The {asset} balance changed during the run: {Amount(Math.Max(availableNow, 0))} {asset} can be withdrawn now, less than the {Amount(quote.Amount)} {asset} planned. Nothing was withdrawn; the next run plans again.");
+                return;
+            }
+            if (payout.DryRun)
+            {
+                Record(storeId, state, asset, ActivityOutcome.DryRun, $"Dry run: would withdraw {description}. {connector.Name} quoted it; nothing was withdrawn.");
                 return;
             }
             state.Pending.Add(pending);
@@ -544,10 +560,27 @@ public class PayoutService(IPayoutRepository payouts, ISweepSellRepository repos
         }
     }
 
-    /// <summary>Whether another store pays out live (enabled, not a dry run) with the same exchange and key.</summary>
-    async Task<bool> SharesPayoutKeyAsync(string storeId, IWithdrawalConnector connector, ExchangeCredentials credentials) =>
-        (await payouts.GetAllAsync()).Any(p => p.Key != storeId && p.Value is { Enabled: true, DryRun: false } && p.Value.ExchangeId == connector.Id &&
-                                               protector.Credentials(p.Value)?.ApiKey == credentials.ApiKey);
+    /// <summary>
+    /// Whether another store pays out live (enabled, not a dry run) from the same exchange account: with the same key, or
+    /// with a key whose account the other store's last run saved as this one's. Each run saves its account before this
+    /// check, so of two stores turned on together the later run always finds the earlier one. When the exchange doesn't
+    /// report accounts, any other store paying out live on it counts.
+    /// </summary>
+    async Task<bool> SharesAccountAsync(string storeId, IWithdrawalConnector connector, ExchangeCredentials credentials, PayoutAccount account)
+    {
+        foreach (var (otherId, other) in await payouts.GetAllAsync())
+        {
+            if (otherId == storeId || other is not { Enabled: true, DryRun: false } || other.ExchangeId != connector.Id ||
+                protector.Credentials(other) is not { } otherKey)
+                continue;
+            if (otherKey.ApiKey == credentials.ApiKey || account.Hash is null)
+                return true;
+            // Saved for the key the other store still has; one saved for an older key is checked by that store's next run.
+            if ((await payouts.GetStateAsync(otherId)).Account is { } saved && saved.Hash == account.Hash && saved.KeyFingerprint == otherKey.Fingerprint())
+                return true;
+        }
+        return false;
+    }
 
     /// <summary>The store's trading key when it is on the payout exchange, where it could change the saved destinations.</summary>
     ExchangeCredentials? TradingKey(SweepSellSettings settings, IWithdrawalConnector connector) =>
@@ -615,7 +648,7 @@ public class PayoutService(IPayoutRepository payouts, ISweepSellRepository repos
     /// <summary>Whether the settings saved now still allow the live withdrawal a run planned with <paramref name="planned"/>.</summary>
     bool StillApplies(SweepSellSettings settings, PayoutSettings now, PayoutSettings planned, IWithdrawalConnector connector, ExchangeCredentials credentials) =>
         !settings.Paused && !IsTradingKey(settings, credentials) &&
-        now.Enabled && !now.DryRun && now.ExchangeId == connector.Id &&
+        now.Enabled && now.DryRun == planned.DryRun && now.ExchangeId == connector.Id &&
         credentials.Equals(protector.Credentials(now)) && // the whole key: a replaced secret must not be used either
         now.Asset == planned.Asset && now.Destination == planned.Destination && now.Minimum == planned.Minimum &&
         now.KeepBalance == planned.KeepBalance && now.DailyCap == planned.DailyCap && now.MaxFee == planned.MaxFee;

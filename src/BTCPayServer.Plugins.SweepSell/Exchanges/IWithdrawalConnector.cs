@@ -60,6 +60,12 @@ public interface IWithdrawalConnector
     Task<IReadOnlyList<string>> GetKeyProblemsAsync(ExchangeCredentials credentials, CancellationToken cancellationToken);
 
     /// <summary>
+    /// The exchange's identifier of the account <paramref name="credentials"/> belongs to (the same for every key of that
+    /// account), or null when the exchange doesn't report one. Used only to tell when two stores pay out one account.
+    /// </summary>
+    Task<string?> GetAccountIdAsync(ExchangeCredentials credentials, CancellationToken cancellationToken);
+
+    /// <summary>
     /// Why another key on the same exchange (the store's trading key) makes payouts unsafe: it can add or change withdrawal
     /// destinations, so a stolen copy could change where the saved destination's name sends funds. Empty when fine.
     /// </summary>

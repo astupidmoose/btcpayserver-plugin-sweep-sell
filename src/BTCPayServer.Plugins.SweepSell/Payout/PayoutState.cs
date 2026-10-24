@@ -2,6 +2,9 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using System.Security.Cryptography;
+using System.Text;
+using BTCPayServer.Plugins.SweepSell.Exchanges;
 using BTCPayServer.Plugins.SweepSell.Conversion;
 
 namespace BTCPayServer.Plugins.SweepSell.Payout;
@@ -33,6 +36,9 @@ public class PayoutState
     /// key's account doesn't list them at all.
     /// </summary>
     public List<UnsettledWithdrawal> Unsettled { get; set; } = [];
+
+    /// <summary>The exchange account the payout key belonged to on the last run, so another store can tell it pays out the same one.</summary>
+    public PayoutAccount? Account { get; set; }
 
     /// <summary>UTC day (yyyy-MM-dd) that <see cref="Withdrawn"/> counts, for the daily cap.</summary>
     public string? WithdrawnDay { get; set; }
@@ -128,4 +134,22 @@ public class UnsettledWithdrawal
 
     /// <summary>What leaves the account, fees included.</summary>
     public decimal Amount { get; set; }
+}
+
+/// <summary>
+/// An exchange account, as a hash of the exchange's identifier for it (the identifier itself isn't kept), and the
+/// fingerprint of the key it was read with.
+/// </summary>
+public sealed record PayoutAccount
+{
+    /// <summary>Null when the exchange doesn't say which account a key belongs to.</summary>
+    public string? Hash { get; init; }
+
+    public string KeyFingerprint { get; init; } = "";
+
+    public static PayoutAccount For(string exchangeId, string? accountId, ExchangeCredentials key) => new()
+    {
+        Hash = string.IsNullOrEmpty(accountId) ? null : Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes($"{exchangeId}:{accountId}"))),
+        KeyFingerprint = key.Fingerprint()
+    };
 }
