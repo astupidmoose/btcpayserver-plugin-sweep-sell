@@ -410,6 +410,7 @@ public class HedgeServiceTests
     [InlineData("dry run")]
     [InlineData("market")]
     [InlineData("key")]
+    [InlineData("turned off and on")]
     public async Task SettingsChangedDuringTheRunStopTheSell(string change)
     {
         Configure();
@@ -421,6 +422,7 @@ public class HedgeServiceTests
                 case "pause": settings.Paused = true; break;
                 case "dry run": settings.Hedge.DryRun = true; break;
                 case "market": settings.Hedge.Markets["CAD"] = "USD"; break;
+                case "turned off and on": settings.Hedge.EnabledSince = Start; break;
                 default: settings.ProtectedApiSecret = Protector.Protect("another-secret"); break;
             }
         };
@@ -463,6 +465,19 @@ public class HedgeServiceTests
         _clock.Advance(HedgeService.ScanInterval);
         await service.RunDueAsync(Ct);
         Assert.Equal(2, _invoices.Scans);
+    }
+
+    [Fact]
+    public async Task HedgeNowAlwaysLooksForPaidInvoices()
+    {
+        Configure();
+        var service = Service();
+        await service.RunDueAsync(Ct); // a scan, finding nothing
+        Assert.Equal(1, _invoices.Scans);
+        Invoice("missed", 0.1m); // its event was missed, and the next scheduled scan isn't due yet
+        await service.RunAsync(_storeId, Ct);
+        Assert.Equal(2, _invoices.Scans);
+        Assert.Single(_exchange.Orders);
     }
 
     [Fact]

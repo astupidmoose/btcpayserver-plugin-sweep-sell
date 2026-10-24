@@ -14,22 +14,33 @@ public class BtcPayStoreInvoices(InvoiceRepository invoices) : IStoreInvoices
 {
     const int PageSize = 100;
 
+    /// <summary>
+    /// Pages by creation time, oldest first, each page starting at the last one's newest invoice (and skipping those already
+    /// read), rather than by offset: an invoice becoming paid while the pages are read can't shift the rest so one is missed.
+    /// </summary>
     public async Task<IReadOnlyList<HedgeInvoice>> GetPaidSinceAsync(string storeId, DateTimeOffset since, CancellationToken cancellationToken)
     {
-        var found = new List<HedgeInvoice>();
-        for (var skip = 0; ; skip += PageSize)
+        var found = new Dictionary<string, HedgeInvoice>();
+        var from = since;
+        while (true)
         {
             var page = await invoices.GetInvoices(new InvoiceQuery
             {
                 StoreId = [storeId],
-                StartDate = since,
+                StartDate = from,
                 Status = [nameof(InvoiceStatus.Processing), nameof(InvoiceStatus.Settled)],
-                Skip = skip,
+                OrderByDesc = false,
                 Take = PageSize
             }, cancellationToken);
-            found.AddRange(page.Select(From));
-            if (page.Length < PageSize)
-                return found;
+            var added = 0;
+            foreach (var invoice in page)
+                if (found.TryAdd(invoice.Id, From(invoice)))
+                    added++;
+            // A full page adding nothing new means more invoices than a page share one creation time; their invoice events
+            // still hedge them, and the scan stops rather than loop.
+            if (page.Length < PageSize || added == 0)
+                return found.Values.ToList();
+            from = page[^1].InvoiceTime;
         }
     }
 

@@ -87,10 +87,10 @@ public class HedgeService(ISweepSellRepository repository, SecretProtector prote
         await RunAsync(invoice.StoreId, wait: true, [invoice], cancellationToken);
     }
 
-    /// <summary>Hedges the store's paid invoices now (the Hedge now button).</summary>
-    public Task<HedgeRunResult> RunAsync(string storeId, CancellationToken cancellationToken) => RunAsync(storeId, wait: false, null, cancellationToken);
+    /// <summary>Hedges the store's paid invoices now (the Hedge now button), listing recent invoices whatever the scan interval.</summary>
+    public Task<HedgeRunResult> RunAsync(string storeId, CancellationToken cancellationToken) => RunAsync(storeId, wait: false, null, cancellationToken, scan: true);
 
-    async Task<HedgeRunResult> RunAsync(string storeId, bool wait, IReadOnlyList<HedgeInvoice>? found, CancellationToken cancellationToken)
+    async Task<HedgeRunResult> RunAsync(string storeId, bool wait, IReadOnlyList<HedgeInvoice>? found, CancellationToken cancellationToken, bool scan = false)
     {
         var storeLock = StoreLock(storeId);
         if (wait)
@@ -108,7 +108,7 @@ public class HedgeService(ISweepSellRepository repository, SecretProtector prote
             state.LastRun = clock.GetUtcNow();
             try
             {
-                await RunAsync(storeId, settings, state, found, cancellationToken);
+                await RunAsync(storeId, settings, state, found, scan, cancellationToken);
             }
             catch (Exception e) when (!cancellationToken.IsCancellationRequested)
             {
@@ -127,12 +127,12 @@ public class HedgeService(ISweepSellRepository repository, SecretProtector prote
         }
     }
 
-    async Task RunAsync(string storeId, SweepSellSettings settings, HedgeState state, IReadOnlyList<HedgeInvoice>? found, CancellationToken cancellationToken)
+    async Task RunAsync(string storeId, SweepSellSettings settings, HedgeState state, IReadOnlyList<HedgeInvoice>? found, bool scan, CancellationToken cancellationToken)
     {
         var hedge = settings.Hedge;
         var now = clock.GetUtcNow();
         state.Prune(now - HedgeState.KeepHedged);
-        if (found is null && ScanDue(state))
+        if (found is null && (scan || ScanDue(state)))
         {
             var since = new[] { now - MaxInvoiceAge, hedge.EnabledSince ?? now }.Max();
             try
@@ -439,6 +439,7 @@ public class HedgeService(ISweepSellRepository repository, SecretProtector prote
         var (now, then) = (current.Hedge, planned.Hedge);
         return !current.Paused && now.Enabled && !now.DryRun && current.ExchangeId == exchange.Id &&
                credentials.Equals(protector.Credentials(current)) && // the whole key: a replaced secret must not be used either
+               now.EnabledSince == then.EnabledSince && // turned off and on again: the invoices this run planned for are dropped
                now.MaxSlippagePercent == then.MaxSlippagePercent && now.DailyCap == then.DailyCap &&
                now.DefaultMarket == then.DefaultMarket && now.Markets.Count == then.Markets.Count &&
                now.Markets.All(m => then.Markets.TryGetValue(m.Key, out var market) && market == m.Value);
