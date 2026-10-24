@@ -519,6 +519,59 @@ public class ConvertTests
     }
 
     [Fact]
+    public async Task NewSecretForTheSameKeySavedDuringARunStopsTheNextOrder()
+    {
+        Configure();
+        _exchange.Balances["DOGE"] = 300m;
+        _exchange.OnPrice = () => _repository.Settings[StoreId].ProtectedApiSecret = Protector.Protect("replaced-api-secret");
+        await Service().RunAsync(StoreId, Ct);
+        Assert.Empty(_exchange.Orders);
+    }
+
+    [Fact]
+    public async Task FillFoundAfterMidnightCountsOnTheDayItWasSent()
+    {
+        Configure(assets: "DOGE");
+        _repository.Settings[StoreId].Convert.DailyCap = 0.3m;
+        var id = Guid.NewGuid();
+        var pending = Pending(id);
+        pending.ReferencePrice = 0.001m;
+        _repository.States[StoreId] = new ConvertState { Pending = [pending] };
+        _exchange.Found[id] = new OrderLookup(["OLATE0-NIGHT-ORDER1"], Open: false, ExecutedAmount: 300m);
+        _clock.Advance(TimeSpan.FromHours(24.5)); // found the next UTC day
+        _exchange.Balances["DOGE"] = 300m;
+        await Service().RunAsync(StoreId, Ct);
+        // Yesterday's sale doesn't use today's cap: today's 300 DOGE still sells.
+        Assert.Equal(300m, Assert.Single(_exchange.Orders).Amount);
+        Assert.Equal(0.3m, State.SoldOn(_clock.GetUtcNow(), "BTC"));
+    }
+
+    [Fact]
+    public void EarlierDaysSalesNeverCountAgainstALaterDay()
+    {
+        var state = new ConvertState();
+        var day2 = new DateTimeOffset(2030, 1, 2, 1, 0, 0, TimeSpan.Zero);
+        state.AddSold(day2, "BTC", 0.1m);
+        state.AddSold(day2.AddHours(-2), "BTC", 5m); // sent the day before
+        Assert.Equal(0.1m, state.SoldOn(day2, "BTC"));
+    }
+
+    [Fact]
+    public async Task FailedFillLookupAfterPlacingIsRecorded()
+    {
+        Configure();
+        _exchange.Balances["DOGE"] = 300m;
+        _exchange.Balances["LTC"] = 2m;
+        _exchange.OnSell = () => _exchange.FindError = new HttpRequestException("connection reset");
+        await Service().RunAsync(StoreId, Ct);
+        Assert.Single(_exchange.Orders);
+        Assert.Single(State.Pending);
+        Assert.Equal(ActivityOutcome.Failed, State.Activity[0].Outcome);
+        Assert.Contains("300 DOGE", State.Activity[0].Message);
+        Assert.Contains("connection reset", State.Activity[0].Message);
+    }
+
+    [Fact]
     public async Task SettingsSaveWaitsOnlyForAnOrderBeingSent()
     {
         Configure(assets: "DOGE");

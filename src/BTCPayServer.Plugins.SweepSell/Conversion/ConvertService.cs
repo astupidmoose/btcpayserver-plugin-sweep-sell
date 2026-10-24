@@ -257,7 +257,10 @@ public class ConvertService(ISweepSellRepository repository, SecretProtector pro
             }
             catch (Exception e) when (IsRecordedFailure(e, cancellationToken))
             {
-                logger.LogWarning("Sweep & Sell convert, store {StoreId}: could not look up the {Asset} fill: {Error}", storeId, asset, e.Message);
+                Record(storeId, state, asset, ActivityOutcome.Failed,
+                    $"Placed a sell of up to {Amount(amount)} {asset} for {target} at {Amount(limitPrice)} or better ({string.Join(", ", result.OrderIds)}), " +
+                    $"but could not look up how much sold on {exchange.Name}: {e.Message}. It stays pending; the next run checks it before selling more.");
+                return;
             }
             var orders = string.Join(", ", result.OrderIds);
             if (fill is null || fill.Open)
@@ -275,7 +278,7 @@ public class ConvertService(ISweepSellRepository repository, SecretProtector pro
             }
             else
             {
-                state.AddSold(clock.GetUtcNow(), target, fill.ExecutedAmount * reference);
+                state.AddSold(pending.SentAt, target, fill.ExecutedAmount * reference);
                 Record(storeId, state, asset, ActivityOutcome.Sold,
                     $"Sold {Amount(fill.ExecutedAmount)} of {Amount(amount)} {asset} for {target} at {Amount(limitPrice)} or better ({orders}).");
             }
@@ -344,7 +347,8 @@ public class ConvertService(ISweepSellRepository repository, SecretProtector pro
                     $"The earlier sell of {Amount(pending.Amount)} {pending.Asset} ({orders}) closed on {exchange.Name} without selling anything. It will be tried again.");
                 continue;
             }
-            state.AddSold(clock.GetUtcNow(), pending.TargetAsset, lookup.ExecutedAmount * pending.ReferencePrice);
+            // Counted on the day it was sent: an immediate-or-cancel order fills when it arrives, however late it is found.
+            state.AddSold(pending.SentAt, pending.TargetAsset, lookup.ExecutedAmount * pending.ReferencePrice);
             Record(storeId, state, pending.Asset, ActivityOutcome.Sold,
                 $"Found the earlier sell on {exchange.Name}: {Amount(lookup.ExecutedAmount)} of {Amount(pending.Amount)} {pending.Asset} sold for {pending.TargetAsset} ({orders}).");
         }
@@ -364,7 +368,7 @@ public class ConvertService(ISweepSellRepository repository, SecretProtector pro
                 return false;
             state.Pending.Remove(pending);
             // What it sold isn't known here, so its full value counts against today's cap: the cap is never exceeded.
-            state.AddSold(clock.GetUtcNow(), pending.TargetAsset, pending.Amount * pending.ReferencePrice);
+            state.AddSold(pending.SentAt, pending.TargetAsset, pending.Amount * pending.ReferencePrice);
             Record(storeId, state, pending.Asset, ActivityOutcome.Failed,
                 $"The pending sell of {Amount(pending.Amount)} {pending.Asset} (client order {clientOrderId:D}) was removed by hand. " +
                 $"Its full value counts against today's cap, since what it sold isn't known. Selling resumes.");
@@ -410,7 +414,7 @@ public class ConvertService(ISweepSellRepository repository, SecretProtector pro
     {
         var (now, then) = (current.Convert, planned.Convert);
         return !current.Paused && now.Enabled && !now.DryRun && current.ExchangeId == exchange.Id &&
-               protector.Credentials(current)?.Fingerprint() == credentials.Fingerprint() &&
+               credentials.Equals(protector.Credentials(current)) && // the whole key: a replaced secret must not be used either
                now.TargetAsset == then.TargetAsset && now.Assets.Contains(asset) &&
                now.DailyCap == then.DailyCap && now.MaxSlippagePercent == then.MaxSlippagePercent;
     }

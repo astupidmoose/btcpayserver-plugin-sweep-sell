@@ -39,25 +39,26 @@ public class UISweepSellController(ISweepSellRepository repository, SecretProtec
     {
         foreach (var (field, error) in Validate(vm, exchanges))
             ModelState.AddModelError(field, error);
-        var saved = await repository.GetAsync(storeId);
-        var updated = Apply(saved, vm, protector);
-        if (ModelState.IsValid)
-        {
-            // Saved while no order is being sent: a run checks the saved settings again under this lock before each order,
-            // so once this returns no order goes out under the old settings (e.g. after pausing), and pending orders seen
-            // here include every order sent so far.
-            var conflict = await convert.WithSettingsLockAsync(storeId, async () =>
-            {
-                if (KeyChanges(saved, updated) && PendingConflict(updated, (await repository.GetConvertStateAsync(storeId)).Pending, protector) is { } error)
-                    return error;
-                await repository.SaveAsync(storeId, updated);
-                return null;
-            }, cancellationToken);
-            if (conflict is not null)
-                ModelState.AddModelError(nameof(vm.ExchangeId), conflict);
-        }
         if (!ModelState.IsValid)
+            return View(SettingsView, ToViewModel(await repository.GetAsync(storeId), await repository.GetConvertStateAsync(storeId), vm));
+
+        // Read, checked and saved while no order is being sent: a run checks the saved settings again under this lock before
+        // each order, so once this returns no order goes out under the old settings (e.g. after pausing), and the pending
+        // orders and settings seen here include every order and save made so far.
+        var (saved, updated, conflict) = await convert.WithSettingsLockAsync(storeId, async () =>
+        {
+            var current = await repository.GetAsync(storeId);
+            var next = Apply(current, vm, protector);
+            if (KeyChanges(current, next) && PendingConflict(next, (await repository.GetConvertStateAsync(storeId)).Pending, protector) is { } error)
+                return (current, next, error);
+            await repository.SaveAsync(storeId, next);
+            return (current, next, (string?)null);
+        }, cancellationToken);
+        if (conflict is not null)
+        {
+            ModelState.AddModelError(nameof(vm.ExchangeId), conflict);
             return View(SettingsView, ToViewModel(saved, await repository.GetConvertStateAsync(storeId), vm));
+        }
 
         // Never log the key itself; whether one is saved is enough to follow what happened.
         logger.LogInformation("Sweep & Sell settings of store {StoreId} saved: exchange {Exchange}, credentials {Credentials}, paused {Paused}, " +

@@ -32,11 +32,15 @@ public class ConvertState
 
     public decimal SoldOn(DateTimeOffset now, string asset) => SoldDay == Day(now) ? Sold.GetValueOrDefault(asset) : 0;
 
-    public void AddSold(DateTimeOffset now, string asset, decimal value)
+    /// <summary>Adds a sale made at <paramref name="at"/>. A sale from a day before the one being counted is left out.</summary>
+    public void AddSold(DateTimeOffset at, string asset, decimal value)
     {
-        if (SoldDay != Day(now))
+        var day = Day(at);
+        if (SoldDay is not null && string.CompareOrdinal(day, SoldDay) < 0)
+            return;
+        if (SoldDay != day)
         {
-            SoldDay = Day(now);
+            SoldDay = day;
             Sold.Clear();
         }
         Sold[asset] = Sold.GetValueOrDefault(asset) + value;
