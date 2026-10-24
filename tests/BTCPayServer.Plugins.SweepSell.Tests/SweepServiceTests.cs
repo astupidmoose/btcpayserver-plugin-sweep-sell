@@ -296,6 +296,27 @@ public class SweepServiceTests
     }
 
     [Fact]
+    public async Task PendingSweepIsNotRebroadcastToAnotherExchangeAccount()
+    {
+        Configure();
+        _wallets.BroadcastResults.Enqueue(() => throw new HttpRequestException("timeout"));
+        var service = Service();
+        await service.RunAsync(_storeId, wait: false, Ct);
+        Assert.Single(State.Pending);
+
+        _repository.Settings[_storeId].ProtectedApiKey = Protector.Protect("another-api-key");
+        await service.RunAsync(_storeId, wait: false, Ct);
+        Assert.Single(_wallets.Broadcasts);
+        Assert.Single(State.Pending);
+        Assert.Contains("exchange key changed since it was signed", State.Activity[0].Message);
+
+        _repository.Settings[_storeId].ProtectedApiKey = Protector.Protect("test-api-key"); // put back
+        await service.RunAsync(_storeId, wait: false, Ct);
+        Assert.Equal(2, _wallets.Broadcasts.Count);
+        Assert.Empty(State.Pending);
+    }
+
+    [Fact]
     public async Task FirstBroadcastRefusedSendsNothing()
     {
         Configure();
@@ -634,6 +655,29 @@ public class SweepServiceTests
         await Service().OnChainActivityAsync("BTC", Ct);
         Assert.Equal(2, _wallets.Built.Count);
         Assert.False(overlapped);
+    }
+
+    [Fact]
+    public async Task APauseSavedDuringTheWatchKeepsTheConvertRequest()
+    {
+        Configure(convert: true);
+        var service = Service();
+        await service.RunAsync(_storeId, wait: false, Ct);
+        var awaiting = Assert.Single(State.Awaiting);
+        _exchange.Deposits[awaiting.Txid] = new DepositStatus(DepositState.Credited, 0.9999m);
+        _exchange.Balances["BTC"] = 0.9999m;
+        _exchange.OnFindDeposit = () => _repository.Settings[_storeId].Paused = true; // saved after the watch read the settings
+
+        await service.WatchDepositsAsync(Ct);
+        Assert.Empty(State.Awaiting);
+        Assert.Empty(_exchange.Orders);
+        Assert.True(State.ConvertRequested);
+
+        _exchange.OnFindDeposit = null;
+        _repository.Settings[_storeId].Paused = false;
+        await service.WatchDepositsAsync(Ct);
+        Assert.False(State.ConvertRequested);
+        Assert.Single(_exchange.Orders);
     }
 
     [Fact]

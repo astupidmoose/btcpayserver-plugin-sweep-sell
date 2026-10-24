@@ -122,12 +122,14 @@ sealed class FakeExchange : IExchangeConnector
         Task.FromResult(MinimumDeposit);
 
     public List<DateTimeOffset> DepositSearchesSince { get; } = [];
+    public Action? OnFindDeposit { get; set; }
 
     public Task<DepositStatus?> FindDepositAsync(ExchangeCredentials credentials, string asset, string txid, DateTimeOffset since,
         CancellationToken cancellationToken)
     {
         Calls.Add("find-deposit");
         DepositSearchesSince.Add(since);
+        OnFindDeposit?.Invoke();
         if (DepositError is not null)
             throw DepositError;
         return Task.FromResult(Deposits.GetValueOrDefault(txid));

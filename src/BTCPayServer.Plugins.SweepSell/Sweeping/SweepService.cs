@@ -339,6 +339,7 @@ public class SweepService(ISweepSellRepository repository, SecretProtector prote
                     Txid = sweep.Txid,
                     Hex = sweep.Hex,
                     ExchangeId = exchange.Id,
+                    KeyFingerprint = credentials.Fingerprint(),
                     ExchangeAddress = deposit.Address,
                     ToExchange = sweep.Amounts.ToExchange,
                     ColdAddress = coldAddress,
@@ -419,6 +420,14 @@ public class SweepService(ISweepSellRepository repository, SecretProtector prote
                 Record(storeId, state, code, ActivityOutcome.Waiting,
                     $"The earlier sweep of {Amount(pending.Spent)} {code} ({pending.Txid}) isn't on the network, and sweeping (or its {code} rule) is paused, off or in dry run, so it isn't rebroadcast. " +
                     "Nothing more is swept until it is found or removed under Pending sweeps.");
+                return false;
+            }
+            if (current.ExchangeId != pending.ExchangeId || protector.Credentials(current)?.Fingerprint() is not { } key || key != pending.KeyFingerprint)
+            {
+                // Its deposit address belongs to the account it was signed for, which the deposit watch no longer reads.
+                Record(storeId, state, code, ActivityOutcome.Waiting,
+                    $"The earlier sweep of {Amount(pending.Spent)} {code} ({pending.Txid}) isn't on the network, and the exchange key changed since it was signed, so it isn't rebroadcast " +
+                    "to the old account's deposit address. Put the key back, or remove it under Pending sweeps. Nothing more is swept until then.");
                 return false;
             }
             if (await wallets.GetWalletAsync(storeId, code, cancellationToken) is not { IsHot: true } wallet || wallet.Key != pending.WalletKey)
@@ -606,7 +615,8 @@ public class SweepService(ISweepSellRepository repository, SecretProtector prote
                     {
                         // Convert keeps its own locks; this lock only covers the sweep state.
                         var result = await convert.RunAsync(storeId, cancellationToken);
-                        state.ConvertRequested = result == ConvertRunResult.Busy;
+                        // Busy, or paused since the settings above were read: kept, so it still runs straight away once it can.
+                        state.ConvertRequested = result is ConvertRunResult.Busy or ConvertRunResult.Paused;
                     }
                 }
             }

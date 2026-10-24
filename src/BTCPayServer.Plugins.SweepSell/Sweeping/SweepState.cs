@@ -55,6 +55,10 @@ public class PendingSweep
     public string Hex { get; set; } = "";
 
     public string? ExchangeId { get; set; }
+
+    /// <summary>The exchange key it was signed for: only that account's deposit address may get it on a rebroadcast.</summary>
+    public string? KeyFingerprint { get; set; }
+
     public string ExchangeAddress { get; set; } = "";
     public decimal ToExchange { get; set; }
     public string? ColdAddress { get; set; }
