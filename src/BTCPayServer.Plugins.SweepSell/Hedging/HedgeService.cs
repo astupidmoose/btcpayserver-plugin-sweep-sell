@@ -189,19 +189,23 @@ public class HedgeService(ISweepSellRepository repository, SecretProtector prote
                 Record(storeId, state, Asset, ActivityOutcome.Waiting,
                     $"What was left of invoice {id} ({Amount(invoice.Amount)} BTC taken while hedging was live) isn't sold now that hedging is in dry run.");
             }
-            // Taken while Processing, but the trigger is now Settled: it waits to settle like any other invoice.
-            else if (invoice.TakenProcessing && hedge.Trigger == HedgeTrigger.Settled)
+            // Taken under a trigger or an amount to hedge that no longer applies: taken again under the current settings (a
+            // Processing invoice once it settles), or, if part of it was sold already, the rest isn't sold.
+            else if ((invoice.TakenProcessing && hedge.Trigger == HedgeTrigger.Settled) || invoice.Basis != hedge.Amount)
             {
+                var why = invoice.Basis != hedge.Amount ? "the amount to hedge changed" : "hedging now waits for Settled invoices";
                 if (invoice.Remaining == invoice.Amount)
                 {
-                    state.Invoices.Remove(id); // taken again once it settles
-                    Record(storeId, state, Asset, ActivityOutcome.Waiting, $"Invoice {id} isn't sold until it settles, as hedging now waits for Settled invoices.");
+                    state.Invoices.Remove(id);
+                    state.LastScan = null; // so the next run finds it again
+                    Record(storeId, state, Asset, ActivityOutcome.Waiting, invoice.Basis != hedge.Amount
+                        ? $"Invoice {id} is taken again with the new amount to hedge."
+                        : $"Invoice {id} isn't sold until it settles, as hedging now waits for Settled invoices.");
                 }
                 else
                 {
                     invoice.Remaining = 0;
-                    Record(storeId, state, Asset, ActivityOutcome.Waiting,
-                        $"Part of invoice {id} was sold while it was Processing; the rest isn't sold, as hedging now waits for Settled invoices.");
+                    Record(storeId, state, Asset, ActivityOutcome.Waiting, $"Part of invoice {id} was sold already; the rest isn't sold, as {why}.");
                 }
             }
             // The market for its currency changed since it was taken: what is left sells where the settings now say.
@@ -414,6 +418,7 @@ public class HedgeService(ISweepSellRepository repository, SecretProtector prote
             DryRun = hedge.DryRun,
             EnabledSince = hedge.EnabledSince,
             TakenProcessing = invoice.Status == HedgeInvoiceStatus.Processing,
+            Basis = hedge.Amount,
             CreatedAt = invoice.CreatedAt,
             AddedAt = now
         };

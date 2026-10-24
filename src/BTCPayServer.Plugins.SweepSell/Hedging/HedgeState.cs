@@ -3,6 +3,7 @@ using System;
 using System.Collections.Generic;
 using System.Linq;
 using BTCPayServer.Plugins.SweepSell.Conversion;
+using BTCPayServer.Plugins.SweepSell.Settings;
 using BTCPayServer.Plugins.SweepSell.Sweeping;
 
 namespace BTCPayServer.Plugins.SweepSell.Hedging;
@@ -22,8 +23,9 @@ public class HedgeState
 
     /// <summary>
     /// Every invoice taken for hedging, by invoice ID, with what is still to sell. An invoice is added once, so a repeated
-    /// event, a restart or a rescan can't hedge it twice. The one exception: an invoice taken while Processing, with nothing
-    /// sold, is dropped when the trigger becomes Settled, to be taken again once it settles.
+    /// event, a restart or a rescan can't hedge it twice. The one exception: an invoice with nothing sold yet is dropped when
+    /// the settings it was taken under change (taken while Processing and the trigger is now Settled, or another amount to
+    /// hedge), to be taken again under the current ones.
     /// </summary>
     public Dictionary<string, HedgedInvoice> Invoices { get; set; } = new();
 
@@ -87,6 +89,9 @@ public class HedgedInvoice
 
     /// <summary>Taken while hedging was in dry run: only ever checked with the exchange, never sold.</summary>
     public bool DryRun { get; set; }
+
+    /// <summary>Which amount <see cref="Amount"/> is (the BTC paid or the invoice's value).</summary>
+    public HedgeAmount Basis { get; set; }
 
     /// <summary>Taken while the invoice was Processing (not yet Settled), under the Processing trigger.</summary>
     public bool TakenProcessing { get; set; }

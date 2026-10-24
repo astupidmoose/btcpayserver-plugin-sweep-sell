@@ -499,6 +499,35 @@ public class HedgeServiceTests
     }
 
     [Fact]
+    public void TheInvoiceScanStepsByWholeMicroseconds()
+    {
+        var at = new DateTimeOffset(2030, 1, 1, 12, 0, 0, TimeSpan.Zero).AddTicks(1230);
+        Assert.Equal(at.AddTicks(10), BtcPayStoreInvoices.After(at));
+        Assert.Equal(at.AddTicks(10), BtcPayStoreInvoices.After(at.AddTicks(7))); // never rounds back to the same microsecond
+    }
+
+    [Fact]
+    public async Task QueuedInvoicesAreTakenAgainWhenTheAmountToHedgeChanges()
+    {
+        var hedge = Configure(hedge: h => h.Amount = HedgeAmount.BtcPaid);
+        _exchange.Balances["BTC"] = 0m;
+        Invoice("inv-1", 0.1m, btcValue: 0.06m); // 0.1 BTC paid for an invoice worth 0.06 BTC
+        var service = Service();
+        await service.OnInvoiceAsync("inv-1", Ct);
+        Assert.Equal(0.1m, State.Invoices["inv-1"].Remaining);
+
+        hedge.Amount = HedgeAmount.InvoiceValue;
+        _exchange.Balances["BTC"] = 1m;
+        await service.RunAsync(_storeId, Ct);
+        Assert.Empty(_exchange.Orders); // the 0.1 queued before isn't sold
+        Assert.Contains("taken again with the new amount to hedge", State.Activity[0].Message);
+
+        await service.RunDueAsync(Ct); // the next run scans again at once
+        Assert.Equal(0.06m, Assert.Single(_exchange.Orders).Amount);
+        Assert.Equal(0m, State.Invoices["inv-1"].Remaining);
+    }
+
+    [Fact]
     public async Task ARunThatCrossesMidnightKeepsToTheNewDaysCap()
     {
         Configure(hedge: h =>

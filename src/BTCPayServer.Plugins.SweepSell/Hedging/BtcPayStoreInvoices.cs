@@ -33,9 +33,16 @@ public class BtcPayStoreInvoices(InvoiceRepository invoices) : IStoreInvoices
             var last = page[^1].InvoiceTime;
             foreach (var invoice in await PaidAsync(storeId, last, last, null, cancellationToken))
                 found.TryAdd(invoice.Id, From(invoice));
-            from = last.AddTicks(1); // always later than the page started, so the scan ends
+            from = After(last); // always later than the page started, so the scan ends
         }
     }
+
+    /// <summary>
+    /// The first time the database can store after <paramref name="time"/>. PostgreSQL keeps whole microseconds, so a
+    /// smaller step would round back to the same time and read the same page forever.
+    /// </summary>
+    public static DateTimeOffset After(DateTimeOffset time) =>
+        new DateTimeOffset(time.Ticks - time.Ticks % TimeSpan.TicksPerMicrosecond, time.Offset).AddTicks(TimeSpan.TicksPerMicrosecond);
 
     Task<InvoiceEntity[]> PaidAsync(string storeId, DateTimeOffset from, DateTimeOffset? to, int? take, CancellationToken cancellationToken) =>
         invoices.GetInvoices(new InvoiceQuery
