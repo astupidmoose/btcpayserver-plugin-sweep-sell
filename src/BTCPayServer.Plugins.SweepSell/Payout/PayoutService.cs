@@ -284,6 +284,16 @@ public class PayoutService(IPayoutRepository payouts, ISweepSellRepository repos
             if (TradingKey(settingsNow, connector) is { } tradingNow && !tradingNow.Equals(trading) &&
                 !await TradingKeyIsSafeAsync(storeId, state, asset, connector, tradingNow, cancellationToken))
                 return;
+            // Each run pays out what its store sees of the account; a second store paying out the same account wouldn't see
+            // this one's withdrawals until they are listed, and could send them again. Checked under the lock against the
+            // saved settings, so of two stores turned on together, the later run always sees the earlier one.
+            if (await SharesPayoutKeyAsync(storeId, connector, credentials))
+            {
+                Record(storeId, state, asset, ActivityOutcome.Failed,
+                    "Another store on this server pays out live with the same payout key. Each exchange account can be paid out by one store " +
+                    "only, so give each store its own account and key. Nothing was withdrawn.");
+                return;
+            }
             // The balance and withdrawals are read again under the lock: a convert sell or another withdrawal of this asset
             // since they were first read must not eat into what is kept, and every withdrawal that could be confused with this
             // one is known.
@@ -533,6 +543,11 @@ public class PayoutService(IPayoutRepository payouts, ISweepSellRepository repos
             storeLock.Release();
         }
     }
+
+    /// <summary>Whether another store pays out live (enabled, not a dry run) with the same exchange and key.</summary>
+    async Task<bool> SharesPayoutKeyAsync(string storeId, IWithdrawalConnector connector, ExchangeCredentials credentials) =>
+        (await payouts.GetAllAsync()).Any(p => p.Key != storeId && p.Value is { Enabled: true, DryRun: false } && p.Value.ExchangeId == connector.Id &&
+                                               protector.Credentials(p.Value)?.ApiKey == credentials.ApiKey);
 
     /// <summary>The store's trading key when it is on the payout exchange, where it could change the saved destinations.</summary>
     ExchangeCredentials? TradingKey(SweepSellSettings settings, IWithdrawalConnector connector) =>

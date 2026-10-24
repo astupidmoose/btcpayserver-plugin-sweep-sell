@@ -54,7 +54,8 @@ change withdrawal addresses. Payout won't run while the trading key can change w
 Payout needs a second key with only **query funds** and **withdraw funds**: payout refuses a key
 with any other permission, such as an order or withdrawal address permission. **Test the payout key**
 checks that it can withdraw, can't trade and has no other permission, and lists the withdrawal
-destinations your exchange shows for the asset.
+destinations your exchange shows for the asset. Pay out each exchange account from one store only: payout
+withdraws the whole balance, and won't run while another store pays out live with the same key.
 
 ## Development
 

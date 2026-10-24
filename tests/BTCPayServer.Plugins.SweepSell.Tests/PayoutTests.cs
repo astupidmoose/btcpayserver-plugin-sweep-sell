@@ -528,6 +528,23 @@ public class PayoutTests
     }
 
     [Fact]
+    public async Task TwoStoresNeverPayOutWithTheSameKey()
+    {
+        Configure();
+        _exchange.Balance = 500m;
+        _main.Settings["test-store-2"] = Copy(_main.Settings[StoreId]);
+        _payouts.Settings["test-store-2"] = Copy(_payouts.Settings[StoreId]);
+        await Service().RunAsync(StoreId, Ct);
+        Assert.Empty(_exchange.Withdrawals);
+        Assert.Contains("Another store on this server pays out live with the same payout key", State.Activity[0].Message);
+        Assert.DoesNotContain("test-store-2", State.Activity[0].Message);
+
+        _payouts.Settings["test-store-2"].DryRun = true; // the other store only quotes, so this one may pay out
+        await Service().RunAsync(StoreId, Ct);
+        Assert.Single(_exchange.Withdrawals);
+    }
+
+    [Fact]
     public async Task ATradingKeySavedDuringTheRunIsCheckedBeforeWithdrawing()
     {
         Configure();
