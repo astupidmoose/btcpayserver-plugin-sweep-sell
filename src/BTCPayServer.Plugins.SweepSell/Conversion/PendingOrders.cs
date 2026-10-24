@@ -79,6 +79,11 @@ public static class PendingOrders
                     $"The earlier {order.Asset} sell ({string.Join(", ", lookup.OrderIds)}) is still open on {exchange.Name}.");
                 continue;
             }
+            if (Implausible(lookup, order, exchange.Name) is { } bad)
+            {
+                record(order.Asset, ActivityOutcome.Failed, bad);
+                return false;
+            }
             pending.Remove(order);
             var orders = string.Join(", ", lookup.OrderIds);
             if (lookup.ExecutedAmount <= 0)
@@ -94,6 +99,16 @@ public static class PendingOrders
         }
         return pending.Count == 0;
     }
+
+    /// <summary>
+    /// Why a closed order's reported fill can't be right (less than nothing, or more than was ordered), or null. Such an
+    /// answer is never counted: the order stays pending for the owner to check.
+    /// </summary>
+    public static string? Implausible(OrderLookup lookup, PendingOrder order, string exchangeName) =>
+        lookup.ExecutedAmount < 0 || lookup.ExecutedAmount > order.Amount
+            ? $"{exchangeName} reports the sell of {Amount(order.Amount)} {order.Asset} ({string.Join(", ", lookup.OrderIds)}) as filling {Amount(lookup.ExecutedAmount)}, which can't be right. " +
+              "It stays pending and nothing more is sold: check it in your exchange, then remove it under Pending orders."
+            : null;
 
     static string Amount(decimal value) => value.ToString("0.########", CultureInfo.InvariantCulture);
 }

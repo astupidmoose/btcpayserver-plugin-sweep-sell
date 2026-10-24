@@ -103,6 +103,34 @@ public class ConvertTests
     }
 
     [Fact]
+    public async Task DryRunAppliesTheCapAcrossAssets()
+    {
+        Configure(dryRun: true);
+        _repository.Settings[StoreId].Convert.DailyCap = 0.1m; // 100 DOGE or 100 LTC at 0.001
+        _exchange.Balances["DOGE"] = 100m;
+        _exchange.Balances["LTC"] = 100m;
+        await Service().RunAsync(StoreId, Ct);
+        Assert.Equal([("DOGE", 100m)], _exchange.Orders.Select(o => (o.Base, o.Amount)));
+        Assert.Contains("Today's cap", State.Activity[0].Message);
+    }
+
+    [Fact]
+    public async Task ImpossibleFillsAreNeverCounted()
+    {
+        Configure();
+        _exchange.FillRatio = -1m;
+        _exchange.Balances["DOGE"] = 100m;
+        var service = Service();
+        await service.RunAsync(StoreId, Ct);
+        Assert.Single(State.Pending);
+        Assert.Contains("can't be right", State.Activity[0].Message);
+        await service.RunAsync(StoreId, Ct); // the lookup on the next run gets the same answer
+        Assert.Single(State.Pending);
+        Assert.Single(_exchange.Orders);
+        Assert.Equal(0m, State.SoldOn(_clock.GetUtcNow(), "BTC"));
+    }
+
+    [Fact]
     public async Task DailyCapLimitsSalesUntilTheNextDay()
     {
         Configure();

@@ -230,8 +230,8 @@ public class HedgeServiceTests
         _clock.Advance(TimeSpan.Zero);
         await Service().RunAsync(_storeId, Ct); // the scan takes both
         Assert.Equal(0.12m, Assert.Single(_exchange.Orders).Amount);
-        var remaining = State.Invoices.Values.Select(i => i.Remaining).Sum();
-        Assert.Equal(0.06m, remaining);
+        Assert.Equal(0m, State.Invoices["inv-1"].Remaining); // the older invoice is hedged first
+        Assert.Equal(0.06m, State.Invoices["inv-2"].Remaining);
         Assert.Equal(0.06m, State.Sold.On(_clock.GetUtcNow(), "BTC"));
     }
 
@@ -275,6 +275,76 @@ public class HedgeServiceTests
         Assert.Equal(0m, State.Invoices["small"].Remaining);
         Assert.Contains("taken while hedging was in dry run", State.Activity[0].Message);
         Assert.Equal(0m, State.Sold.On(_clock.GetUtcNow(), "BTC"));
+    }
+
+    [Fact]
+    public async Task OlderInvoicesAreHedgedFirstWhateverOrderTheyArriveIn()
+    {
+        Configure();
+        _exchange.FillRatio = 0.5m;
+        Invoice("newer", 0.06m, created: Start.AddMinutes(-10));
+        Invoice("older", 0.06m, created: Start.AddMinutes(-20));
+        var service = Service();
+        _exchange.Balances["BTC"] = 0.01m; // both wait for BTC
+        await service.OnInvoiceAsync("newer", Ct);
+        await service.OnInvoiceAsync("older", Ct);
+        _exchange.Balances["BTC"] = 1m;
+        await service.RunAsync(_storeId, Ct);
+        Assert.Equal(0m, State.Invoices["older"].Remaining);
+        Assert.Equal(0.06m, State.Invoices["newer"].Remaining);
+    }
+
+    [Fact]
+    public async Task TurningHedgingOffAndOnDropsWhatWasLeft()
+    {
+        var hedge = Configure();
+        _exchange.Balances["BTC"] = 0m;
+        Invoice("inv-1", 0.1m);
+        var service = Service();
+        await service.OnInvoiceAsync("inv-1", Ct);
+        Assert.Equal(0.1m, State.Invoices["inv-1"].Remaining);
+
+        hedge.EnabledSince = Start; // turned off and on again
+        _exchange.Balances["BTC"] = 1m;
+        await service.RunAsync(_storeId, Ct);
+        Assert.Empty(_exchange.Orders);
+        Assert.Equal(0m, State.Invoices["inv-1"].Remaining);
+        Assert.Contains("before hedging was last turned on", State.Activity[0].Message);
+    }
+
+    [Fact]
+    public async Task ImpossibleFillsAreNeverCounted()
+    {
+        Configure();
+        _exchange.FillRatio = 2m; // reports more sold than ordered
+        Invoice("inv-1", 0.1m);
+        Invoice("inv-2", 0.1m);
+        var service = Service();
+        await service.OnInvoiceAsync("inv-1", Ct);
+        var pending = Assert.Single(State.Pending);
+        Assert.Equal(0.1m, State.Invoices["inv-1"].Remaining);
+        Assert.Contains("can't be right", State.Activity[0].Message);
+
+        // Looked up again on the next run: still impossible, still pending, and nothing more is sold.
+        await service.OnInvoiceAsync("inv-2", Ct);
+        Assert.Single(_exchange.Orders);
+        Assert.Equal(pending.ClientOrderId, Assert.Single(State.Pending).ClientOrderId);
+        Assert.Equal(0m, State.Sold.On(_clock.GetUtcNow(), "BTC"));
+    }
+
+    [Fact]
+    public async Task DryRunAppliesTheCapAcrossMarkets()
+    {
+        Configure(dryRun: true, hedge: h =>
+        {
+            h.DailyCap = 0.1m;
+            h.Markets["USD"] = "USD";
+        });
+        Invoice("cad", 0.1m);
+        Invoice("usd", 0.1m, currency: "USD");
+        await Service().RunAsync(_storeId, Ct);
+        Assert.Equal([("CAD", 0.1m)], _exchange.Orders.Select(o => (o.Quote, o.Amount)));
+        Assert.Contains("today's cap", State.Activity[0].Message);
     }
 
     [Fact]

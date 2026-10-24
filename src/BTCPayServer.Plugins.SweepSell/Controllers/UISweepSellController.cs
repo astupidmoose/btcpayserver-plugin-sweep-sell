@@ -566,7 +566,7 @@ public class UISweepSellController(ISweepSellRepository repository, SecretProtec
             HedgeEnabledSince = settings.Hedge.EnabledSince,
             HedgeLastRun = hedgeState.LastRun,
             HedgePending = hedgeState.Pending,
-            HedgeQueued = hedgeState.Invoices.Where(i => i.Value.Remaining > 0).OrderBy(i => i.Value.AddedAt)
+            HedgeQueued = hedgeState.Invoices.Where(i => i.Value.Remaining > 0).OrderBy(i => i.Value.CreatedAt)
                 .Select(i => new QueuedHedge(i.Key, i.Value.Remaining, i.Value.Amount, i.Value.Market, i.Value.DryRun)).ToList(),
             HedgeActivity = hedgeState.Activity,
             // Saved but undecryptable (e.g. restored on a server with other data-protection keys) counts as not saved.

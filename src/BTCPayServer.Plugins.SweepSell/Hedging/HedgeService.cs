@@ -148,10 +148,16 @@ public class HedgeService(ISweepSellRepository repository, SecretProtector prote
         foreach (var invoice in found ?? [])
             Take(storeId, hedge, state, invoice, now);
 
-        if (!hedge.DryRun)
+        foreach (var (id, invoice) in state.Invoices.Where(i => i.Value.Remaining > 0).ToList())
         {
-            // Taken while in dry run, so the owner never saw them as live sells; selling them now would surprise.
-            foreach (var (id, invoice) in state.Invoices.Where(i => i.Value.DryRun && i.Value.Remaining > 0).ToList())
+            // Taken before hedging was last turned on: turning it on again starts afresh, so what was left isn't sold now.
+            if (invoice.EnabledSince != hedge.EnabledSince)
+            {
+                invoice.Remaining = 0;
+                Record(storeId, state, Asset, ActivityOutcome.Waiting, $"Invoice {id} was taken before hedging was last turned on, so what was left of it isn't sold.");
+            }
+            // Taken while in dry run, so the owner never saw it as a live sell; selling it now would surprise.
+            else if (invoice.DryRun && !hedge.DryRun)
             {
                 invoice.Remaining = 0;
                 Record(storeId, state, Asset, ActivityOutcome.Waiting, $"Invoice {id} was taken while hedging was in dry run, so it isn't sold now that it is live.");
@@ -188,6 +194,8 @@ public class HedgeService(ISweepSellRepository repository, SecretProtector prote
         }
 
         var slippage = Math.Clamp(hedge.MaxSlippagePercent, ConvertSettings.MinSlippageLimit, ConvertSettings.MaxSlippageLimit) / 100m;
+        // What this run's dry-run checks would have sold, so the cap applies across markets as in a live run.
+        var simulated = 0m;
         foreach (var market in markets)
         {
             var queued = state.Queued(market, hedge.DryRun).Sum(i => i.Value.Remaining);
@@ -211,7 +219,7 @@ public class HedgeService(ISweepSellRepository repository, SecretProtector prote
                 var capped = false;
                 if (hedge.DailyCap > 0)
                 {
-                    var left = hedge.DailyCap - state.Sold.On(now, Asset);
+                    var left = hedge.DailyCap - state.Sold.On(now, Asset) - simulated;
                     if (left < wanted)
                     {
                         wanted = Math.Max(left, 0);
@@ -242,6 +250,7 @@ public class HedgeService(ISweepSellRepository repository, SecretProtector prote
                     var check = await exchange.SellAsync(credentials, Asset, market, amount, limitPrice, Guid.NewGuid(), validateOnly: true, cancellationToken);
                     state.Allocate(market, amount, dryRun: true);
                     available -= amount;
+                    simulated += amount;
                     Record(storeId, state, Asset, ActivityOutcome.DryRun,
                         $"Dry run: would sell up to {Amount(amount)} BTC for {market} at {Amount(limitPrice)} or better ({check.Description}). {exchange.Name} accepted the order check; nothing was sold.");
                 }
@@ -321,6 +330,11 @@ public class HedgeService(ISweepSellRepository repository, SecretProtector prote
                     $"Placed a sell of up to {Amount(amount)} BTC for {market} at {Amount(limitPrice)} or better ({orders}). Waiting for {exchange.Name} to report it closed before selling more.");
                 return;
             }
+            if (PendingOrders.Implausible(fill, pending, exchange.Name) is { } bad)
+            {
+                Record(storeId, state, Asset, ActivityOutcome.Failed, bad);
+                return;
+            }
             state.Pending.Remove(pending);
             if (fill.ExecutedAmount == 0)
             {
@@ -344,7 +358,14 @@ public class HedgeService(ISweepSellRepository repository, SecretProtector prote
         var market = hedge.MarketFor(invoice.Currency).ToUpperInvariant();
         var amount = hedge.Amount == HedgeAmount.InvoiceValue ? invoice.BtcValue : invoice.BtcPaid;
         // Recorded even when there is nothing to sell, so the invoice is decided once and never looked at again.
-        var entry = new HedgedInvoice { Market = market, DryRun = hedge.DryRun, AddedAt = now };
+        var entry = new HedgedInvoice
+        {
+            Market = market,
+            DryRun = hedge.DryRun,
+            EnabledSince = hedge.EnabledSince,
+            CreatedAt = invoice.CreatedAt,
+            AddedAt = now
+        };
         state.Invoices[invoice.Id] = entry;
         if (amount is null)
         {

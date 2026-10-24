@@ -129,6 +129,8 @@ public class ConvertService(ISweepSellRepository repository, SecretProtector pro
         }
 
         var target = convert.TargetAsset;
+        // What this run's dry-run checks would have sold, so the cap applies across assets as in a live run.
+        var simulated = 0m;
         var slippage = Math.Clamp(convert.MaxSlippagePercent, ConvertSettings.MinSlippageLimit, ConvertSettings.MaxSlippageLimit) / 100m;
         foreach (var asset in convert.Assets.Where(a => !string.Equals(a, target, StringComparison.OrdinalIgnoreCase)))
         {
@@ -155,7 +157,7 @@ public class ConvertService(ISweepSellRepository repository, SecretProtector pro
                 var wanted = available;
                 if (convert.DailyCap > 0)
                 {
-                    var left = convert.DailyCap - state.SoldOn(clock.GetUtcNow(), target);
+                    var left = convert.DailyCap - state.SoldOn(clock.GetUtcNow(), target) - simulated;
                     if (left <= 0)
                     {
                         Record(storeId, state, asset, ActivityOutcome.Waiting,
@@ -185,6 +187,7 @@ public class ConvertService(ISweepSellRepository repository, SecretProtector pro
                 try
                 {
                     var check = await exchange.SellAsync(credentials, asset, target, amount, limitPrice, Guid.NewGuid(), validateOnly: true, cancellationToken);
+                    simulated += amount * reference;
                     Record(storeId, state, asset, ActivityOutcome.DryRun,
                         $"Dry run: would sell up to {Amount(amount)} {asset} for {target} at {Amount(limitPrice)} or better ({check.Description}). {exchange.Name} accepted the order check; nothing was sold.");
                 }
@@ -267,6 +270,11 @@ public class ConvertService(ISweepSellRepository repository, SecretProtector pro
                 // Not listed or not closed yet: it stays pending, so its final fill is counted before anything more is sold.
                 Record(storeId, state, asset, ActivityOutcome.Waiting,
                     $"Placed a sell of up to {Amount(amount)} {asset} for {target} at {Amount(limitPrice)} or better ({orders}). Waiting for {exchange.Name} to report it closed before selling more.");
+                return;
+            }
+            if (PendingOrders.Implausible(fill, pending, exchange.Name) is { } bad)
+            {
+                Record(storeId, state, asset, ActivityOutcome.Failed, bad);
                 return;
             }
             state.Pending.Remove(pending);

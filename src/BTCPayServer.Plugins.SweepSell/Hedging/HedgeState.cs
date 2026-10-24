@@ -37,10 +37,10 @@ public class HedgeState
 
     public void Add(ActivityEntry entry) => ActivityLog.Add(Activity, entry, MaxActivity);
 
-    /// <summary>Invoices with BTC still to sell into <paramref name="market"/>, oldest first.</summary>
+    /// <summary>Invoices with BTC still to sell into <paramref name="market"/>, oldest invoice first.</summary>
     public IEnumerable<KeyValuePair<string, HedgedInvoice>> Queued(string market, bool dryRun) =>
         Invoices.Where(i => i.Value.Remaining > 0 && i.Value.DryRun == dryRun && i.Value.Market == market)
-            .OrderBy(i => i.Value.AddedAt)
+            .OrderBy(i => i.Value.CreatedAt)
             .ThenBy(i => i.Key, StringComparer.Ordinal);
 
     /// <summary>Counts <paramref name="sold"/> BTC against the queued invoices of <paramref name="market"/>, oldest first.</summary>
@@ -78,5 +78,12 @@ public class HedgedInvoice
     /// <summary>Taken while hedging was in dry run: only ever checked with the exchange, never sold.</summary>
     public bool DryRun { get; set; }
 
+    /// <summary>When hedging was turned on when the invoice was taken; one left from an earlier period isn't sold.</summary>
+    public DateTimeOffset? EnabledSince { get; set; }
+
+    /// <summary>When the invoice was created: fills are counted against the oldest invoices first.</summary>
+    public DateTimeOffset CreatedAt { get; set; }
+
+    /// <summary>When it was taken for hedging; fully hedged invoices are forgotten <see cref="HedgeState.KeepHedged"/> after.</summary>
     public DateTimeOffset AddedAt { get; set; }
 }
