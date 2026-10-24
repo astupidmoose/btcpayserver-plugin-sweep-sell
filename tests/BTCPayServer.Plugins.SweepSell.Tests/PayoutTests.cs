@@ -730,6 +730,22 @@ public class PayoutTests
     }
 
     [Fact]
+    public async Task ThisStoresHedgingStopsABitcoinPayout()
+    {
+        Configure();
+        _payouts.Settings[StoreId].Asset = "BTC";
+        _exchange.Balance = 500m;
+        _main.Settings[StoreId].Hedge = new HedgeSettings { Enabled = true, DryRun = false };
+        await Service().RunAsync(StoreId, Ct);
+        Assert.Empty(_exchange.Withdrawals);
+        Assert.Contains("This store's hedging sells BTC from the same Fake Exchange account", State.Activity[0].Message);
+
+        _main.Settings[StoreId].Hedge.DryRun = true; // a hedging dry run sells nothing
+        await Service().RunAsync(StoreId, Ct);
+        Assert.Single(_exchange.Withdrawals);
+    }
+
+    [Fact]
     public async Task ATradingKeySavedDuringTheRunIsCheckedBeforeWithdrawing()
     {
         Configure();
