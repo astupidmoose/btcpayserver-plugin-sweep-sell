@@ -12,7 +12,7 @@ using Newtonsoft.Json.Linq;
 namespace BTCPayServer.Plugins.SweepSell.Exchanges.Kraken;
 
 /// <summary>Kraken over its REST API (https://docs.kraken.com/api/). Read balances, get deposit addresses, sell at market.</summary>
-public class KrakenConnector(HttpClient http) : IExchangeConnector
+public class KrakenConnector(HttpClient http, TimeProvider? clock = null) : IExchangeConnector
 {
     public const string HttpClientName = "SweepSell.Kraken";
     static readonly Uri BaseUri = new("https://api.kraken.com");
@@ -25,6 +25,12 @@ public class KrakenConnector(HttpClient http) : IExchangeConnector
         ["XETC"] = "ETC", ["XZEC"] = "ZEC", ["XMLN"] = "MLN", ["XREP"] = "REP",
         ["ZCAD"] = "CAD", ["ZUSD"] = "USD", ["ZEUR"] = "EUR", ["ZGBP"] = "GBP", ["ZJPY"] = "JPY", ["ZAUD"] = "AUD", ["ZCHF"] = "CHF"
     };
+
+    /// <summary>
+    /// How long Kraken's matching engine may still accept an order after it was sent (its <c>deadline</c>, which it
+    /// allows up to 60 seconds ahead). Well inside the time a caller waits before treating an unlisted order as never placed.
+    /// </summary>
+    public static readonly TimeSpan OrderDeadline = TimeSpan.FromSeconds(30);
 
     static long _lastNonce;
     // Kraken rejects a nonce lower than one it has already seen for the key, so private calls with the same
@@ -181,7 +187,10 @@ public class KrakenConnector(HttpClient http) : IExchangeConnector
             new("price", limitPrice.ToString(CultureInfo.InvariantCulture)),
             new("timeinforce", "IOC"),
             // Kraken's client order ID (UUID form): the order can be looked up by it if the response is lost.
-            new("cl_ord_id", clientOrderId.ToString("D"))
+            new("cl_ord_id", clientOrderId.ToString("D")),
+            // A request delayed in transit or a queue is rejected after this instead of executing later, so an order that
+            // isn't listed after a caller's grace period can never still go through.
+            new("deadline", (clock ?? TimeProvider.System).GetUtcNow().Add(OrderDeadline).UtcDateTime.ToString("yyyy-MM-dd'T'HH:mm:ss'Z'", CultureInfo.InvariantCulture))
         };
         if (validateOnly)
             parameters.Add(new("validate", "true"));

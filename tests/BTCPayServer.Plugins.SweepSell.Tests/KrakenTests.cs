@@ -391,6 +391,21 @@ public class KrakenTests
     }
 
     [Fact]
+    public async Task OrdersExpireIfTheyReachTheMatchingEngineLate()
+    {
+        var http = new FakeHttp();
+        http.Responses["/0/private/AddOrder"] = """{"error":[],"result":{"txid":["OEXAMP-LE000-ORDER1"]}}""";
+        var clock = new FixedClock(new DateTimeOffset(2030, 1, 1, 0, 0, 0, TimeSpan.Zero));
+        await new KrakenConnector(http.Client(), clock).SellAsync(Credentials, "DOGE", "BTC", 300m, 0.0000015m, OrderId, validateOnly: false, TestContext.Current.CancellationToken);
+        Assert.Contains("deadline=2030-01-01T00%3A00%3A30Z", http.Sent.Single().Body);
+    }
+
+    sealed class FixedClock(DateTimeOffset now) : TimeProvider
+    {
+        public override DateTimeOffset GetUtcNow() => now;
+    }
+
+    [Fact]
     public async Task KrakenErrorsBecomeExchangeExceptions()
     {
         var http = new FakeHttp();

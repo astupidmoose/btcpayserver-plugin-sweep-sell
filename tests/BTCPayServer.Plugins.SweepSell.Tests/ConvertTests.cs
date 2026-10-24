@@ -371,6 +371,8 @@ public class ConvertTests
         Assert.Empty(_exchange.Orders);
         Assert.Single(State.Pending);
         Assert.Contains("different exchange key", State.Activity[0].Message);
+        Assert.Contains("300 DOGE", State.Activity[0].Message);
+        Assert.Contains(id.ToString("D"), State.Activity[0].Message);
     }
 
     [Fact]
@@ -606,6 +608,17 @@ public class ConvertTests
         await Service().RunAsync(StoreId, Ct);
         Assert.Contains(State.Activity, a => a.Asset == "DOGE" && a.Outcome == ActivityOutcome.Failed);
         Assert.Contains(State.Activity, a => a.Asset == "LTC" && a.Outcome == ActivityOutcome.Sold);
+    }
+
+    [Fact]
+    public async Task MarketReadFailureNamesTheAmount()
+    {
+        Configure(assets: "DOGE");
+        _exchange.Balances["DOGE"] = 300m;
+        _exchange.OnPrice = () => throw new ExchangeException("Kraken: EService:Unavailable");
+        await Service().RunAsync(StoreId, Ct);
+        Assert.Equal(ActivityOutcome.Failed, State.Activity[0].Outcome);
+        Assert.Contains("300 DOGE", State.Activity[0].Message);
     }
 
     [Fact]

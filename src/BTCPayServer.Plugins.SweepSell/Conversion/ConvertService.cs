@@ -31,7 +31,10 @@ public enum ConvertRunResult
 public class ConvertService(ISweepSellRepository repository, SecretProtector protector, ExchangeRegistry exchanges,
     TimeProvider clock, ILogger<ConvertService> logger)
 {
-    /// <summary>How long an order the exchange has no record of stays pending before it counts as never placed.</summary>
+    /// <summary>
+    /// How long an order the exchange has no record of stays pending before it counts as never placed. Connectors make
+    /// live orders expire well before this (see <see cref="IExchangeConnector.SellAsync"/>).
+    /// </summary>
     public static readonly TimeSpan PendingGrace = TimeSpan.FromMinutes(5);
 
     /// <summary>How many stores convert at the same time, so one slow exchange doesn't hold up the others.</summary>
@@ -177,7 +180,7 @@ public class ConvertService(ISweepSellRepository repository, SecretProtector pro
             }
             catch (Exception e) when (IsRecordedFailure(e, cancellationToken))
             {
-                Record(storeId, state, asset, ActivityOutcome.Failed, $"Could not read the {asset}/{target} market on {exchange.Name}: {e.Message}");
+                Record(storeId, state, asset, ActivityOutcome.Failed, $"Could not read the {asset}/{target} market on {exchange.Name} to sell {Amount(available)} {asset}: {e.Message}");
                 continue;
             }
 
@@ -296,7 +299,7 @@ public class ConvertService(ISweepSellRepository repository, SecretProtector pro
             {
                 // Another account would report no such order, and the order would wrongly count as never placed.
                 Record(storeId, state, pending.Asset, ActivityOutcome.Failed,
-                    $"The earlier {pending.Asset} sell was sent with a different exchange key, so it can't be checked with this one. " +
+                    $"The earlier sell of {Amount(pending.Amount)} {pending.Asset} (client order {pending.ClientOrderId:D}) was sent with a different exchange key, so it can't be checked with this one. " +
                     "Put that key back, or check the order in your exchange yourself and then remove it under Pending orders. Nothing is sold until then.");
                 return false;
             }

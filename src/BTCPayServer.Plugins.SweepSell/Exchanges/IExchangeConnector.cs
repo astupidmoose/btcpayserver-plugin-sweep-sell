@@ -49,6 +49,8 @@ public interface IExchangeConnector
     /// <paramref name="clientOrderId"/> is derived from the business fact (e.g. the invoice) and sent with the order,
     /// so after a lost response <see cref="FindOrderAsync"/> tells whether the order exists. Exchanges may only enforce
     /// a client order ID's uniqueness among open orders, so a caller must look the order up before it ever retries.
+    /// A live order must be unable to execute later than a minute after the call (e.g. with the exchange's order deadline),
+    /// so an order still unlisted after the caller's grace period was never placed.
     /// With <paramref name="validateOnly"/>, the exchange checks the order without placing it (dry run).
     /// A placed order without an exchange order ID is an error, never a success.
     /// </summary>
