@@ -153,17 +153,20 @@ public class PayoutService(IPayoutRepository payouts, ISweepSellRepository repos
         if (trading is not null && !await TradingKeyIsSafeAsync(storeId, state, asset, connector, trading, cancellationToken))
             return;
 
+        // Withdrawals still in progress are remembered for this exchange account (by key) and asset: another one's
+        // never show up as final in this list.
+        var account = new WithdrawalAccount(connector.Id, credentials.Fingerprint(), asset);
         IReadOnlyList<WithdrawalRecord> recent;
         try
         {
-            recent = await connector.GetRecentWithdrawalsAsync(credentials, asset, Since(state), cancellationToken);
+            recent = await connector.GetRecentWithdrawalsAsync(credentials, asset, Since(state, account), cancellationToken);
         }
         catch (Exception e) when (IsRecordedFailure(e, cancellationToken))
         {
             Record(storeId, state, asset, ActivityOutcome.Failed, $"Could not read recent {asset} withdrawals from {connector.Name}: {e.Message}");
             return;
         }
-        var inProgress = Track(state, recent);
+        var inProgress = Track(state, account, recent);
         if (!Reconcile(storeId, state, asset, connector, credentials, recent))
             return;
 
@@ -287,7 +290,7 @@ public class PayoutService(IPayoutRepository payouts, ISweepSellRepository repos
             decimal balanceNow;
             try
             {
-                before = await connector.GetRecentWithdrawalsAsync(credentials, asset, Since(state), cancellationToken);
+                before = await connector.GetRecentWithdrawalsAsync(credentials, asset, Since(state, account), cancellationToken);
                 balanceNow = await connector.GetAvailableBalanceAsync(credentials, asset, cancellationToken);
             }
             catch (Exception e) when (IsRecordedFailure(e, cancellationToken))
@@ -300,7 +303,7 @@ public class PayoutService(IPayoutRepository payouts, ISweepSellRepository repos
             pending.SentAt = clock.GetUtcNow();
             pending.SeenBefore = recent.Concat(before).Where(r => r.RequestedAt >= pending.SentAt - MatchBefore - TimeSpan.FromMinutes(1))
                 .Select(r => r.Reference).Distinct().ToList();
-            var availableNow = balanceNow - payout.KeepBalance - Track(state, before);
+            var availableNow = balanceNow - payout.KeepBalance - Track(state, account, before);
             var leftNow = payout.DailyCap - state.WithdrawnOn(pending.SentAt, asset);
             if (quote.Amount > availableNow || quote.Amount > leftNow)
             {
@@ -558,25 +561,36 @@ public class PayoutService(IPayoutRepository payouts, ISweepSellRepository repos
     /// How far back withdrawals are read: <see cref="History"/>, or further to the oldest one still unsettled, so a
     /// withdrawal on hold for longer stays held back from the balance.
     /// </summary>
-    DateTimeOffset Since(PayoutState state)
+    DateTimeOffset Since(PayoutState state, WithdrawalAccount account)
     {
         var since = clock.GetUtcNow() - History;
-        return state.Unsettled.Count == 0 ? since : new[] { since, state.Unsettled.Min(u => u.RequestedAt) - MatchBefore }.Min();
+        return state.Unsettled.Where(account.Holds).Select(u => u.RequestedAt - MatchBefore).Append(since).Min();
     }
 
     /// <summary>
-    /// Notes which listed withdrawals are still in progress and which have settled, and returns the amount of all unsettled
-    /// ones, fees included. One that isn't listed any more stays unsettled: its amount is never paid out again.
+    /// Notes which of <paramref name="account"/>'s listed withdrawals are still in progress and which have settled, and
+    /// returns the amount of all its unsettled ones, fees included. One that isn't listed any more stays unsettled: its
+    /// amount is never paid out again. Other accounts' and assets' entries are kept for when they are used again.
     /// </summary>
-    static decimal Track(PayoutState state, IReadOnlyList<WithdrawalRecord> listed)
+    static decimal Track(PayoutState state, WithdrawalAccount account, IReadOnlyList<WithdrawalRecord> listed)
     {
         foreach (var record in listed)
         {
-            state.Unsettled.RemoveAll(u => u.Reference == record.Reference);
+            state.Unsettled.RemoveAll(u => account.Holds(u) && u.Reference == record.Reference);
             if (record.Status == WithdrawalStatus.InProgress)
-                state.Unsettled.Add(new UnsettledWithdrawal { Reference = record.Reference, RequestedAt = record.RequestedAt, Amount = record.Amount + record.Fee });
+                state.Unsettled.Add(new UnsettledWithdrawal
+                {
+                    ExchangeId = account.ExchangeId, KeyFingerprint = account.KeyFingerprint, Asset = account.Asset,
+                    Reference = record.Reference, RequestedAt = record.RequestedAt, Amount = record.Amount + record.Fee
+                });
         }
-        return state.Unsettled.Sum(u => u.Amount);
+        return state.Unsettled.Where(account.Holds).Sum(u => u.Amount);
+    }
+
+    /// <summary>The exchange account (known by its payout key) and asset whose withdrawals a run reads.</summary>
+    sealed record WithdrawalAccount(string ExchangeId, string KeyFingerprint, string Asset)
+    {
+        public bool Holds(UnsettledWithdrawal u) => u.ExchangeId == ExchangeId && u.KeyFingerprint == KeyFingerprint && u.Asset == Asset;
     }
 
     /// <summary>Whether the settings saved now still allow the live withdrawal a run planned with <paramref name="planned"/>.</summary>

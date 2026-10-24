@@ -117,6 +117,12 @@ public class PendingWithdrawal
 
 public class UnsettledWithdrawal
 {
+    /// <summary>The exchange, key and asset it was listed for: only those show when it becomes final.</summary>
+    public string? ExchangeId { get; set; }
+
+    public string? KeyFingerprint { get; set; }
+    public string Asset { get; set; } = "";
+
     public string Reference { get; set; } = "";
     public DateTimeOffset RequestedAt { get; set; }
 

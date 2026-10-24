@@ -469,6 +469,26 @@ public class PayoutTests
     }
 
     [Fact]
+    public async Task AnotherAssetsUnsettledWithdrawalIsNotHeldBack()
+    {
+        Configure(minimum: 10m);
+        _exchange.Balance = 500m;
+        await Service().RunAsync(StoreId, Ct);
+        _clock.Advance(TimeSpan.FromMinutes(1));
+        await Service().RunAsync(StoreId, Ct); // listed, still in progress
+        Assert.Equal("USD", Assert.Single(State.Unsettled).Asset);
+
+        // Payout switches to another asset, whose list never shows the USD withdrawal.
+        _payouts.Settings[StoreId].Asset = "EUR";
+        _exchange.Records.Clear();
+        _exchange.Balance = 300m;
+        _clock.Advance(TimeSpan.FromDays(1));
+        await Service().RunAsync(StoreId, Ct);
+        Assert.Equal(("EUR", "test-bank", 300m, 2m), _exchange.Withdrawals[1]);
+        Assert.Contains(State.Unsettled, u => u.Asset == "USD" && u.Reference == "REF-1"); // still held back if payout goes back to USD
+    }
+
+    [Fact]
     public async Task ATradingKeySavedDuringTheRunIsCheckedBeforeWithdrawing()
     {
         Configure();
