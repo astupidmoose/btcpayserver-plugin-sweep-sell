@@ -28,8 +28,9 @@ See [docs/threat-model.md](docs/threat-model.md) for the full model.
 ## Guidance for users
 
 - Create the trading key **without withdrawal permission**. Trading never withdraws.
-- Payout is optional. If you use it, give it a separate key with only Query Funds and Withdraw Funds,
-  and keep only your own accounts saved as withdrawal destinations in your exchange.
+- Payout is optional. If you use it, give it a separate key with only Query Funds and Withdraw Funds
+  (never a withdrawal address permission), and keep only your own accounts saved as withdrawal
+  destinations in your exchange.
 - Use a key only for this plugin, so it can be revoked without affecting anything else.
 - Keep daily caps and dry run on until you've watched the activity log for a while.
 - Back up BTCPay's data-protection keys with the rest of the server: without them, saved exchange keys

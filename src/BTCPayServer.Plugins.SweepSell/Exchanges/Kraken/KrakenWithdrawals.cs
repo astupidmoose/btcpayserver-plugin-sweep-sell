@@ -21,7 +21,7 @@ public class KrakenWithdrawals(KrakenConnector kraken) : IWithdrawalConnector
 
     public string KeyPermissionsHelp =>
         "In Kraken: Settings > API > Create key. Use a separate key from the trading key, and tick only Query Funds and Withdraw Funds. " +
-        "Never tick any order permission. Payouts only go to a withdrawal destination you already saved and verified in Kraken; " +
+        "Never tick any order permission, nor Add or Update Withdrawal Addresses (payout refuses a key that has them). Payouts only go to a withdrawal destination you already saved and verified in Kraken; " +
         "enter its name exactly as Kraken shows it.";
 
     public async Task<decimal> GetAvailableBalanceAsync(ExchangeCredentials credentials, string asset, CancellationToken cancellationToken) =>
@@ -91,14 +91,37 @@ public class KrakenWithdrawals(KrakenConnector kraken) : IWithdrawalConnector
             : throw new ExchangeException($"Kraken accepted the {amount} {asset} withdrawal but returned no reference. Check your Kraken withdrawals before doing anything else.");
     }
 
+    /// <summary>Most pages of withdrawals read (500 each); past that the history is refused rather than read in part.</summary>
+    public const int MaxWithdrawalPages = 20;
+
     public async Task<IReadOnlyList<WithdrawalRecord>> GetRecentWithdrawalsAsync(ExchangeCredentials credentials, string asset, DateTimeOffset since,
         CancellationToken cancellationToken)
     {
-        var result = Expect<JArray>(await kraken.PrivateAsync(credentials, "WithdrawStatus",
-            [new("asset", ToKraken(asset)), new("start", since.ToUnixTimeSeconds().ToString(CultureInfo.InvariantCulture))], cancellationToken),
-            "WithdrawStatus");
+        // Kraken lists withdrawals newest first, a page at a time. Every page is read: an older withdrawal still in progress
+        // that was left out wouldn't be held back from the balance, and could be paid out again.
+        var start = since.ToUnixTimeSeconds().ToString(CultureInfo.InvariantCulture);
+        var entries = new List<JToken>();
+        var cursor = "true";
+        for (var page = 0; ; page++)
+        {
+            if (page == MaxWithdrawalPages)
+                throw new ExchangeException($"Kraken lists more than {MaxWithdrawalPages} pages of {asset} withdrawals, so not all of them can be accounted for. Nothing is withdrawn.");
+            var result = await kraken.PrivateAsync(credentials, "WithdrawStatus",
+                [new("asset", ToKraken(asset)), new("start", start), new("cursor", cursor)], cancellationToken);
+            var (list, next) = result switch
+            {
+                JArray array => (array, null),
+                // The paged shape: the entries' array beside next_cursor, whatever Kraken names it.
+                JObject paged when paged.Properties().Select(p => p.Value).OfType<JArray>().ToList() is [var array] => (array, Text(paged["next_cursor"])),
+                _ => throw new ExchangeException("Kraken sent an unexpected WithdrawStatus response.")
+            };
+            entries.AddRange(list);
+            if (list.Count == 0 || string.IsNullOrEmpty(next) || next == cursor)
+                break;
+            cursor = next;
+        }
         var records = new List<WithdrawalRecord>();
-        foreach (var token in result)
+        foreach (var token in entries)
         {
             if (token is not JObject entry)
                 throw new ExchangeException("Kraken sent an unexpected withdrawal entry.");
@@ -138,7 +161,31 @@ public class KrakenWithdrawals(KrakenConnector kraken) : IWithdrawalConnector
             await LacksPermissionAsync("No Create & Modify Orders", () => kraken.ValidateTestOrderAsync(credentials, cancellationToken),
                 "This key can place orders. Create a payout key with only Query Funds and Withdraw Funds.", cancellationToken)
         };
+        try
+        {
+            var problems = await GetKeyProblemsAsync(credentials, cancellationToken);
+            checks.Add(new PermissionCheck("No Add or Update Withdrawal Addresses", problems.Count == 0, problems.Count == 0 ? null : string.Join(" ", problems)));
+        }
+        catch (ExchangeException e)
+        {
+            checks.Add(new PermissionCheck("No Add or Update Withdrawal Addresses", false, $"Could not read the key's permissions: {e.Message}"));
+        }
         return new CredentialsCheck(checks);
+    }
+
+    static readonly Dictionary<string, string> ForbiddenPermissions = new()
+    {
+        ["add-withdraw-address"] = "This key can add withdrawal addresses, so a stolen copy could send funds anywhere. Create a payout key without it.",
+        ["update-withdraw-address"] = "This key can update withdrawal addresses, so a stolen copy could redirect funds. Create a payout key without it.",
+        ["modify-trades"] = "This key can place orders. Create a payout key with only Query Funds and Withdraw Funds."
+    };
+
+    public async Task<IReadOnlyList<string>> GetKeyProblemsAsync(ExchangeCredentials credentials, CancellationToken cancellationToken)
+    {
+        var info = Expect<JObject>(await kraken.PrivateAsync(credentials, "GetApiKeyInfo", [], cancellationToken), "GetApiKeyInfo");
+        if (info["permissions"] is not JArray permissions || permissions.Any(p => p.Type != JTokenType.String))
+            throw new ExchangeException("Kraken sent no permission list for the key.");
+        return permissions.Select(p => (string)p!).Where(ForbiddenPermissions.ContainsKey).Distinct().Select(p => ForbiddenPermissions[p]).ToList();
     }
 
     async Task<JArray> AddressesAsync(ExchangeCredentials credentials, string asset, string? destination, CancellationToken cancellationToken)

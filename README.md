@@ -51,8 +51,9 @@ orders, and **without withdrawal permission**. The key is stored encrypted on yo
 never shown again after you save it. The settings page has a **Test the key** button, which checks
 each permission without trading, and that the key can't withdraw.
 
-Payout needs a second key with only **query funds** and **withdraw funds**, and no order permissions.
-**Test the payout key** checks that it can withdraw but not trade, and lists the withdrawal
+Payout needs a second key with only **query funds** and **withdraw funds**, and no order or
+withdrawal address permissions. **Test the payout key** checks that it can withdraw but not trade
+or manage withdrawal addresses, and lists the withdrawal
 destinations your exchange shows for the asset.
 
 ## Development

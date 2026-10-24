@@ -52,6 +52,12 @@ public interface IWithdrawalConnector
     /// Checks the key can query funds and withdraw <paramref name="asset"/>, and that it can NOT trade, without moving funds.
     /// </summary>
     Task<CredentialsCheck> TestCredentialsAsync(ExchangeCredentials credentials, string asset, CancellationToken cancellationToken);
+
+    /// <summary>
+    /// Why the key must not be used for payouts, read from the exchange's own record of the key's permissions: it can
+    /// add or change withdrawal destinations (which would let a stolen key send funds anywhere), or trade. Empty when fine.
+    /// </summary>
+    Task<IReadOnlyList<string>> GetKeyProblemsAsync(ExchangeCredentials credentials, CancellationToken cancellationToken);
 }
 
 /// <summary>A withdrawal destination saved in the exchange account, by the name the owner gave it there.</summary>

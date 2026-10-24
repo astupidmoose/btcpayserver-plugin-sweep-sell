@@ -44,25 +44,19 @@ public class UISweepSellPayoutController(IPayoutRepository payouts, ISweepSellRe
         if (!ModelState.IsValid)
             return View(PayoutView, ToViewModel(await payouts.GetAsync(storeId), await payouts.GetStateAsync(storeId), vm));
 
-        // Under the store's settings lock: a run checks the saved settings again under it right before withdrawing, so once
-        // this returns nothing goes out under the old settings, and the pending withdrawals seen here are all there are.
-        var (saved, updated, conflict) = await WithSettingsLockAsync(storeId, async () =>
+        // Under the store's locks: a run checks the saved settings again under them right before withdrawing, so once this
+        // returns nothing goes out under the old settings, and the pending withdrawals seen here are all there are.
+        var (saved, updated, conflict) = await payout.SaveSettingsAsync(storeId, async current =>
         {
-            var current = await payouts.GetAsync(storeId);
             var next = Apply(current, vm, protector);
-            var error = SameKeyConflict(next, await repository.GetAsync(storeId), protector) ??
-                        PendingConflict(current, next, (await payouts.GetStateAsync(storeId)).Pending, protector);
-            if (error is not null)
-                return (current, next, error);
-            await payouts.SaveAsync(storeId, next);
-            return (current, next, (string?)null);
+            return (next, SameKeyConflict(next, await repository.GetAsync(storeId), protector) ??
+                          PendingConflict(current, next, (await payouts.GetStateAsync(storeId)).Pending, protector));
         }, cancellationToken);
         if (conflict is not null)
         {
             ModelState.AddModelError(nameof(vm.ExchangeId), conflict);
             return View(PayoutView, ToViewModel(saved, await payouts.GetStateAsync(storeId), vm));
         }
-        await payout.RecordChangesAsync(storeId, saved, updated, cancellationToken);
 
         // Never log the key; whether one is saved is enough to follow what happened.
         logger.LogInformation("Sweep & Sell payout settings of store {StoreId} saved: {Enabled} ({Mode}), exchange {Exchange}, key {Key}, " +
@@ -157,20 +151,6 @@ public class UISweepSellPayoutController(IPayoutRepository payouts, ISweepSellRe
             Message = removed ? "Pending withdrawal removed. Payout resumes on the next run." : "That withdrawal is no longer pending."
         });
         return RedirectToAction(nameof(Payout), new { storeId });
-    }
-
-    static async Task<T> WithSettingsLockAsync<T>(string storeId, Func<Task<T>> action, CancellationToken cancellationToken)
-    {
-        var gate = SettingsGate.For(storeId);
-        await gate.WaitAsync(cancellationToken);
-        try
-        {
-            return await action();
-        }
-        finally
-        {
-            gate.Release();
-        }
     }
 
     bool IsTradingKey(SweepSellSettings settings, ExchangeCredentials payoutKey) => payout.IsTradingKey(settings, payoutKey);

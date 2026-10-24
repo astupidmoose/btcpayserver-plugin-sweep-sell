@@ -133,6 +133,20 @@ public class PayoutService(IPayoutRepository payouts, ISweepSellRepository repos
             Record(storeId, state, asset, ActivityOutcome.Failed, "Payout needs an asset, a saved destination and a daily cap. Set them above.");
             return;
         }
+        // Checked every run, not only by the key test: permissions can be added to a key after it is saved.
+        try
+        {
+            if (await connector.GetKeyProblemsAsync(credentials, cancellationToken) is { Count: > 0 } problems)
+            {
+                Record(storeId, state, asset, ActivityOutcome.Failed, $"The payout key isn't used: {string.Join(" ", problems)}");
+                return;
+            }
+        }
+        catch (Exception e) when (IsRecordedFailure(e, cancellationToken))
+        {
+            Record(storeId, state, asset, ActivityOutcome.Failed, $"Could not read the payout key's permissions from {connector.Name}: {e.Message}");
+            return;
+        }
 
         IReadOnlyList<WithdrawalRecord> recent;
         try
@@ -375,7 +389,41 @@ public class PayoutService(IPayoutRepository payouts, ISweepSellRepository repos
         }, cancellationToken);
 
     /// <summary>Writes a change of where payouts go (exchange, key, asset or destination) to the payout activity.</summary>
-    public async Task RecordChangesAsync(string storeId, PayoutSettings saved, PayoutSettings updated, CancellationToken cancellationToken)
+    /// <summary>
+    /// Saves payout settings with the record of what changed in one step, under the store's payout lock and then its settings
+    /// lock (the order a run takes them in). <paramref name="decide"/> gets the saved settings and returns the new ones, or
+    /// why they can't be saved. The change is written to the activity before the settings, and neither write can be
+    /// cancelled once started, so a change of where funds go is never in force without its record.
+    /// </summary>
+    public async Task<(PayoutSettings Saved, PayoutSettings Updated, string? Error)> SaveSettingsAsync(string storeId,
+        Func<PayoutSettings, Task<(PayoutSettings Next, string? Error)>> decide, CancellationToken cancellationToken) =>
+        await WithStoreLockAsync(storeId, async () =>
+        {
+            var gate = SettingsGate.For(storeId);
+            await gate.WaitAsync(cancellationToken);
+            try
+            {
+                var current = await payouts.GetAsync(storeId);
+                var (next, error) = await decide(current);
+                if (error is not null)
+                    return (current, next, error);
+                if (Changes(current, next) is { Count: > 0 } changes)
+                {
+                    var state = await payouts.GetStateAsync(storeId);
+                    Record(storeId, state, next.Asset, ActivityOutcome.Changed, "Payout settings changed: " + string.Join("; ", changes) + ".");
+                    await payouts.SaveStateAsync(storeId, state);
+                }
+                await payouts.SaveAsync(storeId, next);
+                return (current, next, (string?)null);
+            }
+            finally
+            {
+                gate.Release();
+            }
+        }, cancellationToken);
+
+    /// <summary>What a save changes about where funds go, for the activity. Never includes the key itself.</summary>
+    static List<string> Changes(PayoutSettings saved, PayoutSettings updated)
     {
         var changes = new List<string>();
         if (saved.ExchangeId != updated.ExchangeId)
@@ -386,15 +434,7 @@ public class PayoutService(IPayoutRepository payouts, ISweepSellRepository repos
             changes.Add($"asset from {Shown(saved.Asset)} to {Shown(updated.Asset)}");
         if (saved.Destination != updated.Destination)
             changes.Add($"destination from \"{saved.Destination}\" to \"{updated.Destination}\"");
-        if (changes.Count == 0)
-            return;
-        await WithStoreLockAsync(storeId, async () =>
-        {
-            var state = await payouts.GetStateAsync(storeId);
-            Record(storeId, state, updated.Asset, ActivityOutcome.Changed, "Payout settings changed: " + string.Join("; ", changes) + ".");
-            await payouts.SaveStateAsync(storeId, state);
-            return true;
-        }, cancellationToken);
+        return changes;
     }
 
     public async Task<T> WithStoreLockAsync<T>(string storeId, Func<Task<T>> action, CancellationToken cancellationToken)

@@ -145,6 +145,40 @@ public class KrakenWithdrawalsTests
         var body = Body(http, "/0/private/WithdrawStatus");
         Assert.Contains("asset=USD", body);
         Assert.Contains("start=1893400000", body);
+        Assert.Contains("cursor=true", body);
+    }
+
+    /// <summary>Kraken's paged WithdrawStatus: each page names the next, and an endless one never stops naming one.</summary>
+    sealed class PagedWithdrawals(bool endless) : FakeHttp
+    {
+        protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
+        {
+            if (request.RequestUri!.AbsolutePath == "/0/private/WithdrawStatus")
+            {
+                var body = await request.Content!.ReadAsStringAsync(cancellationToken);
+                var page = body.Contains("cursor=true") ? 1 : int.Parse(body.Split("cursor=page")[1].Split('&')[0]);
+                var next = endless || page < 3 ? $"page{page + 1}" : "";
+                Responses["/0/private/WithdrawStatus"] = $$$"""
+                    {"error":[],"result":{"withdrawals":[{"asset":"ZUSD","refid":"R{{{page}}}","amount":"50","fee":"1","time":{{{1893456000 + page}}},"status":"Pending"}],"next_cursor":"{{{next}}}"}}
+                    """;
+            }
+            return await base.SendAsync(request, cancellationToken);
+        }
+    }
+
+    [Fact]
+    public async Task RecentWithdrawalsFollowEveryPage()
+    {
+        var http = new PagedWithdrawals(endless: false);
+        var kraken = new KrakenWithdrawals(new KrakenConnector(http.Client()));
+        var records = await kraken.GetRecentWithdrawalsAsync(Credentials, "USD", DateTimeOffset.UnixEpoch, Ct);
+        Assert.Equal(["R1", "R2", "R3"], records.Select(r => r.Reference)); // an older withdrawal in progress is never missed
+
+        var endless = new PagedWithdrawals(endless: true);
+        var e = await Assert.ThrowsAsync<ExchangeException>(() =>
+            new KrakenWithdrawals(new KrakenConnector(endless.Client())).GetRecentWithdrawalsAsync(Credentials, "USD", DateTimeOffset.UnixEpoch, Ct));
+        Assert.Contains("can be accounted for", e.Message);
+        Assert.Equal(KrakenWithdrawals.MaxWithdrawalPages, endless.Sent.Count(s => s.Request.RequestUri!.AbsolutePath == "/0/private/WithdrawStatus"));
     }
 
     [Theory]
@@ -186,11 +220,37 @@ public class KrakenWithdrawalsTests
         http.Responses["/0/public/AssetPairs"] = """{"error":[],"result":{"XXBTZUSD":{"ordermin":"0.00005","costmin":"0.5","lot_decimals":8,"pair_decimals":1}}}""";
         http.Responses["/0/public/Ticker"] = """{"error":[],"result":{"XXBTZUSD":{"c":["100000.0","0.01"],"b":["99990.0","1","1.000"],"p":["100100.0","100050.0"]}}}""";
         http.Responses["/0/private/AddOrder"] = addOrder;
+        http.Responses["/0/private/GetApiKeyInfo"] = """{"error":[],"result":{"api_key_name":"test","permissions":["query-funds","withdraw-funds"]}}""";
         var check = await kraken.TestCredentialsAsync(Credentials, "USD", Ct);
-        Assert.Equal(["Query Funds", "Withdraw Funds", "No Create & Modify Orders"], check.Checks.Select(c => c.Permission));
+        Assert.Equal(["Query Funds", "Withdraw Funds", "No Create & Modify Orders", "No Add or Update Withdrawal Addresses"], check.Checks.Select(c => c.Permission));
         Assert.Equal(ok, check.AllOk);
         Assert.Contains("validate=true", Body(http, "/0/private/AddOrder"));
         Assert.Contains("asset=USD", Body(http, "/0/private/WithdrawMethods"));
+    }
+
+    [Theory]
+    [InlineData("""["query-funds","withdraw-funds"]""", 0)]
+    [InlineData("""["query-funds","withdraw-funds","add-withdraw-address"]""", 1)]
+    [InlineData("""["withdraw-funds","update-withdraw-address","add-withdraw-address","modify-trades"]""", 3)]
+    public async Task KeysThatCanManageDestinationsOrTradeAreRefused(string permissions, int problems)
+    {
+        var (http, kraken) = Setup();
+        http.Responses["/0/private/GetApiKeyInfo"] = $$$"""{"error":[],"result":{"api_key_name":"test","permissions":{{{permissions}}}}}""";
+        var found = await kraken.GetKeyProblemsAsync(Credentials, Ct);
+        Assert.Equal(problems, found.Count);
+        if (permissions.Contains("add-withdraw-address"))
+            Assert.Contains(found, p => p.Contains("add withdrawal addresses"));
+    }
+
+    [Theory]
+    [InlineData("""{"error":[],"result":{"api_key_name":"test"}}""")]
+    [InlineData("""{"error":[],"result":{"permissions":[1]}}""")]
+    [InlineData("""{"error":["EGeneral:Unknown method"]}""")]
+    public async Task UnreadableKeyPermissionsFail(string response)
+    {
+        var (http, kraken) = Setup();
+        http.Responses["/0/private/GetApiKeyInfo"] = response;
+        await Assert.ThrowsAsync<ExchangeException>(() => kraken.GetKeyProblemsAsync(Credentials, Ct));
     }
 
     [Fact]
@@ -199,7 +259,7 @@ public class KrakenWithdrawalsTests
         // Payout only names destinations saved in the exchange account, and trading never withdraws at all.
         var withdrawalCalls = typeof(IWithdrawalConnector).GetMethods().Select(m => m.Name).Where(n => !n.StartsWith("get_")).Order();
         Assert.Equal(
-            ["GetAvailableBalanceAsync", "GetDestinationsAsync", "GetRecentWithdrawalsAsync", "QuoteAsync", "TestCredentialsAsync", "WithdrawAsync"],
+            ["GetAvailableBalanceAsync", "GetDestinationsAsync", "GetKeyProblemsAsync", "GetRecentWithdrawalsAsync", "QuoteAsync", "TestCredentialsAsync", "WithdrawAsync"],
             withdrawalCalls);
         Assert.DoesNotContain(typeof(IWithdrawalConnector).GetMethods().SelectMany(m => m.GetParameters()), p => p.Name!.Contains("address", StringComparison.OrdinalIgnoreCase));
         Assert.DoesNotContain(typeof(IExchangeConnector).GetMethods(), m => m.Name.Contains("Withdraw", StringComparison.OrdinalIgnoreCase));

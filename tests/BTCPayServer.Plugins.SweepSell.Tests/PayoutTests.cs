@@ -106,6 +106,20 @@ public class PayoutTests
         Assert.Contains("trading key", State.Activity[0].Message);
     }
 
+    [Fact]
+    public async Task RefusesAKeyThatCanManageDestinations()
+    {
+        // Checked every run: a permission can be added to the key after it was tested.
+        Configure();
+        _exchange.Balance = 500m;
+        _exchange.KeyProblems.Add("This key can add withdrawal addresses.");
+        await Service().RunAsync(StoreId, Ct);
+        Assert.Empty(_exchange.Withdrawals);
+        Assert.DoesNotContain("balance", _exchange.Calls);
+        Assert.Equal(ActivityOutcome.Failed, State.Activity[0].Outcome);
+        Assert.Contains("can add withdrawal addresses", State.Activity[0].Message);
+    }
+
     [Theory]
     [InlineData(40, 50, "Waiting until at least 50 USD")] // below the owner's minimum
     [InlineData(100, 0.01, "below Fake Exchange's minimum withdrawal of 10")] // 9 would arrive after the fee
@@ -335,7 +349,9 @@ public class PayoutTests
             ExchangeId = saved.ExchangeId, ProtectedApiKey = Protector.Protect("test-other-key"), ProtectedApiSecret = saved.ProtectedApiSecret,
             Asset = "EUR", Destination = "test-other"
         };
-        await Service().RecordChangesAsync(StoreId, saved, updated, Ct);
+        var (_, _, error) = await Service().SaveSettingsAsync(StoreId, _ => Task.FromResult((updated, (string?)null)), Ct);
+        Assert.Null(error);
+        Assert.Same(updated, _payouts.Settings[StoreId]);
         var entry = Assert.Single(State.Activity);
         Assert.Equal(ActivityOutcome.Changed, entry.Outcome);
         Assert.Contains("a new payout key was saved", entry.Message);
@@ -459,5 +475,10 @@ public class PayoutTests
 
         public Task<CredentialsCheck> TestCredentialsAsync(ExchangeCredentials credentials, string asset, CancellationToken cancellationToken) =>
             throw new NotSupportedException();
+
+        public List<string> KeyProblems { get; } = [];
+
+        public Task<IReadOnlyList<string>> GetKeyProblemsAsync(ExchangeCredentials credentials, CancellationToken cancellationToken) =>
+            Task.FromResult<IReadOnlyList<string>>(KeyProblems.ToList());
     }
 }
