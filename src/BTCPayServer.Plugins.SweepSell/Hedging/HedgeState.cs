@@ -21,8 +21,9 @@ public class HedgeState
     public DateTimeOffset? LastScan { get; set; }
 
     /// <summary>
-    /// Every invoice taken for hedging, by invoice ID, with what is still to sell. An invoice is added once and never
-    /// again, so a repeated event, a restart or a rescan can't hedge it twice.
+    /// Every invoice taken for hedging, by invoice ID, with what is still to sell. An invoice is added once, so a repeated
+    /// event, a restart or a rescan can't hedge it twice. The one exception: an invoice taken while Processing, with nothing
+    /// sold, is dropped when the trigger becomes Settled, to be taken again once it settles.
     /// </summary>
     public Dictionary<string, HedgedInvoice> Invoices { get; set; } = new();
 
@@ -86,6 +87,9 @@ public class HedgedInvoice
 
     /// <summary>Taken while hedging was in dry run: only ever checked with the exchange, never sold.</summary>
     public bool DryRun { get; set; }
+
+    /// <summary>Taken while the invoice was Processing (not yet Settled), under the Processing trigger.</summary>
+    public bool TakenProcessing { get; set; }
 
     /// <summary>When hedging was turned on when the invoice was taken; one left from an earlier period isn't sold.</summary>
     public DateTimeOffset? EnabledSince { get; set; }

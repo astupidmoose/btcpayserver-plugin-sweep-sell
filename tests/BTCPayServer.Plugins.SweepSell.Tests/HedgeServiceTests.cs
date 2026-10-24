@@ -433,6 +433,72 @@ public class HedgeServiceTests
     }
 
     [Fact]
+    public async Task ADryRunThatCrossesMidnightGetsTheNewDaysCap()
+    {
+        Configure(dryRun: true, hedge: h =>
+        {
+            h.DailyCap = 0.1m;
+            h.Markets["USD"] = "USD";
+        });
+        Invoice("cad", 0.1m);
+        Invoice("usd", 0.1m, currency: "USD");
+        _clock.Advance(TimeSpan.FromHours(11) + TimeSpan.FromMinutes(59)); // 23:59 UTC
+        var prices = 0;
+        _exchange.OnPrice = () =>
+        {
+            if (++prices == 2)
+                _clock.Advance(TimeSpan.FromMinutes(2)); // the second market is checked after midnight
+        };
+        await Service().RunAsync(_storeId, Ct);
+        Assert.Equal([("CAD", 0.1m), ("USD", 0.1m)], _exchange.Orders.Select(o => (o.Quote, o.Amount)));
+        Assert.All(_exchange.Orders, o => Assert.True(o.ValidateOnly));
+    }
+
+    [Fact]
+    public async Task LiveInvoicesWaitingWhenDryRunIsTurnedOnAreNotSoldLater()
+    {
+        Configure();
+        _exchange.Balances["BTC"] = 0m;
+        Invoice("inv-1", 0.1m);
+        var service = Service();
+        await service.OnInvoiceAsync("inv-1", Ct); // waits for BTC on the exchange
+        Assert.Equal(0.1m, State.Invoices["inv-1"].Remaining);
+
+        Configure(dryRun: true);
+        await service.RunAsync(_storeId, Ct);
+        Assert.Empty(_exchange.Orders);
+        Assert.Equal(0m, State.Invoices["inv-1"].Remaining);
+        Assert.Contains("isn't sold now that hedging is in dry run", State.Activity[0].Message);
+
+        Configure();
+        await service.RunAsync(_storeId, Ct);
+        Assert.Empty(_exchange.Orders);
+    }
+
+    [Fact]
+    public async Task AProcessingInvoiceWaitsToSettleOnceTheTriggerIsSettled()
+    {
+        var hedge = Configure(hedge: h => h.Trigger = HedgeTrigger.Processing);
+        _exchange.Balances["BTC"] = 0m;
+        Invoice("inv-1", 0.1m, status: HedgeInvoiceStatus.Processing);
+        var service = Service();
+        await service.OnInvoiceAsync("inv-1", Ct);
+        Assert.Equal(0.1m, State.Invoices["inv-1"].Remaining);
+
+        hedge.Trigger = HedgeTrigger.Settled;
+        _exchange.Balances["BTC"] = 1m;
+        await service.RunAsync(_storeId, Ct);
+        Assert.Empty(_exchange.Orders);
+        Assert.False(State.Invoices.ContainsKey("inv-1"));
+        Assert.Contains("isn't sold until it settles", State.Activity[0].Message);
+
+        Invoice("inv-1", 0.1m, status: HedgeInvoiceStatus.Settled);
+        await service.OnInvoiceAsync("inv-1", Ct);
+        Assert.Equal(0.1m, Assert.Single(_exchange.Orders).Amount);
+        Assert.Equal(0m, State.Invoices["inv-1"].Remaining);
+    }
+
+    [Fact]
     public async Task ARunThatCrossesMidnightKeepsToTheNewDaysCap()
     {
         Configure(hedge: h =>

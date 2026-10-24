@@ -9,6 +9,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using BTCPayServer.Plugins.SweepSell.Exchanges;
 using BTCPayServer.Plugins.SweepSell.Settings;
+using BTCPayServer.Plugins.SweepSell.Sweeping;
 using Microsoft.Extensions.Logging;
 
 namespace BTCPayServer.Plugins.SweepSell.Conversion;
@@ -130,7 +131,8 @@ public class ConvertService(ISweepSellRepository repository, SecretProtector pro
 
         var target = convert.TargetAsset;
         // What this run's dry-run checks would have sold, so the cap applies across assets as in a live run.
-        var simulated = 0m;
+        // By UTC day, like the live totals: a dry run that crosses midnight gets the new day's cap.
+        var simulated = new DailyTotals();
         var slippage = Math.Clamp(convert.MaxSlippagePercent, ConvertSettings.MinSlippageLimit, ConvertSettings.MaxSlippageLimit) / 100m;
         foreach (var asset in convert.Assets.Where(a => !string.Equals(a, target, StringComparison.OrdinalIgnoreCase)))
         {
@@ -157,7 +159,7 @@ public class ConvertService(ISweepSellRepository repository, SecretProtector pro
                 var wanted = available;
                 if (convert.DailyCap > 0)
                 {
-                    var left = convert.DailyCap - state.SoldOn(clock.GetUtcNow(), target) - simulated;
+                    var left = convert.DailyCap - state.SoldOn(clock.GetUtcNow(), target) - simulated.On(clock.GetUtcNow(), target);
                     if (left <= 0)
                     {
                         Record(storeId, state, asset, ActivityOutcome.Waiting,
@@ -187,7 +189,7 @@ public class ConvertService(ISweepSellRepository repository, SecretProtector pro
                 try
                 {
                     var check = await exchange.SellAsync(credentials, asset, target, amount, limitPrice, Guid.NewGuid(), validateOnly: true, cancellationToken);
-                    simulated += amount * reference;
+                    simulated.Add(clock.GetUtcNow(), target, amount * reference);
                     Record(storeId, state, asset, ActivityOutcome.DryRun,
                         $"Dry run: would sell up to {Amount(amount)} {asset} for {target} at {Amount(limitPrice)} or better ({check.Description}). {exchange.Name} accepted the order check; nothing was sold.");
                 }

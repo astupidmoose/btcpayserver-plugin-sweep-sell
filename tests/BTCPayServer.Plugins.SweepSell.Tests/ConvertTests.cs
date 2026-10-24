@@ -126,6 +126,24 @@ public class ConvertTests
     }
 
     [Fact]
+    public async Task ADryRunThatCrossesMidnightGetsTheNewDaysCap()
+    {
+        Configure(dryRun: true);
+        _repository.Settings[StoreId].Convert.DailyCap = 0.1m;
+        _exchange.Balances["DOGE"] = 100m;
+        _exchange.Balances["LTC"] = 100m;
+        _clock.Advance(TimeSpan.FromHours(23) + TimeSpan.FromMinutes(59)); // 23:59 UTC
+        var prices = 0;
+        _exchange.OnPrice = () =>
+        {
+            if (++prices == 2)
+                _clock.Advance(TimeSpan.FromMinutes(2)); // the second asset is checked after midnight
+        };
+        await Service().RunAsync(StoreId, Ct);
+        Assert.Equal([("DOGE", 100m), ("LTC", 100m)], _exchange.Orders.Select(o => (o.Base, o.Amount)));
+    }
+
+    [Fact]
     public async Task ImpossibleFillsAreNeverCounted()
     {
         Configure();

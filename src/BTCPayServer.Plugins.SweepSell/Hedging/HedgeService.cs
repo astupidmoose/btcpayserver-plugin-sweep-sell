@@ -10,6 +10,7 @@ using System.Threading.Tasks;
 using BTCPayServer.Plugins.SweepSell.Conversion;
 using BTCPayServer.Plugins.SweepSell.Exchanges;
 using BTCPayServer.Plugins.SweepSell.Settings;
+using BTCPayServer.Plugins.SweepSell.Sweeping;
 using Microsoft.Extensions.Logging;
 
 namespace BTCPayServer.Plugins.SweepSell.Hedging;
@@ -181,6 +182,28 @@ public class HedgeService(ISweepSellRepository repository, SecretProtector prote
                 invoice.Remaining = 0;
                 Record(storeId, state, Asset, ActivityOutcome.Waiting, $"Invoice {id} was taken while hedging was in dry run, so it isn't sold now that it is live.");
             }
+            // Taken live: a dry run would neither check nor sell it, and turning dry run off again must not sell it untested.
+            else if (!invoice.DryRun && hedge.DryRun)
+            {
+                invoice.Remaining = 0;
+                Record(storeId, state, Asset, ActivityOutcome.Waiting,
+                    $"What was left of invoice {id} ({Amount(invoice.Amount)} BTC taken while hedging was live) isn't sold now that hedging is in dry run.");
+            }
+            // Taken while Processing, but the trigger is now Settled: it waits to settle like any other invoice.
+            else if (invoice.TakenProcessing && hedge.Trigger == HedgeTrigger.Settled)
+            {
+                if (invoice.Remaining == invoice.Amount)
+                {
+                    state.Invoices.Remove(id); // taken again once it settles
+                    Record(storeId, state, Asset, ActivityOutcome.Waiting, $"Invoice {id} isn't sold until it settles, as hedging now waits for Settled invoices.");
+                }
+                else
+                {
+                    invoice.Remaining = 0;
+                    Record(storeId, state, Asset, ActivityOutcome.Waiting,
+                        $"Part of invoice {id} was sold while it was Processing; the rest isn't sold, as hedging now waits for Settled invoices.");
+                }
+            }
             // The market for its currency changed since it was taken: what is left sells where the settings now say.
             else if (invoice.Currency is { } currency && hedge.MarketFor(currency).ToUpperInvariant() is var market && market != invoice.Market)
             {
@@ -216,7 +239,8 @@ public class HedgeService(ISweepSellRepository repository, SecretProtector prote
 
         var slippage = Math.Clamp(hedge.MaxSlippagePercent, ConvertSettings.MinSlippageLimit, ConvertSettings.MaxSlippageLimit) / 100m;
         // What this run's dry-run checks would have sold, so the cap applies across markets as in a live run.
-        var simulated = 0m;
+        // By UTC day, like the live totals: a dry run that crosses midnight gets the new day's cap.
+        var simulated = new DailyTotals();
         foreach (var market in markets)
         {
             var queued = state.Queued(market, hedge.DryRun, hedge.EnabledSince).Sum(i => i.Value.Remaining);
@@ -241,7 +265,7 @@ public class HedgeService(ISweepSellRepository repository, SecretProtector prote
                 if (hedge.DailyCap > 0)
                 {
                     // The clock is read again: a run that crosses midnight counts against the day its orders are recorded on.
-                    var left = hedge.DailyCap - state.Sold.On(clock.GetUtcNow(), Asset) - simulated;
+                    var left = hedge.DailyCap - state.Sold.On(clock.GetUtcNow(), Asset) - simulated.On(clock.GetUtcNow(), Asset);
                     if (left < wanted)
                     {
                         wanted = Math.Max(left, 0);
@@ -272,7 +296,7 @@ public class HedgeService(ISweepSellRepository repository, SecretProtector prote
                     var check = await exchange.SellAsync(credentials, Asset, market, amount, limitPrice, Guid.NewGuid(), validateOnly: true, cancellationToken);
                     state.Allocate(market, amount, hedge.EnabledSince, dryRun: true);
                     available -= amount;
-                    simulated += amount;
+                    simulated.Add(clock.GetUtcNow(), Asset, amount);
                     Record(storeId, state, Asset, ActivityOutcome.DryRun,
                         $"Dry run: would sell up to {Amount(amount)} BTC for {market} at {Amount(limitPrice)} or better ({check.Description}). {exchange.Name} accepted the order check; nothing was sold.");
                 }
@@ -389,6 +413,7 @@ public class HedgeService(ISweepSellRepository repository, SecretProtector prote
             Currency = invoice.Currency.ToUpperInvariant(),
             DryRun = hedge.DryRun,
             EnabledSince = hedge.EnabledSince,
+            TakenProcessing = invoice.Status == HedgeInvoiceStatus.Processing,
             CreatedAt = invoice.CreatedAt,
             AddedAt = now
         };
