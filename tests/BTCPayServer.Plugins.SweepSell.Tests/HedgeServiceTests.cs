@@ -433,6 +433,30 @@ public class HedgeServiceTests
     }
 
     [Fact]
+    public async Task ARunThatCrossesMidnightKeepsToTheNewDaysCap()
+    {
+        Configure(hedge: h =>
+        {
+            h.DailyCap = 0.1m;
+            h.Markets["GBP"] = "EUR";
+        });
+        Invoice("cad", 0.1m);
+        Invoice("gbp", 0.1m, currency: "GBP");
+        _clock.Advance(TimeSpan.FromHours(11) + TimeSpan.FromMinutes(59)); // 23:59 UTC
+        var crossed = false;
+        _exchange.OnPrice = () =>
+        {
+            if (!crossed)
+                _clock.Advance(TimeSpan.FromMinutes(2)); // the first market's order goes out after midnight
+            crossed = true;
+        };
+        await Service().RunAsync(_storeId, Ct);
+        Assert.Equal("CAD", Assert.Single(_exchange.Orders).Quote);
+        Assert.Equal(0.1m, State.Sold.On(_clock.GetUtcNow(), "BTC"));
+        Assert.Equal(0.1m, State.Invoices["gbp"].Remaining);
+    }
+
+    [Fact]
     public async Task DailyCapHoldsTheRestForTomorrow()
     {
         Configure(hedge: h => h.DailyCap = 0.1m);

@@ -240,7 +240,8 @@ public class HedgeService(ISweepSellRepository repository, SecretProtector prote
                 var capped = false;
                 if (hedge.DailyCap > 0)
                 {
-                    var left = hedge.DailyCap - state.Sold.On(now, Asset) - simulated;
+                    // The clock is read again: a run that crosses midnight counts against the day its orders are recorded on.
+                    var left = hedge.DailyCap - state.Sold.On(clock.GetUtcNow(), Asset) - simulated;
                     if (left < wanted)
                     {
                         wanted = Math.Max(left, 0);
