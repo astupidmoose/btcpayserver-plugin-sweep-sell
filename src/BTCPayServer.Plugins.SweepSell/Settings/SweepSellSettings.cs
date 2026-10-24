@@ -18,5 +18,7 @@ public class SweepSellSettings
 
     public ConvertSettings Convert { get; set; } = new();
 
+    public SweepSettings Sweep { get; set; } = new();
+
     public bool HasCredentials => !string.IsNullOrEmpty(ProtectedApiKey) && !string.IsNullOrEmpty(ProtectedApiSecret);
 }

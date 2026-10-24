@@ -125,6 +125,27 @@ public class KrakenConnector(HttpClient http, TimeProvider? clock = null) : IExc
         return new DepositDestination(Text(entry["address"])!, tag);
     }
 
+    public async Task<DepositStatus?> FindDepositAsync(ExchangeCredentials credentials, string asset, string txid, CancellationToken cancellationToken)
+    {
+        if (string.IsNullOrWhiteSpace(txid))
+            throw new ArgumentException("A transaction ID is needed.", nameof(txid));
+        var method = await DepositMethodAsync(credentials, asset, cancellationToken);
+        var result = Expect<JArray>(await PrivateAsync(credentials, "DepositStatus",
+            [new("asset", ToKraken(asset)), new("method", Text(method["method"])!)], cancellationToken), "DepositStatus");
+        var entry = result.OfType<JObject>().FirstOrDefault(d => string.Equals(Text(d["txid"]), txid, StringComparison.OrdinalIgnoreCase));
+        if (entry is null)
+            return null;
+        var amount = RequiredDecimal(entry["amount"], $"{asset} deposit amount");
+        // "Success" is credited, unless Kraken holds it (status-prop "onhold"); "Failure" won't be credited.
+        var state = Text(entry["status"]) switch
+        {
+            "Success" when !string.Equals(Text(entry["status-prop"]), "onhold", StringComparison.OrdinalIgnoreCase) => DepositState.Credited,
+            "Failure" => DepositState.Failed,
+            _ => DepositState.Pending
+        };
+        return new DepositStatus(state, amount);
+    }
+
     public async Task<decimal> GetMinimumDepositAsync(ExchangeCredentials credentials, string asset, CancellationToken cancellationToken)
     {
         var method = await DepositMethodAsync(credentials, asset, cancellationToken);

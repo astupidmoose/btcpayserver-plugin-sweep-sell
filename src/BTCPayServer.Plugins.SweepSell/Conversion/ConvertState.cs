@@ -52,14 +52,23 @@ public class ConvertState
     /// Adds an entry. A repeat of the latest entry of the same asset (same outcome and message) replaces it instead, so
     /// several coins waiting run after run don't push sales and failures out of the list.
     /// </summary>
-    public void Add(ActivityEntry entry)
+    public void Add(ActivityEntry entry) => ActivityLog.Add(Activity, entry, MaxActivity);
+}
+
+public static class ActivityLog
+{
+    /// <summary>
+    /// Adds <paramref name="entry"/> at the top of <paramref name="activity"/> (newest first), keeping at most
+    /// <paramref name="max"/>. A repeat of the latest entry of the same asset (same outcome and message) replaces it.
+    /// </summary>
+    public static void Add(List<ActivityEntry> activity, ActivityEntry entry, int max)
     {
-        var latest = Activity.FirstOrDefault(a => a.Asset == entry.Asset);
+        var latest = activity.FirstOrDefault(a => a.Asset == entry.Asset);
         if (latest is not null && latest.Outcome == entry.Outcome && latest.Message == entry.Message)
-            Activity.Remove(latest);
-        Activity.Insert(0, entry);
-        if (Activity.Count > MaxActivity)
-            Activity.RemoveRange(MaxActivity, Activity.Count - MaxActivity);
+            activity.Remove(latest);
+        activity.Insert(0, entry);
+        if (activity.Count > max)
+            activity.RemoveRange(max, activity.Count - max);
     }
 }
 
@@ -90,7 +99,11 @@ public enum ActivityOutcome
     Sold,
     DryRun,
     Waiting,
-    Failed
+    Failed,
+    /// <summary>A sweep was broadcast, or its deposit was credited on the exchange.</summary>
+    Sent,
+    /// <summary>A setting that decides where funds go was changed.</summary>
+    Changed
 }
 
 public class ActivityEntry

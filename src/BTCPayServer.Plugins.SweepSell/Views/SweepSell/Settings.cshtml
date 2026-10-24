@@ -1,6 +1,7 @@
 @using BTCPayServer.Abstractions.Models
 @using BTCPayServer.Plugins.SweepSell.Controllers
 @using BTCPayServer.Plugins.SweepSell.Conversion
+@using BTCPayServer.Plugins.SweepSell.Settings
 @model SweepSellSettingsViewModel
 @{
     ViewData.SetLayoutModel(new LayoutModel("SWEEP-SELL", "Sweep & Sell"));
@@ -74,6 +75,92 @@
                     <label asp-for="ClearCredentials" class="form-check-label"></label>
                 </div>
             }
+            <h4 class="mt-5 mb-2">Sweep to the exchange</h4>
+            <p class="text-secondary">
+                Sends a hot wallet's balance to your exchange as soon as it reaches the minimum you set, optionally with a share to
+                your cold wallet. The exchange's deposit address is read with the saved key, and the deposit is converted as soon as
+                the exchange credits it. Only hot wallets (whose private key is on this server) can be swept.
+            </p>
+            <div class="d-flex align-items-center mb-3">
+                <input asp-for="SweepEnabled" type="checkbox" class="btcpay-toggle me-3" />
+                <label asp-for="SweepEnabled" class="form-check-label"></label>
+            </div>
+            <span asp-validation-for="SweepEnabled" class="text-danger"></span>
+            <div class="d-flex align-items-center mb-3">
+                <input asp-for="SweepDryRun" type="checkbox" class="btcpay-toggle me-3" />
+                <div>
+                    <label asp-for="SweepDryRun" class="form-check-label"></label>
+                    <div class="form-text mt-0">Each sweep is built and signed but not broadcast. Turn this off only when the dry runs look right.</div>
+                </div>
+            </div>
+            <div class="form-group">
+                <label asp-for="SweepIntervalMinutes" class="form-label"></label>
+                <input asp-for="SweepIntervalMinutes" type="number" min="@SweepSettings.MinIntervalMinutes" max="@SweepSettings.MaxIntervalMinutes" class="form-control" />
+                <div class="form-text">Wallets are checked as soon as a transaction or block arrives; this regular check catches anything missed.</div>
+                <span asp-validation-for="SweepIntervalMinutes" class="text-danger"></span>
+            </div>
+            <div class="form-group">
+                <label asp-for="SweepFeeTargetBlocks" class="form-label"></label>
+                <input asp-for="SweepFeeTargetBlocks" type="number" min="@SweepSettings.MinFeeTargetBlocks" max="@SweepSettings.MaxFeeTargetBlocks" class="form-control" />
+                <span asp-validation-for="SweepFeeTargetBlocks" class="text-danger"></span>
+            </div>
+            @if (Model.SweepRules.Count == 0)
+            {
+                <p class="text-secondary">This store has no on-chain wallet. Set one up under Wallets first.</p>
+            }
+            @for (var i = 0; i < Model.SweepRules.Count; i++)
+            {
+                var rule = Model.SweepRules[i];
+                <div class="border rounded p-3 mb-3">
+                    <input type="hidden" asp-for="SweepRules[i].CryptoCode" />
+                    <div class="d-flex align-items-center mb-3">
+                        <input asp-for="SweepRules[i].Enabled" type="checkbox" class="btcpay-toggle me-3" />
+                        <div>
+                            <label asp-for="SweepRules[i].Enabled" class="form-check-label">Sweep @rule.CryptoCode</label>
+                            <div class="form-text mt-0">@rule.WalletStatus</div>
+                        </div>
+                    </div>
+                    <span asp-validation-for="SweepRules[i].CryptoCode" class="text-danger"></span>
+                    <div class="form-group">
+                        <label asp-for="SweepRules[i].MinimumBalance" class="form-label">Sweep once the wallet holds (@rule.CryptoCode)</label>
+                        <input asp-for="SweepRules[i].MinimumBalance" type="number" step="any" min="0" class="form-control" />
+                        <div class="form-text">The exchange's minimum deposit applies too: a smaller sweep waits for more.</div>
+                        <span asp-validation-for="SweepRules[i].MinimumBalance" class="text-danger"></span>
+                    </div>
+                    <div class="form-group">
+                        <label asp-for="SweepRules[i].ColdPercent" class="form-label">Share to the cold wallet (%)</label>
+                        <input asp-for="SweepRules[i].ColdPercent" type="number" step="any" min="0" max="99.99" class="form-control" />
+                        <span asp-validation-for="SweepRules[i].ColdPercent" class="text-danger"></span>
+                    </div>
+                    <div class="form-group">
+                        <label asp-for="SweepRules[i].ColdDestination" class="form-label">Cold wallet</label>
+                        <input asp-for="SweepRules[i].ColdDestination" class="form-control" spellcheck="false" autocomplete="off" />
+                        <div class="form-text">
+                            An address, or an extended public key (xpub, ypub, zpub or a BTCPay derivation scheme) to send each sweep to a new address.
+                            Check the first address against your cold wallet before turning dry run off.
+                        </div>
+                        <span asp-validation-for="SweepRules[i].ColdDestination" class="text-danger"></span>
+                    </div>
+                    <div class="form-group">
+                        <label asp-for="SweepRules[i].ColdStartIndex" class="form-label">First address index (extended public key only)</label>
+                        <input asp-for="SweepRules[i].ColdStartIndex" type="number" min="0" class="form-control" />
+                        <div class="form-text">Skips addresses your cold wallet already used. Each sweep moves to the next one.</div>
+                        <span asp-validation-for="SweepRules[i].ColdStartIndex" class="text-danger"></span>
+                    </div>
+                    <div class="form-group">
+                        <label asp-for="SweepRules[i].DailyCap" class="form-label">Daily cap (@rule.CryptoCode)</label>
+                        <input asp-for="SweepRules[i].DailyCap" type="number" step="any" min="0" class="form-control" />
+                        <div class="form-text">The most to sweep per day (UTC), fee included. A larger balance is swept in parts. 0 for no cap.</div>
+                        <span asp-validation-for="SweepRules[i].DailyCap" class="text-danger"></span>
+                    </div>
+                    <div class="form-check">
+                        <input asp-for="SweepRules[i].IncludeUnconfirmed" type="checkbox" class="form-check-input" />
+                        <label asp-for="SweepRules[i].IncludeUnconfirmed" class="form-check-label">Also sweep unconfirmed coins</label>
+                        <div class="form-text">Off: only confirmed coins are swept.</div>
+                    </div>
+                </div>
+            }
+
             <h4 class="mt-5 mb-2">Convert at the exchange</h4>
             <p class="text-secondary">
                 Sells everything available of the coins you list for the coin you convert to, as soon as it clears the
@@ -135,6 +222,13 @@
                 <div class="form-text">Checks each permission Sweep &amp; Sell uses. Nothing is traded: the order check is validate-only.</div>
             </form>
         }
+        @if (Model.SweepEnabled)
+        {
+            <form method="post" asp-action="RunSweep" asp-route-storeId="@storeId" class="mt-3">
+                <button type="submit" class="btn btn-secondary" id="RunSweep">Sweep now</button>
+                <div class="form-text">Runs the sweep once with the saved settings@(Model.SweepDryRun ? " (dry run: nothing is broadcast)" : "").</div>
+            </form>
+        }
         @if (Model.ConvertEnabled)
         {
             <form method="post" asp-action="RunConvert" asp-route-storeId="@storeId" class="mt-3">
@@ -143,7 +237,90 @@
             </form>
         }
 
-        <h4 class="mt-5 mb-2">Recent activity</h4>
+        <h4 class="mt-5 mb-2">Sweep activity</h4>
+        <p class="text-secondary">
+            Last scheduled sweep run: @(Model.SweepLastRun?.ToString("u") ?? "never").
+        </p>
+        @if (Model.SweepPending.Count > 0)
+        {
+            <h5 class="mt-3">Pending sweeps</h5>
+            <p class="text-warning">
+                These sweeps were signed but their broadcast isn't confirmed. Each run looks for them and rebroadcasts the same
+                transaction, which can never pay twice; nothing more of that coin is swept until they are found. Remove one only
+                after checking the transaction ID in a block explorer.
+            </p>
+            <div class="table-responsive">
+                <table class="table">
+                    <thead>
+                        <tr><th>Signed (UTC)</th><th>Sweep</th><th>Transaction ID</th><th></th></tr>
+                    </thead>
+                    <tbody>
+                        @foreach (var pending in Model.SweepPending)
+                        {
+                            <tr>
+                                <td class="text-nowrap">@pending.CreatedAt.ToString("u")</td>
+                                <td>@pending.ToExchange @pending.CryptoCode to the exchange@(pending.ToCold > 0 ? $", {pending.ToCold} {pending.CryptoCode} to the cold wallet" : ""), fee @pending.Fee</td>
+                                <td><code class="text-break">@pending.Txid</code></td>
+                                <td>
+                                    <form method="post" asp-action="RemovePendingSweep" asp-route-storeId="@storeId" asp-route-txid="@pending.Txid">
+                                        <button type="submit" class="btn btn-sm btn-outline-danger">Remove</button>
+                                    </form>
+                                </td>
+                            </tr>
+                        }
+                    </tbody>
+                </table>
+            </div>
+        }
+        @if (Model.SweepAwaiting.Count > 0)
+        {
+            <h5 class="mt-3">Waiting for the exchange</h5>
+            <p class="text-secondary">Sent and not credited yet. Each is converted as soon as the exchange credits it.</p>
+            <div class="table-responsive">
+                <table class="table">
+                    <thead>
+                        <tr><th>Sent (UTC)</th><th>Amount</th><th>Transaction ID</th></tr>
+                    </thead>
+                    <tbody>
+                        @foreach (var awaiting in Model.SweepAwaiting)
+                        {
+                            <tr>
+                                <td class="text-nowrap">@awaiting.SentAt.ToString("u")</td>
+                                <td>@awaiting.Amount @awaiting.Asset</td>
+                                <td><code class="text-break">@awaiting.Txid</code></td>
+                            </tr>
+                        }
+                    </tbody>
+                </table>
+            </div>
+        }
+        @if (Model.SweepActivity.Count == 0)
+        {
+            <p class="text-secondary">Nothing yet.</p>
+        }
+        else
+        {
+            <div class="table-responsive">
+                <table class="table table-hover">
+                    <thead>
+                        <tr><th>Time (UTC)</th><th>Coin</th><th>Result</th><th>Details</th></tr>
+                    </thead>
+                    <tbody>
+                        @foreach (var entry in Model.SweepActivity)
+                        {
+                            <tr>
+                                <td class="text-nowrap">@entry.At.ToString("u")</td>
+                                <td>@(entry.Asset ?? "")</td>
+                                <td class="@(entry.Outcome == ActivityOutcome.Failed ? "text-danger" : entry.Outcome == ActivityOutcome.Sent ? "text-success" : entry.Outcome == ActivityOutcome.Changed ? "text-warning" : "")">@entry.Outcome</td>
+                                <td class="text-break">@entry.Message</td>
+                            </tr>
+                        }
+                    </tbody>
+                </table>
+            </div>
+        }
+
+        <h4 class="mt-5 mb-2">Convert activity</h4>
         <p class="text-secondary">
             Last convert run: @(Model.ConvertLastRun?.ToString("u") ?? "never").
         </p>

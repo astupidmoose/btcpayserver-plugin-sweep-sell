@@ -41,7 +41,6 @@ public class ConvertService(ISweepSellRepository repository, SecretProtector pro
     public const int MaxParallelStores = 4;
 
     static readonly ConcurrentDictionary<string, SemaphoreSlim> StoreLocks = new();
-    static readonly ConcurrentDictionary<string, SemaphoreSlim> SettingsLocks = new();
 
     /// <summary>Runs every store whose interval has passed.</summary>
     public async Task RunDueAsync(CancellationToken cancellationToken)
@@ -423,7 +422,7 @@ public class ConvertService(ISweepSellRepository repository, SecretProtector pro
     }
 
     static SemaphoreSlim StoreLock(string storeId) => StoreLocks.GetOrAdd(storeId, _ => new SemaphoreSlim(1, 1));
-    static SemaphoreSlim SettingsLock(string storeId) => SettingsLocks.GetOrAdd(storeId, _ => new SemaphoreSlim(1, 1));
+    static SemaphoreSlim SettingsLock(string storeId) => SettingsGate.For(storeId);
 
     void Record(string storeId, ConvertState state, string? asset, ActivityOutcome outcome, string message)
     {

@@ -13,6 +13,7 @@ using BTCPayServer.Client;
 using BTCPayServer.Plugins.SweepSell.Conversion;
 using BTCPayServer.Plugins.SweepSell.Exchanges;
 using BTCPayServer.Plugins.SweepSell.Settings;
+using BTCPayServer.Plugins.SweepSell.Sweeping;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.Extensions.Logging;
@@ -23,24 +24,23 @@ namespace BTCPayServer.Plugins.SweepSell.Controllers;
 [Authorize(AuthenticationSchemes = AuthenticationSchemes.Cookie)]
 [Authorize(Policy = Policies.CanModifyStoreSettings, AuthenticationSchemes = AuthenticationSchemes.Cookie)]
 public class UISweepSellController(ISweepSellRepository repository, SecretProtector protector, ExchangeRegistry exchanges,
-    ConvertService convert, ILogger<UISweepSellController> logger) : Controller
+    ConvertService convert, SweepService sweep, IStoreWallets wallets, ILogger<UISweepSellController> logger) : Controller
 {
     public const string SettingsView = SweepSellPlugin.ViewsDirectory + "/Settings.cshtml";
 
     [HttpGet("")]
-    public async Task<IActionResult> Settings(string storeId)
+    public async Task<IActionResult> Settings(string storeId, CancellationToken cancellationToken)
     {
-        var settings = await repository.GetAsync(storeId);
-        return View(SettingsView, ToViewModel(settings, await repository.GetConvertStateAsync(storeId), null));
+        return View(SettingsView, await ToViewModelAsync(storeId, await repository.GetAsync(storeId), null, cancellationToken));
     }
 
     [HttpPost("")]
     public async Task<IActionResult> Settings(string storeId, SweepSellSettingsViewModel vm, CancellationToken cancellationToken)
     {
-        foreach (var (field, error) in Validate(vm, exchanges))
+        foreach (var (field, error) in Validate(vm, exchanges).Concat(ValidateSweep(vm, wallets)))
             ModelState.AddModelError(field, error);
         if (!ModelState.IsValid)
-            return View(SettingsView, ToViewModel(await repository.GetAsync(storeId), await repository.GetConvertStateAsync(storeId), vm));
+            return View(SettingsView, await ToViewModelAsync(storeId, await repository.GetAsync(storeId), vm, cancellationToken));
 
         // Read, checked and saved while no order is being sent: a run checks the saved settings again under this lock before
         // each order, so once this returns no order goes out under the old settings (e.g. after pausing), and the pending
@@ -57,15 +57,21 @@ public class UISweepSellController(ISweepSellRepository repository, SecretProtec
         if (conflict is not null)
         {
             ModelState.AddModelError(nameof(vm.ExchangeId), conflict);
-            return View(SettingsView, ToViewModel(saved, await repository.GetConvertStateAsync(storeId), vm));
+            return View(SettingsView, await ToViewModelAsync(storeId, saved, vm, cancellationToken));
         }
+
+        // Not cancelled with the request: the settings are saved, so the record of the change must be too.
+        await sweep.RecordDestinationChangesAsync(storeId, saved.Sweep, updated.Sweep, CancellationToken.None);
 
         // Never log the key itself; whether one is saved is enough to follow what happened.
         logger.LogInformation("Sweep & Sell settings of store {StoreId} saved: exchange {Exchange}, credentials {Credentials}, paused {Paused}, " +
-                              "convert {Convert} ({ConvertMode}, {ConvertAssets} to {ConvertTarget} every {ConvertInterval} min)",
+                              "convert {Convert} ({ConvertMode}, {ConvertAssets} to {ConvertTarget} every {ConvertInterval} min), " +
+                              "sweep {Sweep} ({SweepMode}, coins {SweepCoins})",
             storeId, updated.ExchangeId ?? "none", updated.HasCredentials ? "saved" : "none", updated.Paused,
             updated.Convert.Enabled ? "on" : "off", updated.Convert.DryRun ? "dry run" : "live", string.Join(",", updated.Convert.Assets),
-            updated.Convert.TargetAsset, updated.Convert.IntervalMinutes);
+            updated.Convert.TargetAsset, updated.Convert.IntervalMinutes,
+            updated.Sweep.Enabled ? "on" : "off", updated.Sweep.DryRun ? "dry run" : "live",
+            string.Join(",", updated.Sweep.Rules.Where(r => r.Enabled).Select(r => r.CryptoCode)));
         TempData.SetStatusMessageModel(new StatusMessageModel
         {
             Severity = StatusMessageModel.StatusSeverity.Success,
@@ -147,6 +153,36 @@ public class UISweepSellController(ISweepSellRepository repository, SecretProtec
         return RedirectToAction(nameof(Settings), new { storeId });
     }
 
+    [HttpPost("sweep/run")]
+    public async Task<IActionResult> RunSweep(string storeId, CancellationToken cancellationToken)
+    {
+        var result = await sweep.RunAsync(storeId, wait: false, cancellationToken);
+        TempData.SetStatusMessageModel(new StatusMessageModel
+        {
+            Severity = result == SweepRunResult.Ran ? StatusMessageModel.StatusSeverity.Success : StatusMessageModel.StatusSeverity.Warning,
+            Message = result switch
+            {
+                SweepRunResult.Ran => "Sweep ran. What it did is listed under Sweep activity.",
+                SweepRunResult.Paused => "Sweep & Sell is paused for this store; nothing was swept.",
+                SweepRunResult.Disabled => "Turn on Sweep and save first.",
+                _ => "A sweep run is already in progress. Try again in a moment."
+            }
+        });
+        return RedirectToAction(nameof(Settings), new { storeId });
+    }
+
+    [HttpPost("sweep/pending/{txid}/remove")]
+    public async Task<IActionResult> RemovePendingSweep(string storeId, string txid, CancellationToken cancellationToken)
+    {
+        var removed = await sweep.RemovePendingAsync(storeId, txid, cancellationToken);
+        TempData.SetStatusMessageModel(new StatusMessageModel
+        {
+            Severity = removed ? StatusMessageModel.StatusSeverity.Success : StatusMessageModel.StatusSeverity.Warning,
+            Message = removed ? "Pending sweep removed. Sweeping that coin resumes on the next run." : "That sweep is no longer pending."
+        });
+        return RedirectToAction(nameof(Settings), new { storeId });
+    }
+
     /// <summary>
     /// Whether a save puts a different key (or exchange) in place, which pending orders must be checked against.
     /// Removing the key isn't a change here: with no key nothing runs, and removing it must never be blocked.
@@ -208,6 +244,60 @@ public class UISweepSellController(ISweepSellRepository repository, SecretProtec
             yield return (nameof(vm.ExchangeId), "Pick the exchange this key belongs to.");
     }
 
+    /// <summary>Sweep form errors, by field. Cold wallets are checked against the coin's network on this server.</summary>
+    public static IEnumerable<(string Field, string Error)> ValidateSweep(SweepSellSettingsViewModel vm, IStoreWallets wallets)
+    {
+        if (vm.SweepIntervalMinutes is < SweepSettings.MinIntervalMinutes or > SweepSettings.MaxIntervalMinutes)
+            yield return (nameof(vm.SweepIntervalMinutes),
+                $"Check between every {SweepSettings.MinIntervalMinutes} and {SweepSettings.MaxIntervalMinutes} minutes.");
+        if (vm.SweepFeeTargetBlocks is < SweepSettings.MinFeeTargetBlocks or > SweepSettings.MaxFeeTargetBlocks)
+            yield return (nameof(vm.SweepFeeTargetBlocks),
+                $"Aim for confirmation within {SweepSettings.MinFeeTargetBlocks} to {SweepSettings.MaxFeeTargetBlocks} blocks.");
+        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        for (var i = 0; i < vm.SweepRules.Count; i++)
+        {
+            var rule = vm.SweepRules[i];
+            var field = $"{nameof(vm.SweepRules)}[{i}].";
+            var code = Clean(rule.CryptoCode)?.ToUpperInvariant();
+            if (code is null || !Ticker.IsMatch(code))
+            {
+                yield return (field + nameof(rule.CryptoCode), "A sweep rule has no valid coin.");
+                continue;
+            }
+            if (!seen.Add(code))
+                yield return (field + nameof(rule.CryptoCode), $"{code} has more than one sweep rule.");
+            if (rule.MinimumBalance < 0)
+                yield return (field + nameof(rule.MinimumBalance), $"{code}: the minimum balance can't be negative.");
+            if (rule.DailyCap < 0)
+                yield return (field + nameof(rule.DailyCap), $"{code}: the daily cap can't be negative. Use 0 for no cap.");
+            if (rule.ColdPercent is < 0 or >= 100)
+                yield return (field + nameof(rule.ColdPercent), $"{code}: the cold wallet share must be at least 0% and under 100%.");
+            if (rule.ColdStartIndex < 0)
+                yield return (field + nameof(rule.ColdStartIndex), $"{code}: the first address index can't be negative.");
+            var cold = Clean(rule.ColdDestination);
+            if (rule.ColdPercent > 0 && cold is null)
+                yield return (field + nameof(rule.ColdDestination), $"{code}: enter the cold wallet address or extended public key, or set its share to 0%.");
+            else if (cold is not null && CheckCold(wallets, code, cold) is { } error)
+                yield return (field + nameof(rule.ColdDestination), $"{code}: {error}");
+        }
+        if (vm.SweepEnabled && string.IsNullOrWhiteSpace(vm.ExchangeId))
+            yield return (nameof(vm.SweepEnabled), "Pick an exchange to sweep to.");
+        if (vm.SweepEnabled && !vm.SweepRules.Any(r => r.Enabled))
+            yield return (nameof(vm.SweepEnabled), "Turn on sweeping for at least one coin, or turn sweeping off.");
+    }
+
+    static string? CheckCold(IStoreWallets wallets, string code, string destination)
+    {
+        try
+        {
+            return wallets.CheckColdDestination(code, destination);
+        }
+        catch (SweepException e)
+        {
+            return e.Message; // e.g. a coin this server doesn't support
+        }
+    }
+
     /// <summary>
     /// The settings after a save. Keys are write-only on the page: an empty field keeps the saved key,
     /// "remove" clears both, and a new pair replaces both.
@@ -229,6 +319,24 @@ public class UISweepSellController(ISweepSellRepository repository, SecretProtec
                 IntervalMinutes = vm.ConvertIntervalMinutes,
                 MaxSlippagePercent = vm.ConvertMaxSlippagePercent,
                 DailyCap = vm.ConvertDailyCap
+            },
+            Sweep = new SweepSettings
+            {
+                Enabled = vm.SweepEnabled,
+                DryRun = vm.SweepDryRun,
+                IntervalMinutes = vm.SweepIntervalMinutes,
+                FeeTargetBlocks = vm.SweepFeeTargetBlocks,
+                Rules = vm.SweepRules.Select(r => new SweepRule
+                {
+                    CryptoCode = Clean(r.CryptoCode)?.ToUpperInvariant() ?? "",
+                    Enabled = r.Enabled,
+                    MinimumBalance = r.MinimumBalance,
+                    ColdPercent = r.ColdPercent,
+                    ColdDestination = Clean(r.ColdDestination),
+                    ColdStartIndex = r.ColdStartIndex,
+                    DailyCap = r.DailyCap,
+                    IncludeUnconfirmed = r.IncludeUnconfirmed
+                }).ToList()
             }
         };
         var key = Clean(vm.ApiKey);
@@ -248,25 +356,63 @@ public class UISweepSellController(ISweepSellRepository repository, SecretProtec
         return updated;
     }
 
-    SweepSellSettingsViewModel ToViewModel(SweepSellSettings settings, ConvertState state, SweepSellSettingsViewModel? posted) => new()
+    async Task<SweepSellSettingsViewModel> ToViewModelAsync(string storeId, SweepSellSettings settings, SweepSellSettingsViewModel? posted,
+        CancellationToken cancellationToken)
     {
-        Paused = posted?.Paused ?? settings.Paused,
-        ExchangeId = posted?.ExchangeId ?? settings.ExchangeId,
-        ConvertEnabled = posted?.ConvertEnabled ?? settings.Convert.Enabled,
-        ConvertDryRun = posted?.ConvertDryRun ?? settings.Convert.DryRun,
-        ConvertAssets = posted?.ConvertAssets ?? string.Join(", ", settings.Convert.Assets),
-        ConvertTarget = posted?.ConvertTarget ?? settings.Convert.TargetAsset,
-        ConvertIntervalMinutes = posted?.ConvertIntervalMinutes ?? settings.Convert.IntervalMinutes,
-        ConvertMaxSlippagePercent = posted?.ConvertMaxSlippagePercent ?? settings.Convert.MaxSlippagePercent,
-        ConvertDailyCap = posted?.ConvertDailyCap ?? settings.Convert.DailyCap,
-        ConvertLastRun = state.LastRun,
-        ConvertPending = state.Pending,
-        ConvertActivity = state.Activity,
-        // Saved but undecryptable (e.g. restored on a server with other data-protection keys) counts as not saved.
-        HasCredentials = protector.Credentials(settings) is not null,
-        CredentialsUnreadable = settings.HasCredentials && protector.Credentials(settings) is null,
-        Exchanges = exchanges.All.Select(e => new ExchangeOption(e.Id, e.Name, e.KeyPermissionsHelp)).ToList()
-    };
+        var convertState = await repository.GetConvertStateAsync(storeId);
+        var sweepState = await repository.GetSweepStateAsync(storeId);
+        // One row per coin the store has an on-chain wallet for, plus any saved rule whose wallet was removed since.
+        var rules = posted?.SweepRules ?? (await wallets.GetCryptoCodesAsync(storeId, cancellationToken))
+            .Select(code => settings.Sweep.Rules.FirstOrDefault(r => string.Equals(r.CryptoCode, code, StringComparison.OrdinalIgnoreCase))
+                            ?? new SweepRule { CryptoCode = code })
+            .Concat(settings.Sweep.Rules)
+            .DistinctBy(r => r.CryptoCode.ToUpperInvariant())
+            .Select(r => new SweepRuleViewModel
+            {
+                CryptoCode = r.CryptoCode,
+                Enabled = r.Enabled,
+                MinimumBalance = r.MinimumBalance,
+                ColdPercent = r.ColdPercent,
+                ColdDestination = r.ColdDestination,
+                ColdStartIndex = r.ColdStartIndex,
+                DailyCap = r.DailyCap,
+                IncludeUnconfirmed = r.IncludeUnconfirmed
+            })
+            .ToList();
+        foreach (var rule in rules)
+        {
+            var wallet = string.IsNullOrWhiteSpace(rule.CryptoCode) ? null : await wallets.GetWalletAsync(storeId, rule.CryptoCode, cancellationToken);
+            rule.WalletStatus = wallet is null ? "No wallet" : wallet.IsHot ? "Hot wallet" : "Not a hot wallet: can't be swept";
+        }
+        return new SweepSellSettingsViewModel
+        {
+            Paused = posted?.Paused ?? settings.Paused,
+            ExchangeId = posted?.ExchangeId ?? settings.ExchangeId,
+            ConvertEnabled = posted?.ConvertEnabled ?? settings.Convert.Enabled,
+            ConvertDryRun = posted?.ConvertDryRun ?? settings.Convert.DryRun,
+            ConvertAssets = posted?.ConvertAssets ?? string.Join(", ", settings.Convert.Assets),
+            ConvertTarget = posted?.ConvertTarget ?? settings.Convert.TargetAsset,
+            ConvertIntervalMinutes = posted?.ConvertIntervalMinutes ?? settings.Convert.IntervalMinutes,
+            ConvertMaxSlippagePercent = posted?.ConvertMaxSlippagePercent ?? settings.Convert.MaxSlippagePercent,
+            ConvertDailyCap = posted?.ConvertDailyCap ?? settings.Convert.DailyCap,
+            ConvertLastRun = convertState.LastRun,
+            ConvertPending = convertState.Pending,
+            ConvertActivity = convertState.Activity,
+            SweepEnabled = posted?.SweepEnabled ?? settings.Sweep.Enabled,
+            SweepDryRun = posted?.SweepDryRun ?? settings.Sweep.DryRun,
+            SweepIntervalMinutes = posted?.SweepIntervalMinutes ?? settings.Sweep.IntervalMinutes,
+            SweepFeeTargetBlocks = posted?.SweepFeeTargetBlocks ?? settings.Sweep.FeeTargetBlocks,
+            SweepRules = rules,
+            SweepLastRun = sweepState.LastRun,
+            SweepPending = sweepState.Pending,
+            SweepAwaiting = sweepState.Awaiting,
+            SweepActivity = sweepState.Activity,
+            // Saved but undecryptable (e.g. restored on a server with other data-protection keys) counts as not saved.
+            HasCredentials = protector.Credentials(settings) is not null,
+            CredentialsUnreadable = settings.HasCredentials && protector.Credentials(settings) is null,
+            Exchanges = exchanges.All.Select(e => new ExchangeOption(e.Id, e.Name, e.KeyPermissionsHelp)).ToList()
+        };
+    }
 
     /// <summary>"doge, LTC  xmr" → DOGE, LTC, XMR.</summary>
     static List<string> Tickers(string? value) =>
@@ -324,9 +470,46 @@ public class SweepSellSettingsViewModel
 
     public List<ActivityEntry> ConvertActivity { get; set; } = [];
 
+    [Display(Name = "Sweep to the exchange")]
+    public bool SweepEnabled { get; set; }
+
+    [Display(Name = "Dry run")]
+    public bool SweepDryRun { get; set; } = true;
+
+    [Display(Name = "Also check every (minutes)")]
+    public int SweepIntervalMinutes { get; set; } = 60;
+
+    [Display(Name = "Network fee: confirm within (blocks)")]
+    public int SweepFeeTargetBlocks { get; set; } = 6;
+
+    public List<SweepRuleViewModel> SweepRules { get; set; } = [];
+
+    public DateTimeOffset? SweepLastRun { get; set; }
+
+    public List<PendingSweep> SweepPending { get; set; } = [];
+
+    public List<AwaitingDeposit> SweepAwaiting { get; set; } = [];
+
+    public List<ActivityEntry> SweepActivity { get; set; } = [];
+
     public bool HasCredentials { get; set; }
 
     public bool CredentialsUnreadable { get; set; }
 
     public List<ExchangeOption> Exchanges { get; set; } = [];
+}
+
+public class SweepRuleViewModel
+{
+    public string? CryptoCode { get; set; }
+    public bool Enabled { get; set; }
+    public decimal MinimumBalance { get; set; }
+    public decimal ColdPercent { get; set; }
+    public string? ColdDestination { get; set; }
+    public int ColdStartIndex { get; set; }
+    public decimal DailyCap { get; set; }
+    public bool IncludeUnconfirmed { get; set; }
+
+    /// <summary>Shown next to the coin; not posted.</summary>
+    public string? WalletStatus { get; set; }
 }
