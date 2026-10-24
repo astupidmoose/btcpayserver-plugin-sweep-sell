@@ -903,4 +903,55 @@ public class SweepServiceTests
         await Assert.ThrowsAnyAsync<OperationCanceledException>(() => running);
         Assert.Equal(["BTC", "BTC", "LTC"], runs);
     }
+
+    [Fact]
+    public async Task DifferentKeysRunSideBySideButAKeyNeverRunsTwiceAtOnce()
+    {
+        var runs = new List<string>();
+        var concurrentA = 0;
+        var maxConcurrentA = 0;
+        var aStarted = new TaskCompletionSource();
+        var releaseA = new TaskCompletionSource();
+        var queue = new CoalescingQueue(async (key, _) =>
+        {
+            lock (runs)
+                runs.Add(key);
+            if (key != "A")
+                return;
+            var now = Interlocked.Increment(ref concurrentA);
+            lock (runs)
+                maxConcurrentA = Math.Max(maxConcurrentA, now);
+            aStarted.TrySetResult();
+            await releaseA.Task;
+            Interlocked.Decrement(ref concurrentA);
+        }, NullLogger.Instance, maxConcurrency: 2, StringComparer.Ordinal);
+        using var cts = CancellationTokenSource.CreateLinkedTokenSource(Ct);
+        var running = queue.RunAsync(cts.Token);
+
+        queue.Signal("A");
+        await aStarted.Task;
+        queue.Signal("A"); // while A runs: runs again after it, never beside it
+        queue.Signal("B");
+        queue.Signal("b"); // compared exactly, so another key
+        async Task WaitFor(int count)
+        {
+            while (true)
+            {
+                lock (runs)
+                    if (runs.Count >= count)
+                        return;
+                await Task.Delay(10, Ct);
+            }
+        }
+        await WaitFor(3); // B and b ran while A was still running
+        lock (runs)
+            Assert.Equal(["A", "B", "b"], runs);
+        releaseA.SetResult();
+        await WaitFor(4);
+        await Task.Delay(50, Ct);
+        await cts.CancelAsync();
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => running);
+        Assert.Equal(["A", "B", "b", "A"], runs);
+        Assert.Equal(1, maxConcurrentA);
+    }
 }

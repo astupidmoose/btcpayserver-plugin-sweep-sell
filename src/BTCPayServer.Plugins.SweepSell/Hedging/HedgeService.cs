@@ -78,14 +78,33 @@ public class HedgeService(ISweepSellRepository repository, SecretProtector prote
     /// <summary>An invoice changed: hedges it straight away if it reached the store's trigger status.</summary>
     public async Task OnInvoiceAsync(string invoiceId, CancellationToken cancellationToken)
     {
-        // Read again rather than trusting the event's copy, so the payments counted are the saved ones.
-        var invoice = await invoices.GetAsync(invoiceId, cancellationToken);
-        if (invoice is null || invoice.Status == HedgeInvoiceStatus.Other)
+        if (await invoices.GetAsync(invoiceId, cancellationToken) is { } invoice)
+            await HedgeAsync(invoice.StoreId, [invoice], cancellationToken);
+    }
+
+    /// <summary>Invoices of a store changed: hedges straight away those that reached the store's trigger status.</summary>
+    public async Task OnInvoicesAsync(string storeId, IReadOnlyCollection<string> invoiceIds, CancellationToken cancellationToken)
+    {
+        var found = new List<HedgeInvoice>();
+        foreach (var invoiceId in invoiceIds)
+            if (await invoices.GetAsync(invoiceId, cancellationToken) is { } invoice)
+                found.Add(invoice);
+        await HedgeAsync(storeId, found, cancellationToken);
+    }
+
+    /// <summary>
+    /// Hedges <paramref name="changed"/>, read again rather than trusting an event's copy so the payments counted are the
+    /// saved ones, if any of them belongs to the store and reached its trigger status.
+    /// </summary>
+    async Task HedgeAsync(string storeId, IReadOnlyList<HedgeInvoice> changed, CancellationToken cancellationToken)
+    {
+        var found = changed.Where(i => i.StoreId == storeId && i.Status != HedgeInvoiceStatus.Other).ToList();
+        if (found.Count == 0)
             return;
-        var settings = await repository.GetAsync(invoice.StoreId);
-        if (settings.Paused || !settings.Hedge.Enabled || !Reached(invoice, settings.Hedge))
+        var settings = await repository.GetAsync(storeId);
+        if (settings.Paused || !settings.Hedge.Enabled || !found.Any(i => Reached(i, settings.Hedge)))
             return;
-        await RunAsync(invoice.StoreId, wait: true, [invoice], cancellationToken);
+        await RunAsync(storeId, wait: true, found, cancellationToken);
     }
 
     /// <summary>Hedges the store's paid invoices now (the Hedge now button), listing recent invoices whatever the scan interval.</summary>
@@ -295,8 +314,18 @@ public class HedgeService(ISweepSellRepository repository, SecretProtector prote
 
             if (hedge.DryRun)
             {
+                // Under the settings lock like a live sell: a pause or a switch to live saved during the run applies first,
+                // so no invoice is marked as sold in a dry run the owner already turned off.
+                var gate = SettingsGate.For(storeId);
+                await gate.WaitAsync(cancellationToken);
                 try
                 {
+                    if (!StillApplies(await repository.GetAsync(storeId), settings, exchange, credentials))
+                    {
+                        Record(storeId, state, null, ActivityOutcome.Waiting,
+                            "The settings changed during the run (paused, hedging or its options changed, or another key); nothing more is checked this run.");
+                        return;
+                    }
                     var check = await exchange.SellAsync(credentials, Asset, market, amount, limitPrice, Guid.NewGuid(), validateOnly: true, cancellationToken);
                     state.Allocate(market, amount, hedge.EnabledSince, dryRun: true);
                     available -= amount;
@@ -307,6 +336,10 @@ public class HedgeService(ISweepSellRepository repository, SecretProtector prote
                 catch (Exception e) when (IsRecordedFailure(e, cancellationToken))
                 {
                     Record(storeId, state, Asset, ActivityOutcome.Failed, $"Dry run: {exchange.Name} rejected selling {Amount(amount)} BTC for {market}: {e.Message}");
+                }
+                finally
+                {
+                    gate.Release();
                 }
                 continue;
             }
@@ -395,7 +428,9 @@ public class HedgeService(ISweepSellRepository repository, SecretProtector prote
                     $"No buyer for BTC at {Amount(limitPrice)} {market} or better; nothing was sold ({orders}). Trying again on the next run.");
                 continue;
             }
-            Sold(state, pending, pending.SentAt, fill.ExecutedAmount);
+            // On the day the fill is known, not the day the order was sent: if the wait crossed midnight, the order may have
+            // filled on the new day, and counting it on the old one would let the next market use the new day's whole cap.
+            Sold(state, pending, clock.GetUtcNow(), fill.ExecutedAmount);
             available -= fill.ExecutedAmount;
             Record(storeId, state, Asset, ActivityOutcome.Sold,
                 $"Sold {Amount(fill.ExecutedAmount)} of {Amount(amount)} BTC for {market} at {Amount(limitPrice)} or better ({orders}).");
@@ -492,7 +527,7 @@ public class HedgeService(ISweepSellRepository repository, SecretProtector prote
     bool StillApplies(SweepSellSettings current, SweepSellSettings planned, IExchangeConnector exchange, ExchangeCredentials credentials)
     {
         var (now, then) = (current.Hedge, planned.Hedge);
-        return !current.Paused && now.Enabled && !now.DryRun && current.ExchangeId == exchange.Id &&
+        return !current.Paused && now.Enabled && now.DryRun == then.DryRun && current.ExchangeId == exchange.Id &&
                credentials.Equals(protector.Credentials(current)) && // the whole key: a replaced secret must not be used either
                now.EnabledSince == then.EnabledSince && // turned off and on again: the invoices this run planned for are dropped
                now.Trigger == then.Trigger && now.Amount == then.Amount && // which invoices count, and how much of each

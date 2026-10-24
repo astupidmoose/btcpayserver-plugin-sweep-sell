@@ -552,6 +552,104 @@ public class HedgeServiceTests
     }
 
     [Fact]
+    public async Task AnOrderThatFillsAfterMidnightCountsOnTheNewDay()
+    {
+        Configure(hedge: h =>
+        {
+            h.DailyCap = 0.1m;
+            h.Markets["GBP"] = "EUR";
+        });
+        Invoice("cad", 0.1m);
+        Invoice("gbp", 0.1m, currency: "GBP");
+        _clock.Advance(TimeSpan.FromHours(11) + TimeSpan.FromMinutes(59)); // 23:59 UTC
+        var crossed = false;
+        _exchange.OnSell = () =>
+        {
+            if (!crossed)
+                _clock.Advance(TimeSpan.FromMinutes(2)); // sent before midnight, answered after it
+            crossed = true;
+        };
+        await Service().RunAsync(_storeId, Ct);
+        Assert.Equal("CAD", Assert.Single(_exchange.Orders).Quote);
+        Assert.Equal(0.1m, State.Sold.On(_clock.GetUtcNow(), "BTC"));
+        Assert.Equal(0.1m, State.Invoices["gbp"].Remaining);
+    }
+
+    [Theory]
+    [InlineData("pause")]
+    [InlineData("live")]
+    [InlineData("market")]
+    public async Task SettingsChangedDuringADryRunStopTheCheck(string change)
+    {
+        Configure(dryRun: true);
+        _exchange.OnPrice = () =>
+        {
+            var settings = _repository.Settings[_storeId];
+            switch (change)
+            {
+                case "pause": settings.Paused = true; break;
+                case "live": settings.Hedge.DryRun = false; break;
+                default: settings.Hedge.Markets["CAD"] = "USD"; break;
+            }
+        };
+        Invoice("inv-1", 0.1m);
+        await Service().OnInvoiceAsync("inv-1", Ct);
+        Assert.Empty(_exchange.Orders);
+        Assert.Equal(0.1m, State.Invoices["inv-1"].Remaining);
+        Assert.Contains("settings changed during the run", State.Activity[0].Message);
+    }
+
+    [Fact]
+    public async Task InvoicesOfAnotherStoreAreNotHedgedForThisOne()
+    {
+        Configure();
+        Invoice("inv-1", 0.1m);
+        await Service().OnInvoicesAsync("another-store", ["inv-1"], Ct);
+        Assert.Empty(_exchange.Orders);
+        Assert.False(_repository.HedgeStates.ContainsKey(_storeId));
+    }
+
+    [Fact]
+    public async Task AStoreWaitingOnItsExchangeDoesNotHoldUpAnotherStore()
+    {
+        Configure();
+        var other = "hedge-store-" + Guid.NewGuid().ToString("N");
+        _repository.Settings[other] = _repository.Settings[_storeId];
+        Invoice("slow", 0.1m);
+        _invoices.Invoices["fast"] = new HedgeInvoice("fast", other, HedgeInvoiceStatus.Settled, "CAD", Start.AddHours(-1), 0.1m, null);
+        var entered = new TaskCompletionSource();
+        var release = new TaskCompletionSource();
+        var sells = 0;
+        _exchange.OnSell = () =>
+        {
+            if (Interlocked.Increment(ref sells) != 1)
+                return;
+            entered.SetResult();
+            release.Task.Wait(Ct); // the first store's sell hangs
+        };
+        using var listener = new HedgeInvoiceListener(new EventAggregator(new BTCPayServer.Logging.Logs()), Service(),
+            NullLogger<HedgeInvoiceListener>.Instance);
+        using var cts = CancellationTokenSource.CreateLinkedTokenSource(Ct);
+        var running = listener.RunAsync(cts.Token);
+        try
+        {
+            listener.Signal(_storeId, "slow");
+            await entered.Task.WaitAsync(TimeSpan.FromSeconds(10), Ct);
+            listener.Signal(other, "fast");
+            var deadline = DateTime.UtcNow.AddSeconds(10);
+            while (_exchange.Orders.Count < 2 && DateTime.UtcNow < deadline)
+                await Task.Delay(10, Ct);
+            Assert.Equal(2, _exchange.Orders.Count); // the other store sold while the first one was still waiting
+        }
+        finally
+        {
+            release.TrySetResult();
+            await cts.CancelAsync();
+        }
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => running);
+    }
+
+    [Fact]
     public async Task DailyCapHoldsTheRestForTomorrow()
     {
         Configure(hedge: h => h.DailyCap = 0.1m);

@@ -52,7 +52,9 @@ public class BtcPayStoreInvoices(InvoiceRepository invoices) : IStoreInvoices
             EndDate = to,
             Status = [nameof(InvoiceStatus.Processing), nameof(InvoiceStatus.Settled)],
             OrderByDesc = false,
-            Take = take
+            Take = take,
+            // Archiving hides an invoice but doesn't undo its payment, so an archived paid invoice is still hedged.
+            IncludeArchived = true
         }, cancellationToken);
 
     public async Task<HedgeInvoice?> GetAsync(string invoiceId, CancellationToken cancellationToken) =>
