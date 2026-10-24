@@ -3,12 +3,14 @@ using System;
 using System.Collections.Generic;
 using System.ComponentModel.DataAnnotations;
 using System.Linq;
+using System.Text.RegularExpressions;
 using System.Threading;
 using System.Threading.Tasks;
 using BTCPayServer.Abstractions.Constants;
 using BTCPayServer.Abstractions.Extensions;
 using BTCPayServer.Abstractions.Models;
 using BTCPayServer.Client;
+using BTCPayServer.Plugins.SweepSell.Conversion;
 using BTCPayServer.Plugins.SweepSell.Exchanges;
 using BTCPayServer.Plugins.SweepSell.Settings;
 using Microsoft.AspNetCore.Authorization;
@@ -20,8 +22,8 @@ namespace BTCPayServer.Plugins.SweepSell.Controllers;
 [Route("stores/{storeId}/sweep-sell")]
 [Authorize(AuthenticationSchemes = AuthenticationSchemes.Cookie)]
 [Authorize(Policy = Policies.CanModifyStoreSettings, AuthenticationSchemes = AuthenticationSchemes.Cookie)]
-public class UISweepSellController(SweepSellSettingsRepository repository, SecretProtector protector, ExchangeRegistry exchanges,
-    ILogger<UISweepSellController> logger) : Controller
+public class UISweepSellController(ISweepSellRepository repository, SecretProtector protector, ExchangeRegistry exchanges,
+    ConvertService convert, ILogger<UISweepSellController> logger) : Controller
 {
     public const string SettingsView = SweepSellPlugin.ViewsDirectory + "/Settings.cshtml";
 
@@ -29,7 +31,7 @@ public class UISweepSellController(SweepSellSettingsRepository repository, Secre
     public async Task<IActionResult> Settings(string storeId)
     {
         var settings = await repository.GetAsync(storeId);
-        return View(SettingsView, ToViewModel(settings, null));
+        return View(SettingsView, ToViewModel(settings, await repository.GetConvertStateAsync(storeId), null));
     }
 
     [HttpPost("")]
@@ -40,12 +42,15 @@ public class UISweepSellController(SweepSellSettingsRepository repository, Secre
             ModelState.AddModelError(field, error);
         var updated = Apply(saved, vm, protector);
         if (!ModelState.IsValid)
-            return View(SettingsView, ToViewModel(saved, vm));
+            return View(SettingsView, ToViewModel(saved, await repository.GetConvertStateAsync(storeId), vm));
 
         await repository.SaveAsync(storeId, updated);
         // Never log the key itself; whether one is saved is enough to follow what happened.
-        logger.LogInformation("Sweep & Sell settings of store {StoreId} saved: exchange {Exchange}, credentials {Credentials}, paused {Paused}",
-            storeId, updated.ExchangeId ?? "none", updated.HasCredentials ? "saved" : "none", updated.Paused);
+        logger.LogInformation("Sweep & Sell settings of store {StoreId} saved: exchange {Exchange}, credentials {Credentials}, paused {Paused}, " +
+                              "convert {Convert} ({ConvertMode}, {ConvertAssets} to {ConvertTarget} every {ConvertInterval} min)",
+            storeId, updated.ExchangeId ?? "none", updated.HasCredentials ? "saved" : "none", updated.Paused,
+            updated.Convert.Enabled ? "on" : "off", updated.Convert.DryRun ? "dry run" : "live", string.Join(",", updated.Convert.Assets),
+            updated.Convert.TargetAsset, updated.Convert.IntervalMinutes);
         TempData.SetStatusMessageModel(new StatusMessageModel
         {
             Severity = StatusMessageModel.StatusSeverity.Success,
@@ -97,11 +102,48 @@ public class UISweepSellController(SweepSellSettingsRepository repository, Secre
         return RedirectToAction(nameof(Settings), new { storeId });
     }
 
+    [HttpPost("convert/run")]
+    public async Task<IActionResult> RunConvert(string storeId, CancellationToken cancellationToken)
+    {
+        var result = await convert.RunAsync(storeId, cancellationToken);
+        TempData.SetStatusMessageModel(new StatusMessageModel
+        {
+            Severity = result == ConvertRunResult.Ran ? StatusMessageModel.StatusSeverity.Success : StatusMessageModel.StatusSeverity.Warning,
+            Message = result switch
+            {
+                ConvertRunResult.Ran => "Convert ran. What it did is listed under Recent activity.",
+                ConvertRunResult.Paused => "Sweep & Sell is paused for this store; nothing was converted.",
+                ConvertRunResult.Disabled => "Turn on Convert at the exchange and save first.",
+                _ => "A convert run is already in progress. Try again in a moment."
+            }
+        });
+        return RedirectToAction(nameof(Settings), new { storeId });
+    }
+
+    static readonly Regex Ticker = new("^[A-Z0-9]{2,10}$", RegexOptions.CultureInvariant);
+
     /// <summary>Form errors, by field. Removing the key never depends on what was typed (or autofilled) in the key fields.</summary>
     public static IEnumerable<(string Field, string Error)> Validate(SweepSellSettingsViewModel vm, ExchangeRegistry exchanges)
     {
         if (!string.IsNullOrEmpty(vm.ExchangeId) && exchanges.Find(vm.ExchangeId) is null)
             yield return (nameof(vm.ExchangeId), "Pick an exchange from the list.");
+
+        var assets = Tickers(vm.ConvertAssets);
+        var target = Clean(vm.ConvertTarget)?.ToUpperInvariant();
+        if (assets.FirstOrDefault(a => !Ticker.IsMatch(a)) is { } badAsset)
+            yield return (nameof(vm.ConvertAssets), $"\"{badAsset}\" isn't a ticker. Use letters and digits, e.g. DOGE, LTC.");
+        if (target is null || !Ticker.IsMatch(target))
+            yield return (nameof(vm.ConvertTarget), "Enter the ticker to convert to, e.g. BTC.");
+        else if (assets.Contains(target))
+            yield return (nameof(vm.ConvertAssets), $"{target} is what you convert to; it can't also be converted.");
+        if (vm.ConvertIntervalMinutes is < ConvertSettings.MinIntervalMinutes or > ConvertSettings.MaxIntervalMinutes)
+            yield return (nameof(vm.ConvertIntervalMinutes),
+                $"Check between every {ConvertSettings.MinIntervalMinutes} and {ConvertSettings.MaxIntervalMinutes} minutes.");
+        if (vm.ConvertEnabled && assets.Count == 0)
+            yield return (nameof(vm.ConvertAssets), "List at least one coin to convert, or turn conversion off.");
+        if (vm.ConvertEnabled && string.IsNullOrWhiteSpace(vm.ExchangeId))
+            yield return (nameof(vm.ConvertEnabled), "Pick an exchange to convert on.");
+
         if (vm.ClearCredentials)
             yield break;
         var key = !string.IsNullOrWhiteSpace(vm.ApiKey);
@@ -123,7 +165,15 @@ public class UISweepSellController(SweepSellSettingsRepository repository, Secre
             Paused = vm.Paused,
             ExchangeId = string.IsNullOrWhiteSpace(vm.ExchangeId) ? null : vm.ExchangeId.Trim(),
             ProtectedApiKey = saved.ProtectedApiKey,
-            ProtectedApiSecret = saved.ProtectedApiSecret
+            ProtectedApiSecret = saved.ProtectedApiSecret,
+            Convert = new ConvertSettings
+            {
+                Enabled = vm.ConvertEnabled,
+                DryRun = vm.ConvertDryRun,
+                Assets = Tickers(vm.ConvertAssets),
+                TargetAsset = Clean(vm.ConvertTarget)?.ToUpperInvariant() ?? saved.Convert.TargetAsset,
+                IntervalMinutes = vm.ConvertIntervalMinutes
+            }
         };
         var key = Clean(vm.ApiKey);
         var secret = Clean(vm.ApiSecret);
@@ -142,15 +192,30 @@ public class UISweepSellController(SweepSellSettingsRepository repository, Secre
         return updated;
     }
 
-    SweepSellSettingsViewModel ToViewModel(SweepSellSettings settings, SweepSellSettingsViewModel? posted) => new()
+    SweepSellSettingsViewModel ToViewModel(SweepSellSettings settings, ConvertState state, SweepSellSettingsViewModel? posted) => new()
     {
         Paused = posted?.Paused ?? settings.Paused,
         ExchangeId = posted?.ExchangeId ?? settings.ExchangeId,
+        ConvertEnabled = posted?.ConvertEnabled ?? settings.Convert.Enabled,
+        ConvertDryRun = posted?.ConvertDryRun ?? settings.Convert.DryRun,
+        ConvertAssets = posted?.ConvertAssets ?? string.Join(", ", settings.Convert.Assets),
+        ConvertTarget = posted?.ConvertTarget ?? settings.Convert.TargetAsset,
+        ConvertIntervalMinutes = posted?.ConvertIntervalMinutes ?? settings.Convert.IntervalMinutes,
+        ConvertLastRun = state.LastRun,
+        ConvertPending = state.Pending.Count,
+        ConvertActivity = state.Activity,
         // Saved but undecryptable (e.g. restored on a server with other data-protection keys) counts as not saved.
         HasCredentials = protector.Credentials(settings) is not null,
         CredentialsUnreadable = settings.HasCredentials && protector.Credentials(settings) is null,
         Exchanges = exchanges.All.Select(e => new ExchangeOption(e.Id, e.Name, e.KeyPermissionsHelp)).ToList()
     };
+
+    /// <summary>"doge, LTC  xmr" → DOGE, LTC, XMR.</summary>
+    static List<string> Tickers(string? value) =>
+        (value ?? "").Split([',', ' ', ';', '\n', '\r', '\t'], StringSplitOptions.RemoveEmptyEntries)
+        .Select(t => t.ToUpperInvariant())
+        .Distinct()
+        .ToList();
 
     static string? Clean(string? value) => string.IsNullOrWhiteSpace(value) ? null : value.Trim();
 }
@@ -173,6 +238,27 @@ public class SweepSellSettingsViewModel
 
     [Display(Name = "Remove the saved key")]
     public bool ClearCredentials { get; set; }
+
+    [Display(Name = "Convert at the exchange")]
+    public bool ConvertEnabled { get; set; }
+
+    [Display(Name = "Dry run")]
+    public bool ConvertDryRun { get; set; } = true;
+
+    [Display(Name = "Coins to convert")]
+    public string? ConvertAssets { get; set; }
+
+    [Display(Name = "Convert to")]
+    public string? ConvertTarget { get; set; } = "BTC";
+
+    [Display(Name = "Check every (minutes)")]
+    public int ConvertIntervalMinutes { get; set; } = 15;
+
+    public DateTimeOffset? ConvertLastRun { get; set; }
+
+    public int ConvertPending { get; set; }
+
+    public List<ActivityEntry> ConvertActivity { get; set; } = [];
 
     public bool HasCredentials { get; set; }
 

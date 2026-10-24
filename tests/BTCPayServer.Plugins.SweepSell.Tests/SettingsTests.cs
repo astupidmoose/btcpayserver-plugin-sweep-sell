@@ -80,6 +80,48 @@ public class SettingsTests
     }
 
     [Fact]
+    public void ConvertSettingsAreParsedAndSaved()
+    {
+        var settings = UISweepSellController.Apply(Saved(), new SweepSellSettingsViewModel
+        {
+            ExchangeId = "kraken", ConvertEnabled = true, ConvertDryRun = false, ConvertAssets = "doge, LTC  doge;xmr", ConvertTarget = " btc ",
+            ConvertIntervalMinutes = 30
+        }, Protector);
+        Assert.True(settings.Convert.Enabled);
+        Assert.False(settings.Convert.DryRun);
+        Assert.Equal(["DOGE", "LTC", "XMR"], settings.Convert.Assets);
+        Assert.Equal("BTC", settings.Convert.TargetAsset);
+        Assert.Equal(30, settings.Convert.IntervalMinutes);
+        Assert.Equal("old-key", Protector.Credentials(settings)!.ApiKey); // the key is kept
+    }
+
+    [Theory]
+    [InlineData("DOGE", "BTC", 15, true, null)]
+    [InlineData("DO GE!", "BTC", 15, false, nameof(SweepSellSettingsViewModel.ConvertAssets))]
+    [InlineData("DOGE, BTC", "BTC", 15, false, nameof(SweepSellSettingsViewModel.ConvertAssets))]
+    [InlineData("DOGE", "", 15, false, nameof(SweepSellSettingsViewModel.ConvertTarget))]
+    [InlineData("DOGE", "BTC", 1, false, nameof(SweepSellSettingsViewModel.ConvertIntervalMinutes))]
+    [InlineData("", "BTC", 15, true, nameof(SweepSellSettingsViewModel.ConvertAssets))] // enabled with nothing to convert
+    public void ConvertSettingsAreValidated(string assets, string target, int interval, bool enabled, string? errorField)
+    {
+        var errors = UISweepSellController.Validate(new SweepSellSettingsViewModel
+        {
+            ExchangeId = "kraken", ConvertEnabled = enabled, ConvertAssets = assets, ConvertTarget = target, ConvertIntervalMinutes = interval
+        }, Exchanges).ToList();
+        if (errorField is null)
+            Assert.Empty(errors);
+        else
+            Assert.Contains(errors, e => e.Field == errorField);
+    }
+
+    [Fact]
+    public void ConvertNeedsAnExchange()
+    {
+        var errors = UISweepSellController.Validate(new SweepSellSettingsViewModel { ConvertEnabled = true, ConvertAssets = "DOGE" }, Exchanges);
+        Assert.Contains(errors, e => e.Field == nameof(SweepSellSettingsViewModel.ConvertEnabled));
+    }
+
+    [Fact]
     public void KeyWithoutAnExchangeIsNotSaved()
     {
         var settings = UISweepSellController.Apply(new SweepSellSettings(),

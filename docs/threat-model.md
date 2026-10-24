@@ -34,8 +34,8 @@ Mitigations marked *(planned)* arrive with the feature that needs them; the rest
 | Stolen exchange key used to withdraw | The plugin needs and requests no withdrawal permission; the setup guide says not to grant it |
 | Attacker changes a sweep destination | Settings need `CanModifyStoreSettings`; destination changes are written to the activity log *(planned)*; exchange deposit addresses are fetched from the exchange at send time, never typed in |
 | Forged or replayed trigger causes a sale | No external trigger exists; each sale is recorded under its invoice ID and never repeated *(planned)* |
-| Restart or retry sends or sells twice | Idempotency keys recorded before or atomically with each action *(planned)* |
-| Lost order response followed by a blind retry sells twice | Orders carry a client order ID derived from the business fact; `FindOrderAsync` looks up open and closed orders by it, and a retry is only allowed when it finds none (lookup in place, retry logic *(planned)*) |
+| Restart or retry sends or sells twice | Convert saves each live order as pending (with its client order ID) before sending it, and a store runs one job at a time; sweeps and hedges *(planned)* |
+| Lost order response followed by a blind retry sells twice | Orders carry a client order ID derived from the business fact; `FindOrderAsync` looks up open and closed orders by it. Convert sells nothing more while any pending order is unresolved, and only treats an order as never placed when the exchange still has no record of it after a grace period; hedge *(planned)* |
 | Malicious or malformed exchange response (huge amount, wrong address) | Amounts checked against the store's own balances and daily caps; addresses validated for the coin's network before sending *(planned)* |
 | Deposit sent without a required tag or memo is not credited | Connectors return the tag with the address; sweeps refuse destinations that need one *(planned)* |
 | Deposit below the exchange minimum is lost | Minimum deposits read from the exchange; sweeps wait until the exchange's share clears it (connector call in place, sweep logic *(planned)*) |

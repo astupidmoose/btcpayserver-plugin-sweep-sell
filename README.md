@@ -2,8 +2,14 @@
 
 Sweep your store's wallets to your exchange and sell what comes in, automatically.
 
-> Early development. The first version adds the exchange connection: the per-store settings page,
-> encrypted exchange keys and the Kraken connector. Sweeping, hedging and converting come next.
+> Early development. In place: the per-store settings page, encrypted exchange keys, the Kraken
+> connector and conversion at the exchange. Sweeping and hedging come next.
+
+## Features
+
+- **Convert at the exchange:** on a schedule, sell chosen coins (e.g. DOGE, LTC) into a target asset
+  (e.g. BTC) as soon as the balance clears the market's minimum order. Starts in dry run, where each
+  order is checked with the exchange but not placed. Every run is listed under Recent activity.
 
 ## Planned features
 
@@ -12,8 +18,6 @@ Sweep your store's wallets to your exchange and sell what comes in, automaticall
   destinations: a fixed address or an xpub, which gives a new address each time.
 - **Hedge on payment:** when an invoice reaches the status you pick (Processing or Settled), sell the
   BTC it brought in on your exchange straight away.
-- **Convert at the exchange:** on a schedule, sell chosen coins into a target asset as soon as the
-  balance clears the market's minimum order.
 - **Safety:** dry run for every feature, daily caps, a pause switch per store, and an activity log.
 
 ## Exchanges
