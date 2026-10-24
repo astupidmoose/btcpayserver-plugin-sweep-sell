@@ -13,7 +13,7 @@ public class PayoutTests
     static readonly SecretProtector Protector = new(new EphemeralDataProtectionProvider());
     static readonly DateTimeOffset Start = new(2030, 1, 1, 12, 0, 0, TimeSpan.Zero);
 
-    readonly MainSettings _main = new();
+    readonly MemoryRepository _main = new();
     readonly Payouts _payouts = new();
     readonly ManualClock _clock = new(Start);
     readonly FakeWithdrawals _exchange;
@@ -476,16 +476,6 @@ public class PayoutTests
     }
 
     static T Copy<T>(T s) => Newtonsoft.Json.JsonConvert.DeserializeObject<T>(Newtonsoft.Json.JsonConvert.SerializeObject(s))!;
-
-    sealed class MainSettings : ISweepSellRepository
-    {
-        public Dictionary<string, SweepSellSettings> Settings { get; } = new();
-        public Task<SweepSellSettings> GetAsync(string storeId) => Task.FromResult(Settings.TryGetValue(storeId, out var s) ? Copy(s) : new SweepSellSettings());
-        public Task SaveAsync(string storeId, SweepSellSettings settings) { Settings[storeId] = settings; return Task.CompletedTask; }
-        public Task<IReadOnlyDictionary<string, SweepSellSettings>> GetAllAsync() => Task.FromResult<IReadOnlyDictionary<string, SweepSellSettings>>(Settings);
-        public Task<ConvertState> GetConvertStateAsync(string storeId) => Task.FromResult(new ConvertState());
-        public Task SaveConvertStateAsync(string storeId, ConvertState state) => Task.CompletedTask;
-    }
 
     sealed class Payouts : IPayoutRepository
     {

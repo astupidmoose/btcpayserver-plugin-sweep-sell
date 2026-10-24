@@ -38,8 +38,6 @@ covers the plugin, not BTCPay itself.
 
 ## Threats and mitigations
 
-Mitigations marked *(planned)* arrive with the feature that needs them; the rest are in place.
-
 | Threat | Mitigation |
 | --- | --- |
 | Database dump or backup reveals exchange keys | Keys encrypted with the data-protection key ring, which is stored apart from the database |
