@@ -13,6 +13,7 @@ using BTCPayServer.Client;
 using BTCPayServer.Plugins.SweepSell.Conversion;
 using BTCPayServer.Plugins.SweepSell.Exchanges;
 using BTCPayServer.Plugins.SweepSell.Hedging;
+using BTCPayServer.Plugins.SweepSell.Payout;
 using BTCPayServer.Plugins.SweepSell.Settings;
 using BTCPayServer.Plugins.SweepSell.Sweeping;
 using BTCPayServer.Plugins.Wallets;
@@ -25,7 +26,7 @@ namespace BTCPayServer.Plugins.SweepSell.Controllers;
 [Route("stores/{storeId}/sweep-sell")]
 [Authorize(AuthenticationSchemes = AuthenticationSchemes.Cookie)]
 [Authorize(Policy = Policies.CanModifyStoreSettings, AuthenticationSchemes = AuthenticationSchemes.Cookie)]
-public class UISweepSellController(ISweepSellRepository repository, SecretProtector protector, ExchangeRegistry exchanges,
+public class UISweepSellController(ISweepSellRepository repository, IPayoutRepository payouts, SecretProtector protector, ExchangeRegistry exchanges,
     ConvertService convert, SweepService sweep, IStoreWallets wallets, HedgeService hedge, IAuthorizationService authorization, TimeProvider clock,
     ILogger<UISweepSellController> logger)
     : Controller
@@ -93,7 +94,7 @@ public class UISweepSellController(ISweepSellRepository repository, SecretProtec
             if (!canSpend && ChangesSweeps(current, next))
                 return (current, next, NoSpendPermission);
             var pending = (await repository.GetConvertStateAsync(storeId)).Pending.Concat((await repository.GetHedgeStateAsync(storeId)).Pending).ToList();
-            if (KeyChanges(current, next) && PendingConflict(next, pending, protector) is { } error)
+            if (KeyChanges(current, next) && (PayoutKeyConflict(next, await payouts.GetAsync(storeId), protector) ?? PendingConflict(next, pending, protector)) is { } error)
                 return (current, next, error);
             await repository.SaveAsync(storeId, next);
             return (current, next, (string?)null);
@@ -283,6 +284,12 @@ public class UISweepSellController(ISweepSellRepository repository, SecretProtec
     public static bool KeyChanges(SweepSellSettings saved, SweepSellSettings updated) =>
         updated.HasCredentials && (updated.ExchangeId != saved.ExchangeId || updated.ProtectedApiKey != saved.ProtectedApiKey ||
                                    updated.ProtectedApiSecret != saved.ProtectedApiSecret);
+
+    /// <summary>The payout key can withdraw, so it may never be saved as the trading key too. Null when the save is fine.</summary>
+    public static string? PayoutKeyConflict(SweepSellSettings updated, PayoutSettings payout, SecretProtector protector) =>
+        UISweepSellPayoutController.SameKey(payout, updated, protector)
+            ? "This is the store's payout key, which can withdraw. Trading needs its own key, without Withdraw Funds."
+            : null;
 
     /// <summary>
     /// A pending order can only be looked up with the exchange and key it was sent with, so a save may put only that key

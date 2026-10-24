@@ -111,6 +111,17 @@ public class PayoutSettingsTests
     }
 
     [Fact]
+    public void ThePayoutKeyCantBeSavedAsTheTradingKeyEither()
+    {
+        var payout = Saved();
+        var sameKey = new SweepSellSettings { ExchangeId = "kraken", ProtectedApiKey = payout.ProtectedApiKey, ProtectedApiSecret = Protector.Protect("s") };
+        var otherKey = new SweepSellSettings { ExchangeId = "kraken", ProtectedApiKey = Protector.Protect("trading-key"), ProtectedApiSecret = Protector.Protect("s") };
+        Assert.NotNull(UISweepSellController.PayoutKeyConflict(sameKey, payout, Protector));
+        Assert.Null(UISweepSellController.PayoutKeyConflict(otherKey, payout, Protector));
+        Assert.Null(UISweepSellController.PayoutKeyConflict(sameKey, new PayoutSettings(), Protector)); // no payout key
+    }
+
+    [Fact]
     public void PendingWithdrawalsKeepTheirKeyAndAsset()
     {
         var saved = Saved();

@@ -177,9 +177,14 @@ public class UISweepSellPayoutController(IPayoutRepository payouts, ISweepSellRe
 
     /// <summary>The payout key must not be the trading key: one key must never be able to both trade and withdraw.</summary>
     public static string? SameKeyConflict(PayoutSettings updated, SweepSellSettings settings, SecretProtector protector) =>
-        protector.Credentials(updated) is { } payoutKey && protector.Credentials(settings) is { } trading && trading.ApiKey == payoutKey.ApiKey
-            ? "This is the store's trading key. Payout needs its own key, with only Query Funds and Withdraw Funds."
-            : null;
+        SameKey(updated, settings, protector) ? "This is the store's trading key. Payout needs its own key, with only Query Funds and Withdraw Funds." : null;
+
+    /// <summary>
+    /// Whether the payout and trading settings hold the same key. Checked on both pages' saves, so no single key is ever
+    /// saved for both trading and withdrawing, whichever is saved first.
+    /// </summary>
+    public static bool SameKey(PayoutSettings payout, SweepSellSettings settings, SecretProtector protector) =>
+        protector.Credentials(payout) is { } payoutKey && protector.Credentials(settings) is { } trading && trading.ApiKey == payoutKey.ApiKey;
 
     /// <summary>
     /// A pending withdrawal can only be found with the exchange, key and asset it was sent with, so while one is pending a
