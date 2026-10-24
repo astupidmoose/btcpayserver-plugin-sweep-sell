@@ -32,8 +32,13 @@ public class SecretProtector(IDataProtectionProvider provider)
         }
     }
 
-    public ExchangeCredentials? Credentials(SweepSellSettings settings) =>
-        Unprotect(settings.ProtectedApiKey) is { } key && Unprotect(settings.ProtectedApiSecret) is { } secret
+    public ExchangeCredentials? Credentials(SweepSellSettings settings) => Credentials(settings.ProtectedApiKey, settings.ProtectedApiSecret);
+
+    /// <summary>The withdraw-only payout key.</summary>
+    public ExchangeCredentials? Credentials(PayoutSettings settings) => Credentials(settings.ProtectedApiKey, settings.ProtectedApiSecret);
+
+    ExchangeCredentials? Credentials(string? protectedKey, string? protectedSecret) =>
+        Unprotect(protectedKey) is { } key && Unprotect(protectedSecret) is { } secret
             ? new ExchangeCredentials(key, secret)
             : null;
 }

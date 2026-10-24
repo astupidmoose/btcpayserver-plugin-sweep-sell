@@ -1,0 +1,205 @@
+@using BTCPayServer.Abstractions.Models
+@using BTCPayServer.Plugins.SweepSell.Controllers
+@using BTCPayServer.Plugins.SweepSell.Conversion
+@using BTCPayServer.Plugins.SweepSell.Settings
+@model PayoutSettingsViewModel
+@{
+    ViewData.SetLayoutModel(new LayoutModel("SWEEP-SELL", "Sweep & Sell: payout"));
+    Layout = "_Layout";
+    var storeId = Context.GetRouteValue("storeId");
+}
+
+<partial name="_StatusMessage" />
+
+<div class="sticky-header">
+    <h2>@ViewData["Title"]</h2>
+</div>
+
+<div class="row">
+    <div class="col-xl-8 col-xxl-constrain">
+        <p class="text-secondary">
+            Withdraws one asset from your exchange (e.g. the currency you convert to) to a withdrawal destination you already
+            saved and verified in your exchange account, such as your bank account. Sweep &amp; Sell can't add or change a
+            destination: you name one that is already there. It uses its own key, so the
+            <a asp-controller="UISweepSell" asp-action="Settings" asp-route-storeId="@storeId">trading key</a> never needs to withdraw.
+            The store's pause switch stops payout too.
+        </p>
+        @if (!ViewContext.ModelState.IsValid)
+        {
+            <div asp-validation-summary="All" class="text-danger"></div>
+        }
+        <form method="post" asp-action="Payout" asp-route-storeId="@storeId" novalidate>
+            <div class="d-flex align-items-center mb-3">
+                <input asp-for="Enabled" type="checkbox" class="btcpay-toggle me-3" />
+                <label asp-for="Enabled" class="form-check-label"></label>
+            </div>
+            <span asp-validation-for="Enabled" class="text-danger"></span>
+            <div class="d-flex align-items-center mb-3">
+                <input asp-for="DryRun" type="checkbox" class="btcpay-toggle me-3" />
+                <div>
+                    <label asp-for="DryRun" class="form-check-label"></label>
+                    <div class="form-text mt-0">Each withdrawal is quoted by the exchange but not sent. Turn this off only when the dry runs look right.</div>
+                </div>
+            </div>
+
+            <h4 class="mt-4 mb-2">Exchange and payout key</h4>
+            <div class="form-group">
+                <label asp-for="ExchangeId" class="form-label"></label>
+                <select asp-for="ExchangeId" class="form-select">
+                    <option value="">None</option>
+                    @foreach (var exchange in Model.Exchanges)
+                    {
+                        <option value="@exchange.Id">@exchange.Name</option>
+                    }
+                </select>
+                <span asp-validation-for="ExchangeId" class="text-danger"></span>
+                @foreach (var exchange in Model.Exchanges)
+                {
+                    <div class="form-text">@exchange.Name: @exchange.KeyPermissionsHelp</div>
+                }
+            </div>
+            @if (Model.CredentialsUnreadable)
+            {
+                <div class="alert alert-warning" role="alert">
+                    The saved payout key can't be read on this server (its encryption keys changed, e.g. after a restore). Enter it again.
+                </div>
+            }
+            <div class="form-group">
+                <label asp-for="ApiKey" class="form-label"></label>
+                <input asp-for="ApiKey" type="password" class="form-control" autocomplete="off" spellcheck="false"
+                       placeholder="@(Model.HasCredentials ? "Saved. Leave empty to keep it." : "")" value="" />
+            </div>
+            <div class="form-group">
+                <label asp-for="ApiSecret" class="form-label"></label>
+                <input asp-for="ApiSecret" type="password" class="form-control" autocomplete="off" spellcheck="false"
+                       placeholder="@(Model.HasCredentials ? "Saved. Leave empty to keep it." : "")" value="" />
+                <div class="form-text">Stored encrypted on this server and never shown again. Changing the exchange removes the saved key.</div>
+                <span asp-validation-for="ApiSecret" class="text-danger"></span>
+            </div>
+            @if (Model.HasCredentials)
+            {
+                <div class="form-check mb-3">
+                    <input asp-for="ClearCredentials" type="checkbox" class="form-check-input" />
+                    <label asp-for="ClearCredentials" class="form-check-label"></label>
+                </div>
+            }
+
+            <h4 class="mt-4 mb-2">What to withdraw</h4>
+            <div class="form-group">
+                <label asp-for="Asset" class="form-label"></label>
+                <input asp-for="Asset" class="form-control" placeholder="USD" spellcheck="false" />
+                <span asp-validation-for="Asset" class="text-danger"></span>
+            </div>
+            <div class="form-group">
+                <label asp-for="Destination" class="form-label"></label>
+                <input asp-for="Destination" class="form-control" spellcheck="false" />
+                <div class="form-text">Exactly as your exchange shows it. Test the key to see the destinations your exchange lists.</div>
+                <span asp-validation-for="Destination" class="text-danger"></span>
+            </div>
+            <div class="form-group">
+                <label asp-for="Minimum" class="form-label"></label>
+                <input asp-for="Minimum" type="number" step="any" min="0" class="form-control" />
+                <div class="form-text">In the asset. Less waits on the exchange until more arrives. The exchange's own minimum applies too.</div>
+                <span asp-validation-for="Minimum" class="text-danger"></span>
+            </div>
+            <div class="form-group">
+                <label asp-for="KeepBalance" class="form-label"></label>
+                <input asp-for="KeepBalance" type="number" step="any" min="0" class="form-control" />
+                <div class="form-text">In the asset. Never withdrawn.</div>
+                <span asp-validation-for="KeepBalance" class="text-danger"></span>
+            </div>
+            <div class="form-group">
+                <label asp-for="DailyCap" class="form-label"></label>
+                <input asp-for="DailyCap" type="number" step="any" min="0" class="form-control" />
+                <div class="form-text">The most to withdraw per day (UTC), fees included, in the asset. Required.</div>
+                <span asp-validation-for="DailyCap" class="text-danger"></span>
+            </div>
+            <div class="form-group">
+                <label asp-for="MaxFee" class="form-label"></label>
+                <input asp-for="MaxFee" type="number" step="any" min="0" class="form-control" />
+                <div class="form-text">In the asset. A higher fee waits, and the exchange is told to refuse a withdrawal that would cost more. 0 allows only free withdrawals.</div>
+                <span asp-validation-for="MaxFee" class="text-danger"></span>
+            </div>
+            <div class="form-group">
+                <label asp-for="IntervalMinutes" class="form-label"></label>
+                <input asp-for="IntervalMinutes" type="number" min="@PayoutSettings.MinIntervalMinutes" max="@PayoutSettings.MaxIntervalMinutes" class="form-control" />
+                <div class="form-text">At most one withdrawal per check. 1440 is once a day.</div>
+                <span asp-validation-for="IntervalMinutes" class="text-danger"></span>
+            </div>
+
+            <button type="submit" class="btn btn-primary" id="SavePayout">Save</button>
+        </form>
+        @if (Model.HasCredentials)
+        {
+            <form method="post" asp-action="TestCredentials" asp-route-storeId="@storeId" class="mt-3">
+                <button type="submit" class="btn btn-secondary" id="TestPayout">Test the payout key</button>
+                <div class="form-text">Checks it can query funds and withdraw, that it can't trade, and lists your saved destinations. Nothing is withdrawn.</div>
+            </form>
+        }
+        @if (Model.Enabled)
+        {
+            <form method="post" asp-action="RunPayout" asp-route-storeId="@storeId" class="mt-3">
+                <button type="submit" class="btn btn-secondary" id="RunPayout">Pay out now</button>
+                <div class="form-text">Runs payout once with the saved settings@(Model.DryRun ? " (dry run: nothing is withdrawn)" : "").</div>
+            </form>
+        }
+
+        <h4 class="mt-5 mb-2">Payout activity</h4>
+        <p class="text-secondary">Last payout run: @(Model.LastRun?.ToString("u") ?? "never").</p>
+        @if (Model.Pending.Count > 0)
+        {
+            <h5 class="mt-3">Pending withdrawals</h5>
+            <p class="text-warning">
+                These withdrawals got no clear answer from the exchange. Each run looks for them in the exchange's withdrawals; nothing more
+                is withdrawn until they are found, and they are never sent again automatically. Remove one only after checking in your
+                exchange whether it went through.
+            </p>
+            <div class="table-responsive">
+                <table class="table">
+                    <thead>
+                        <tr><th>Sent (UTC)</th><th>Withdrawal</th><th></th></tr>
+                    </thead>
+                    <tbody>
+                        @foreach (var pending in Model.Pending)
+                        {
+                            <tr>
+                                <td class="text-nowrap">@pending.SentAt.ToString("u")</td>
+                                <td>@pending.Amount @pending.Asset to "@pending.Destination"</td>
+                                <td>
+                                    <form method="post" asp-action="RemovePending" asp-route-storeId="@storeId" asp-route-id="@pending.Id">
+                                        <button type="submit" class="btn btn-sm btn-outline-danger">Remove</button>
+                                    </form>
+                                </td>
+                            </tr>
+                        }
+                    </tbody>
+                </table>
+            </div>
+        }
+        @if (Model.Activity.Count == 0)
+        {
+            <p class="text-secondary">Nothing yet.</p>
+        }
+        else
+        {
+            <div class="table-responsive">
+                <table class="table table-hover">
+                    <thead>
+                        <tr><th>Time (UTC)</th><th>Asset</th><th>Result</th><th>Details</th></tr>
+                    </thead>
+                    <tbody>
+                        @foreach (var entry in Model.Activity)
+                        {
+                            <tr>
+                                <td class="text-nowrap">@entry.At.ToString("u")</td>
+                                <td>@(entry.Asset ?? "")</td>
+                                <td class="@(entry.Outcome == ActivityOutcome.Failed ? "text-danger" : entry.Outcome == ActivityOutcome.Sent ? "text-success" : "")">@entry.Outcome</td>
+                                <td>@entry.Message</td>
+                            </tr>
+                        }
+                    </tbody>
+                </table>
+            </div>
+        }
+    </div>
+</div>

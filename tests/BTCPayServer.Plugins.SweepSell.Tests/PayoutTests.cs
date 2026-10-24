@@ -1,0 +1,463 @@
+using BTCPayServer.Plugins.SweepSell.Conversion;
+using BTCPayServer.Plugins.SweepSell.Exchanges;
+using BTCPayServer.Plugins.SweepSell.Payout;
+using BTCPayServer.Plugins.SweepSell.Settings;
+using Microsoft.AspNetCore.DataProtection;
+using Microsoft.Extensions.Logging.Abstractions;
+
+namespace BTCPayServer.Plugins.SweepSell.Tests;
+
+public class PayoutTests
+{
+    const string StoreId = "test-store";
+    static readonly SecretProtector Protector = new(new EphemeralDataProtectionProvider());
+    static readonly DateTimeOffset Start = new(2030, 1, 1, 12, 0, 0, TimeSpan.Zero);
+
+    readonly MainSettings _main = new();
+    readonly Payouts _payouts = new();
+    readonly ManualClock _clock = new(Start);
+    readonly FakeWithdrawals _exchange;
+    static CancellationToken Ct => TestContext.Current.CancellationToken;
+
+    public PayoutTests() => _exchange = new FakeWithdrawals(_clock);
+
+    PayoutService Service() =>
+        new(_payouts, _main, Protector, new WithdrawalRegistry([_exchange]), _clock, NullLogger<PayoutService>.Instance);
+
+    void Configure(bool dryRun = false, bool paused = false, bool enabled = true, decimal minimum = 50m, decimal keep = 0m, decimal cap = 1000m,
+        decimal maxFee = 2m, string payoutKey = "test-payout-key")
+    {
+        _main.Settings[StoreId] = new SweepSellSettings
+        {
+            Paused = paused,
+            ExchangeId = FakeWithdrawals.ExchangeId,
+            ProtectedApiKey = Protector.Protect("test-trading-key"),
+            ProtectedApiSecret = Protector.Protect("test-trading-secret")
+        };
+        _payouts.Settings[StoreId] = new PayoutSettings
+        {
+            Enabled = enabled,
+            DryRun = dryRun,
+            ExchangeId = FakeWithdrawals.ExchangeId,
+            ProtectedApiKey = Protector.Protect(payoutKey),
+            ProtectedApiSecret = Protector.Protect("test-payout-secret"),
+            Asset = "USD",
+            Destination = "test-bank",
+            Minimum = minimum,
+            KeepBalance = keep,
+            DailyCap = cap,
+            MaxFee = maxFee,
+            IntervalMinutes = 1440
+        };
+    }
+
+    PayoutState State => _payouts.States[StoreId];
+
+    [Fact]
+    public async Task WithdrawsTheBalanceToTheSavedDestination()
+    {
+        Configure(keep: 20m);
+        _exchange.Balance = 320.456m;
+        Assert.Equal(PayoutRunResult.Ran, await Service().RunAsync(StoreId, Ct));
+
+        var withdrawal = Assert.Single(_exchange.Withdrawals);
+        Assert.Equal(("USD", "test-bank", 300.45m, 2m), withdrawal); // rounded down, the amount to keep left, fee capped
+        Assert.Empty(State.Pending);
+        Assert.Equal(300.45m, State.WithdrawnOn(_clock.GetUtcNow(), "USD"));
+        Assert.Equal(["REF-1"], State.Known);
+        var sent = State.Activity[0];
+        Assert.Equal(ActivityOutcome.Sent, sent.Outcome);
+        Assert.Contains("REF-1", sent.Message);
+        Assert.Contains("\"test-bank\"", sent.Message);
+    }
+
+    [Fact]
+    public async Task DryRunQuotesButNeverWithdraws()
+    {
+        Configure(dryRun: true);
+        _exchange.Balance = 500m;
+        await Service().RunAsync(StoreId, Ct);
+        Assert.Empty(_exchange.Withdrawals);
+        Assert.Single(_exchange.Quotes);
+        Assert.Equal(ActivityOutcome.DryRun, State.Activity[0].Outcome);
+        Assert.Contains("would withdraw 500 USD", State.Activity[0].Message);
+        Assert.Equal(0m, State.WithdrawnOn(_clock.GetUtcNow(), "USD"));
+    }
+
+    [Fact]
+    public async Task PausedOrDisabledDoesNothing()
+    {
+        Configure(paused: true);
+        _exchange.Balance = 500m;
+        Assert.Equal(PayoutRunResult.Paused, await Service().RunAsync(StoreId, Ct));
+        Configure(enabled: false);
+        Assert.Equal(PayoutRunResult.Disabled, await Service().RunAsync(StoreId, Ct));
+        Assert.Empty(_exchange.Calls);
+    }
+
+    [Fact]
+    public async Task RefusesToRunWithTheTradingKey()
+    {
+        Configure(payoutKey: "test-trading-key");
+        _exchange.Balance = 500m;
+        await Service().RunAsync(StoreId, Ct);
+        Assert.Empty(_exchange.Calls);
+        Assert.Equal(ActivityOutcome.Failed, State.Activity[0].Outcome);
+        Assert.Contains("trading key", State.Activity[0].Message);
+    }
+
+    [Theory]
+    [InlineData(40, 50, "Waiting until at least 50 USD")] // below the owner's minimum
+    [InlineData(100, 0.01, "below Fake Exchange's minimum withdrawal of 10")] // 9 would arrive after the fee
+    public async Task SmallAmountsWait(decimal balance, decimal minimum, string message)
+    {
+        Configure(minimum: minimum);
+        _exchange.Balance = balance;
+        _exchange.Minimum = balance == 100 ? 100m : 10m;
+        await Service().RunAsync(StoreId, Ct);
+        Assert.Empty(_exchange.Withdrawals);
+        Assert.Equal(ActivityOutcome.Waiting, State.Activity[0].Outcome);
+        Assert.Contains(balance == 100 ? "below Fake Exchange's minimum withdrawal of 100" : message, State.Activity[0].Message);
+    }
+
+    [Fact]
+    public async Task FeeAboveTheHighestFeeWaits()
+    {
+        Configure(maxFee: 0m);
+        _exchange.Balance = 500m;
+        await Service().RunAsync(StoreId, Ct);
+        Assert.Empty(_exchange.Withdrawals);
+        Assert.Equal(ActivityOutcome.Waiting, State.Activity[0].Outcome);
+        Assert.Contains("above your highest fee of 0", State.Activity[0].Message);
+    }
+
+    [Fact]
+    public async Task DailyCapLimitsEachDay()
+    {
+        Configure(cap: 300m);
+        _exchange.Balance = 500m;
+        await Service().RunAsync(StoreId, Ct);
+        Assert.Equal(300m, _exchange.Withdrawals.Single().Amount);
+        _exchange.Settle(); // the first one is done, so nothing is held back for it
+
+        _clock.Advance(TimeSpan.FromHours(1));
+        await Service().RunAsync(StoreId, Ct);
+        Assert.Single(_exchange.Withdrawals);
+        Assert.Contains("cap of 300 USD is reached", State.Activity[0].Message);
+
+        _clock.Advance(TimeSpan.FromDays(1));
+        await Service().RunAsync(StoreId, Ct);
+        Assert.Equal([300m, 200m], _exchange.Withdrawals.Select(w => w.Amount));
+    }
+
+    [Fact]
+    public async Task WithdrawalsInProgressAreLeftOnTheExchange()
+    {
+        // A withdrawal still in progress may not have left the balance yet, so its amount is never paid out again.
+        Configure(minimum: 10m);
+        _exchange.Balance = 500m;
+        _exchange.Records.Add(new WithdrawalRecord("OTHER-1", "test-bank", 149m, 1m, Start.AddDays(-1), WithdrawalStatus.InProgress));
+        _exchange.Records.Add(new WithdrawalRecord("OTHER-2", "test-bank", 999m, 1m, Start.AddDays(-2), WithdrawalStatus.Succeeded));
+        _exchange.Records.Add(new WithdrawalRecord("OTHER-3", "test-bank", 999m, 1m, Start.AddDays(-2), WithdrawalStatus.Failed));
+        await Service().RunAsync(StoreId, Ct);
+        Assert.Equal(350m, _exchange.Withdrawals.Single().Amount);
+    }
+
+    [Fact]
+    public async Task ExchangeLimitIsRequotedAtTheLimit()
+    {
+        Configure();
+        _exchange.Balance = 500m;
+        _exchange.Limit = 200m;
+        await Service().RunAsync(StoreId, Ct);
+        Assert.Equal([500m, 200m], _exchange.Quotes);
+        Assert.Equal(200m, _exchange.Withdrawals.Single().Amount);
+    }
+
+    [Fact]
+    public async Task RefusedWithdrawalIsNotPendingOrCounted()
+    {
+        Configure();
+        _exchange.Balance = 500m;
+        _exchange.WithdrawError = new ExchangeException("Kraken: EFunding:Unknown withdraw key", rejected: true);
+        await Service().RunAsync(StoreId, Ct);
+        Assert.Empty(State.Pending);
+        Assert.Equal(0m, State.WithdrawnOn(_clock.GetUtcNow(), "USD"));
+        Assert.Contains("Nothing was withdrawn", State.Activity[0].Message);
+    }
+
+    [Fact]
+    public async Task LostWithdrawalIsNeverSentAgainBlindly()
+    {
+        Configure();
+        _exchange.Balance = 500m;
+        _exchange.WithdrawError = new HttpRequestException("timeout"); // nothing reached the exchange, but that isn't known
+        await Service().RunAsync(StoreId, Ct);
+        var pending = Assert.Single(State.Pending);
+        Assert.Equal((500m, 499m, "test-bank"), (pending.Amount, pending.NetAmount, pending.Destination));
+        Assert.Contains("never retried automatically", State.Activity[0].Message);
+
+        _exchange.WithdrawError = null;
+        _clock.Advance(TimeSpan.FromMinutes(1));
+        await Service().RunAsync(StoreId, Ct);
+        Assert.Equal(ActivityOutcome.Waiting, State.Activity[0].Outcome); // not listed yet, within the grace period
+
+        _clock.Advance(PayoutService.PendingGrace);
+        await Service().RunAsync(StoreId, Ct);
+        Assert.Single(_exchange.Withdrawals); // only the first attempt
+        Assert.Single(State.Pending);
+        Assert.Equal(ActivityOutcome.Failed, State.Activity[0].Outcome);
+        Assert.Contains("remove it under Pending withdrawals", State.Activity[0].Message);
+
+        // The owner checks the exchange and removes it: it counts in full today, and payout resumes.
+        Assert.True(await Service().RemovePendingAsync(StoreId, pending.Id, Ct));
+        Assert.Empty(State.Pending);
+        Assert.Equal(500m, State.WithdrawnOn(_clock.GetUtcNow(), "USD"));
+        Assert.False(await Service().RemovePendingAsync(StoreId, pending.Id, Ct));
+    }
+
+    [Fact]
+    public async Task LostWithdrawalFoundOnTheExchangeIsCountedOnce()
+    {
+        Configure(minimum: 10m);
+        _exchange.Balance = 500m;
+        _exchange.LoseResponse = true; // it went through; only the answer was lost
+        await Service().RunAsync(StoreId, Ct);
+        Assert.Single(State.Pending);
+        Assert.Equal(0m, _exchange.Balance);
+
+        _exchange.LoseResponse = false;
+        _exchange.Balance = 100m; // more arrived meanwhile
+        _clock.Advance(TimeSpan.FromMinutes(1));
+        await Service().RunAsync(StoreId, Ct);
+        Assert.Empty(State.Pending);
+        Assert.Contains("REF-1", State.Known);
+        Assert.Contains(State.Activity, a => a.Outcome == ActivityOutcome.Sent && a.Message.StartsWith("Found the earlier withdrawal"));
+        // The found one is still in progress, so its amount stays out of what can be sent: nothing more goes out yet.
+        Assert.Single(_exchange.Withdrawals);
+        Assert.Equal(500m, State.WithdrawnOn(_clock.GetUtcNow(), "USD"));
+    }
+
+    [Fact]
+    public async Task LostWithdrawalThatFailedIsNotCounted()
+    {
+        Configure();
+        _exchange.Balance = 500m;
+        _exchange.LoseResponse = true;
+        await Service().RunAsync(StoreId, Ct);
+        _exchange.LoseResponse = false;
+        _exchange.Records[0] = _exchange.Records[0] with { Status = WithdrawalStatus.Failed };
+        _exchange.Balance = 0m;
+        await Service().RunAsync(StoreId, Ct);
+        Assert.Empty(State.Pending);
+        Assert.Equal(0m, State.WithdrawnOn(_clock.GetUtcNow(), "USD"));
+        Assert.Contains(State.Activity, a => a.Message.Contains("failed or was cancelled"));
+    }
+
+    [Fact]
+    public async Task SeveralMatchingWithdrawalsNeedTheOwner()
+    {
+        Configure();
+        _exchange.Balance = 500m;
+        _exchange.LoseResponse = true;
+        await Service().RunAsync(StoreId, Ct);
+        _exchange.LoseResponse = false;
+        // Someone also withdrew the same amount by hand at the same time.
+        _exchange.Records.Add(_exchange.Records[0] with { Reference = "HAND-1" });
+        await Service().RunAsync(StoreId, Ct);
+        Assert.Single(State.Pending);
+        Assert.Contains("Several withdrawals", State.Activity[0].Message);
+    }
+
+    [Fact]
+    public void MatchingUsesAmountTimeDestinationAndSkipsKnownReferences()
+    {
+        var pending = new PendingWithdrawal { Destination = "test-bank", Amount = 100m, NetAmount = 99m, Fee = 1m, SentAt = Start };
+        var state = new PayoutState();
+        var record = new WithdrawalRecord("R1", "test-bank", 99m, 1m, Start.AddSeconds(5), WithdrawalStatus.InProgress);
+        Assert.True(PayoutService.Matches(record, pending, state)); // net amount
+        Assert.True(PayoutService.Matches(record with { Amount = 100m }, pending, state)); // gross amount
+        Assert.True(PayoutService.Matches(record with { Destination = null }, pending, state)); // destination not reported
+        Assert.False(PayoutService.Matches(record with { Amount = 98m }, pending, state));
+        Assert.False(PayoutService.Matches(record with { Destination = "test-other" }, pending, state));
+        Assert.False(PayoutService.Matches(record with { RequestedAt = Start - TimeSpan.FromMinutes(3) }, pending, state));
+        Assert.False(PayoutService.Matches(record with { RequestedAt = Start + TimeSpan.FromHours(2) }, pending, state));
+        state.Remember("R1");
+        Assert.False(PayoutService.Matches(record, pending, state));
+    }
+
+    [Fact]
+    public async Task PendingFromAnotherKeyBlocksPayout()
+    {
+        Configure();
+        _exchange.Balance = 500m;
+        _payouts.States[StoreId] = new PayoutState
+        {
+            Pending = [new PendingWithdrawal { Id = Guid.NewGuid(), ExchangeId = FakeWithdrawals.ExchangeId, KeyFingerprint = "0000000000000000", Asset = "USD", Amount = 1m, SentAt = Start }]
+        };
+        await Service().RunAsync(StoreId, Ct);
+        Assert.Empty(_exchange.Withdrawals);
+        Assert.Contains("different payout key", State.Activity[0].Message);
+    }
+
+    [Theory]
+    [InlineData("pause")]
+    [InlineData("destination")]
+    [InlineData("dry run")]
+    [InlineData("key")]
+    public async Task SettingsSavedDuringTheRunApplyBeforeWithdrawing(string change)
+    {
+        Configure();
+        _exchange.Balance = 500m;
+        _exchange.OnQuote = () =>
+        {
+            switch (change)
+            {
+                case "pause": _main.Settings[StoreId].Paused = true; break;
+                case "destination": _payouts.Settings[StoreId].Destination = "test-other"; break;
+                case "dry run": _payouts.Settings[StoreId].DryRun = true; break;
+                case "key": _payouts.Settings[StoreId].ProtectedApiSecret = Protector.Protect("test-new-secret"); break;
+            }
+        };
+        await Service().RunAsync(StoreId, Ct);
+        Assert.Empty(_exchange.Withdrawals);
+        Assert.Empty(State.Pending);
+        Assert.Contains("settings changed during the run", State.Activity[0].Message);
+    }
+
+    [Fact]
+    public async Task ChangesOfWhereFundsGoAreLogged()
+    {
+        Configure();
+        var saved = _payouts.Settings[StoreId];
+        var updated = new PayoutSettings
+        {
+            ExchangeId = saved.ExchangeId, ProtectedApiKey = Protector.Protect("test-other-key"), ProtectedApiSecret = saved.ProtectedApiSecret,
+            Asset = "EUR", Destination = "test-other"
+        };
+        await Service().RecordChangesAsync(StoreId, saved, updated, Ct);
+        var entry = Assert.Single(State.Activity);
+        Assert.Equal(ActivityOutcome.Changed, entry.Outcome);
+        Assert.Contains("a new payout key was saved", entry.Message);
+        Assert.Contains("asset from USD to EUR", entry.Message);
+        Assert.Contains("destination from \"test-bank\" to \"test-other\"", entry.Message);
+        Assert.DoesNotContain("test-other-key", entry.Message);
+    }
+
+    [Fact]
+    public async Task RunsOnlyWhenTheIntervalHasPassed()
+    {
+        Configure(dryRun: true);
+        _exchange.Balance = 500m;
+        await Service().RunDueAsync(Ct);
+        await Service().RunDueAsync(Ct);
+        Assert.Single(_exchange.Quotes);
+        _clock.Advance(TimeSpan.FromDays(1));
+        await Service().RunDueAsync(Ct);
+        Assert.Equal(2, _exchange.Quotes.Count);
+    }
+
+    sealed class ManualClock(DateTimeOffset now) : TimeProvider
+    {
+        DateTimeOffset _now = now;
+        public override DateTimeOffset GetUtcNow() => _now;
+        public void Advance(TimeSpan by) => _now += by;
+    }
+
+    static T Copy<T>(T s) => Newtonsoft.Json.JsonConvert.DeserializeObject<T>(Newtonsoft.Json.JsonConvert.SerializeObject(s))!;
+
+    sealed class MainSettings : ISweepSellRepository
+    {
+        public Dictionary<string, SweepSellSettings> Settings { get; } = new();
+        public Task<SweepSellSettings> GetAsync(string storeId) => Task.FromResult(Settings.TryGetValue(storeId, out var s) ? Copy(s) : new SweepSellSettings());
+        public Task SaveAsync(string storeId, SweepSellSettings settings) { Settings[storeId] = settings; return Task.CompletedTask; }
+        public Task<IReadOnlyDictionary<string, SweepSellSettings>> GetAllAsync() => Task.FromResult<IReadOnlyDictionary<string, SweepSellSettings>>(Settings);
+        public Task<ConvertState> GetConvertStateAsync(string storeId) => Task.FromResult(new ConvertState());
+        public Task SaveConvertStateAsync(string storeId, ConvertState state) => Task.CompletedTask;
+    }
+
+    sealed class Payouts : IPayoutRepository
+    {
+        public Dictionary<string, PayoutSettings> Settings { get; } = new();
+        public Dictionary<string, PayoutState> States { get; } = new();
+        public Task<PayoutSettings> GetAsync(string storeId) => Task.FromResult(Settings.TryGetValue(storeId, out var s) ? Copy(s) : new PayoutSettings());
+        public Task SaveAsync(string storeId, PayoutSettings settings) { Settings[storeId] = settings; return Task.CompletedTask; }
+        public Task<IReadOnlyDictionary<string, PayoutSettings>> GetAllAsync() => Task.FromResult<IReadOnlyDictionary<string, PayoutSettings>>(Settings);
+        // Stored as copies, like a database, so a test sees only what was saved.
+        public Task<PayoutState> GetStateAsync(string storeId) => Task.FromResult(States.TryGetValue(storeId, out var s) ? Copy(s) : new PayoutState());
+        public Task SaveStateAsync(string storeId, PayoutState state) { States[storeId] = Copy(state); return Task.CompletedTask; }
+    }
+
+    /// <summary>
+    /// An invented exchange: USD amounts have 2 decimals, every withdrawal costs a 1 USD fee, and the smallest withdrawal
+    /// that may arrive is 10 USD unless a test changes it. A sent withdrawal leaves the balance at once and is listed as in progress.
+    /// </summary>
+    sealed class FakeWithdrawals(TimeProvider clock) : IWithdrawalConnector
+    {
+        public const string ExchangeId = "fake";
+        public string Id => ExchangeId;
+        public string Name => "Fake Exchange";
+        public string KeyPermissionsHelp => "";
+
+        public decimal Balance { get; set; }
+        public decimal Fee { get; set; } = 1m;
+        public decimal Minimum { get; set; } = 10m;
+        public decimal Limit { get; set; } = 1_000_000m;
+        public List<WithdrawalRecord> Records { get; } = [];
+        public List<(string Asset, string Destination, decimal Amount, decimal MaxFee)> Withdrawals { get; } = [];
+        public List<decimal> Quotes { get; } = [];
+        public List<string> Calls { get; } = [];
+        public Exception? WithdrawError { get; set; }
+        public bool LoseResponse { get; set; }
+        public Action? OnQuote { get; set; }
+
+        public void Settle()
+        {
+            for (var i = 0; i < Records.Count; i++)
+                Records[i] = Records[i] with { Status = WithdrawalStatus.Succeeded };
+        }
+
+        public Task<decimal> GetAvailableBalanceAsync(ExchangeCredentials credentials, string asset, CancellationToken cancellationToken)
+        {
+            Calls.Add("balance");
+            return Task.FromResult(Balance);
+        }
+
+        public Task<IReadOnlyList<WithdrawalDestination>> GetDestinationsAsync(ExchangeCredentials credentials, string asset, CancellationToken cancellationToken) =>
+            Task.FromResult<IReadOnlyList<WithdrawalDestination>>([new WithdrawalDestination("test-bank", "Bank transfer", true)]);
+
+        public Task<WithdrawalQuote> QuoteAsync(ExchangeCredentials credentials, string asset, string destination, decimal amount, CancellationToken cancellationToken)
+        {
+            Calls.Add("quote");
+            Quotes.Add(amount);
+            OnQuote?.Invoke();
+            var rounded = Math.Floor(amount * 100m) / 100m;
+            return Task.FromResult(new WithdrawalQuote(destination, "Bank transfer", rounded, rounded - Fee, Fee, Minimum, Limit));
+        }
+
+        public Task<string> WithdrawAsync(ExchangeCredentials credentials, string asset, string destination, decimal amount, decimal maxFee,
+            CancellationToken cancellationToken)
+        {
+            Calls.Add("withdraw");
+            Withdrawals.Add((asset, destination, amount, maxFee));
+            if (WithdrawError is not null)
+                throw WithdrawError;
+            var reference = $"REF-{Withdrawals.Count}";
+            Balance -= amount;
+            Records.Add(new WithdrawalRecord(reference, destination, amount - Fee, Fee, clock.GetUtcNow(), WithdrawalStatus.InProgress));
+            if (LoseResponse)
+                throw new HttpRequestException("The response was lost");
+            return Task.FromResult(reference);
+        }
+
+        public Task<IReadOnlyList<WithdrawalRecord>> GetRecentWithdrawalsAsync(ExchangeCredentials credentials, string asset, DateTimeOffset since,
+            CancellationToken cancellationToken)
+        {
+            Calls.Add("recent");
+            return Task.FromResult<IReadOnlyList<WithdrawalRecord>>(Records.Where(r => r.RequestedAt >= since).ToList());
+        }
+
+        public Task<CredentialsCheck> TestCredentialsAsync(ExchangeCredentials credentials, string asset, CancellationToken cancellationToken) =>
+            throw new NotSupportedException();
+    }
+}

@@ -11,7 +11,10 @@ using Newtonsoft.Json.Linq;
 
 namespace BTCPayServer.Plugins.SweepSell.Exchanges.Kraken;
 
-/// <summary>Kraken over its REST API (https://docs.kraken.com/api/). Read balances, get deposit addresses, sell at market.</summary>
+/// <summary>
+/// Kraken over its REST API (https://docs.kraken.com/api/). Read balances, get deposit addresses, sell at market.
+/// It never withdraws; fiat payout has its own class and key (<see cref="KrakenWithdrawals"/>), and reuses the request code here.
+/// </summary>
 public class KrakenConnector(HttpClient http, TimeProvider? clock = null) : IExchangeConnector
 {
     public const string HttpClientName = "SweepSell.Kraken";
@@ -43,7 +46,8 @@ public class KrakenConnector(HttpClient http, TimeProvider? clock = null) : IExc
 
     public string KeyPermissionsHelp =>
         "In Kraken: Settings > API > Create key. Tick only Query Funds, Deposit Funds, Query Open Orders & Trades, " +
-        "Query Closed Orders & Trades and Create & Modify Orders. Never tick Withdraw Funds: Sweep & Sell never withdraws.";
+        "Query Closed Orders & Trades and Create & Modify Orders. Never tick Withdraw Funds: this key never withdraws " +
+        "(fiat payout, if you use it, has a separate withdraw-only key).";
 
     /// <summary>Our ticker as Kraken's REST API takes it.</summary>
     public static string ToKraken(string asset) => asset.ToUpperInvariant() switch
@@ -308,27 +312,65 @@ public class KrakenConnector(HttpClient http, TimeProvider? clock = null) : IExc
             await CheckAsync("Query Open Orders & Trades", () => PrivateAsync(credentials, "OpenOrders", [], cancellationToken), orderCheck: false, cancellationToken),
             await CheckAsync("Query Closed Orders & Trades", () => PrivateAsync(credentials, "ClosedOrders", [], cancellationToken), orderCheck: false, cancellationToken)
         };
-        // A validate-only order checks the trading permission without trading. It is also priced at twice the market
-        // and immediate-or-cancel, so it could never fill even if it were placed. Twice the minimum amount leaves room
-        // for the price to move between the ticker and the order.
-        checks.Add(await CheckAsync("Create & Modify Orders", async () =>
-        {
-            var rules = await GetMarketRulesAsync("BTC", "USD", cancellationToken);
-            var last = (await GetPriceAsync("BTC", "USD", cancellationToken)).Last;
-            var volume = rules.MinimumSellAmount(last) * 2;
-            return await PrivateAsync(credentials, "AddOrder",
-            [
-                new("ordertype", "limit"), new("type", "sell"), new("pair", Pair("BTC", "USD")),
-                new("volume", volume.ToString(CultureInfo.InvariantCulture)),
-                new("price", rules.LimitPriceAtLeast(last * 2).ToString(CultureInfo.InvariantCulture)),
-                new("timeinforce", "IOC"),
-                new("validate", "true")
-            ], cancellationToken);
-        }, orderCheck: true, cancellationToken));
+        checks.Add(await CheckAsync("Create & Modify Orders", () => ValidateTestOrderAsync(credentials, cancellationToken), orderCheck: true, cancellationToken));
+        // This key trades, so it must not be able to move funds off the exchange as well.
+        checks.Add(await LacksPermissionAsync("No Withdraw Funds",
+            () => PrivateAsync(credentials, "WithdrawMethods", [new("asset", "XBT")], cancellationToken),
+            "This key can withdraw. Create a key without Withdraw Funds for trading.", cancellationToken));
         return new CredentialsCheck(checks);
     }
 
-    static async Task<PermissionCheck> CheckAsync(string permission, Func<Task<JToken>> call, bool orderCheck, CancellationToken cancellationToken)
+    /// <summary>
+    /// A validate-only order: checks the trading permission without trading. It is also priced at twice the market and
+    /// immediate-or-cancel, so it could never fill even if it were placed. Twice the minimum amount leaves room for the
+    /// price to move between the ticker and the order.
+    /// </summary>
+    internal async Task<JToken> ValidateTestOrderAsync(ExchangeCredentials credentials, CancellationToken cancellationToken)
+    {
+        var rules = await GetMarketRulesAsync("BTC", "USD", cancellationToken);
+        var last = (await GetPriceAsync("BTC", "USD", cancellationToken)).Last;
+        var volume = rules.MinimumSellAmount(last) * 2;
+        return await PrivateAsync(credentials, "AddOrder",
+        [
+            new("ordertype", "limit"), new("type", "sell"), new("pair", Pair("BTC", "USD")),
+            new("volume", volume.ToString(CultureInfo.InvariantCulture)),
+            new("price", rules.LimitPriceAtLeast(last * 2).ToString(CultureInfo.InvariantCulture)),
+            new("timeinforce", "IOC"),
+            new("validate", "true")
+        ], cancellationToken);
+    }
+
+    /// <summary>
+    /// Checks that a key does NOT have a permission: OK only when Kraken refuses <paramref name="call"/> for lack of it.
+    /// An order check Kraken judges on its merits (an <c>EOrder:</c> error) means the key may trade.
+    /// </summary>
+    internal static async Task<PermissionCheck> LacksPermissionAsync(string check, Func<Task<JToken>> call, string granted,
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            await call();
+            return new PermissionCheck(check, false, granted);
+        }
+        catch (ExchangeException e) when (e.Message.Contains("EGeneral:Permission denied", StringComparison.Ordinal))
+        {
+            return new PermissionCheck(check, true, null);
+        }
+        catch (ExchangeException e) when (e.Message.Contains("EOrder:", StringComparison.Ordinal))
+        {
+            return new PermissionCheck(check, false, granted);
+        }
+        catch (ExchangeException e)
+        {
+            return new PermissionCheck(check, false, $"Could not confirm it: {e.Message}");
+        }
+        catch (Exception e) when (e is HttpRequestException or TaskCanceledException && !cancellationToken.IsCancellationRequested)
+        {
+            return new PermissionCheck(check, false, $"Could not reach Kraken ({e.GetType().Name}). Try again.");
+        }
+    }
+
+    internal static async Task<PermissionCheck> CheckAsync(string permission, Func<Task<JToken>> call, bool orderCheck, CancellationToken cancellationToken)
     {
         try
         {
@@ -366,13 +408,17 @@ public class KrakenConnector(HttpClient http, TimeProvider? clock = null) : IExc
                 : $"Kraken offers several deposit networks for {asset}; Sweep & Sell doesn't know which one to use yet.");
     }
 
-    async Task<JToken> PublicAsync(string method, string pair, CancellationToken cancellationToken)
+    Task<JToken> PublicAsync(string method, string pair, CancellationToken cancellationToken) =>
+        PublicAsync(method, "pair", pair, cancellationToken);
+
+    internal async Task<JToken> PublicAsync(string method, string parameter, string value, CancellationToken cancellationToken)
     {
-        using var request = new HttpRequestMessage(HttpMethod.Get, new Uri(BaseUri, $"/0/public/{method}?pair={Uri.EscapeDataString(pair)}"));
+        using var request = new HttpRequestMessage(HttpMethod.Get,
+            new Uri(BaseUri, $"/0/public/{method}?{Uri.EscapeDataString(parameter)}={Uri.EscapeDataString(value)}"));
         return await SendAsync(request, cancellationToken);
     }
 
-    async Task<JToken> PrivateAsync(ExchangeCredentials credentials, string method, IEnumerable<KeyValuePair<string, string>> parameters,
+    internal async Task<JToken> PrivateAsync(ExchangeCredentials credentials, string method, IEnumerable<KeyValuePair<string, string>> parameters,
         CancellationToken cancellationToken)
     {
         var keyLock = KeyLocks.GetOrAdd(KeyFingerprint(credentials.ApiKey), _ => new SemaphoreSlim(1, 1));
@@ -436,7 +482,8 @@ public class KrakenConnector(HttpClient http, TimeProvider? clock = null) : IExc
 
     // Errors Kraken returns when it refused a request without acting on it. EService errors and EGeneral:Internal error
     // can come after an order was accepted, and anything unlisted is unknown, so those never count as refusals.
-    static readonly string[] RejectionPrefixes = ["EOrder:", "EAPI:", "EQuery:", "EGeneral:Invalid arguments", "EGeneral:Permission denied"];
+    // EFunding errors refuse a withdrawal request (unknown destination, fee above max_fee, too little balance).
+    static readonly string[] RejectionPrefixes = ["EOrder:", "EAPI:", "EQuery:", "EFunding:", "EGeneral:Invalid arguments", "EGeneral:Permission denied"];
 
     static bool IsRejection(string error) =>
         RejectionPrefixes.Any(p => error.StartsWith(p, StringComparison.Ordinal)) &&
@@ -461,19 +508,19 @@ public class KrakenConnector(HttpClient http, TimeProvider? clock = null) : IExc
         Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(apiKey)));
 
     /// <summary>The result of a call in the shape the code expects; anything else fails as an exchange error, not a crash.</summary>
-    static T Expect<T>(JToken result, string method) where T : JToken =>
+    internal static T Expect<T>(JToken result, string method) where T : JToken =>
         result as T ?? throw new ExchangeException($"Kraken sent an unexpected {method} response.");
 
     /// <summary>A text or number field as text; null when missing or of another shape.</summary>
-    static string? Text(JToken? token) =>
+    internal static string? Text(JToken? token) =>
         token is JValue { Type: JTokenType.String or JTokenType.Integer or JTokenType.Float } value
             ? Convert.ToString(value.Value, CultureInfo.InvariantCulture)
             : null;
 
-    static bool IsTrue(JToken? token) => token is JValue { Type: JTokenType.Boolean, Value: true };
+    internal static bool IsTrue(JToken? token) => token is JValue { Type: JTokenType.Boolean, Value: true };
 
     /// <summary>A number Kraken must send; missing or malformed fails loudly instead of reading as zero.</summary>
-    static decimal RequiredDecimal(JToken? token, string what)
+    internal static decimal RequiredDecimal(JToken? token, string what)
     {
         if (token is null || token.Type == JTokenType.Null ||
             !decimal.TryParse(token.ToString(), NumberStyles.Float, CultureInfo.InvariantCulture, out var value) || value < 0)
@@ -482,6 +529,6 @@ public class KrakenConnector(HttpClient http, TimeProvider? clock = null) : IExc
     }
 
     /// <summary>A number Kraken may leave out when it is zero.</summary>
-    static decimal OptionalDecimal(JToken? token) =>
+    internal static decimal OptionalDecimal(JToken? token) =>
         token is null || token.Type == JTokenType.Null ? 0 : RequiredDecimal(token, "amount");
 }

@@ -1,14 +1,18 @@
 # Threat model
 
 Sweep & Sell runs inside BTCPay Server. Per store, it can (1) sweep on-chain hot wallets to an exchange
-deposit address and other configured destinations, (2) sell on the exchange when invoices are paid, and
-(3) convert exchange balances into a target asset. This model covers the plugin, not BTCPay itself.
+deposit address and other configured destinations, (2) sell on the exchange when invoices are paid,
+(3) convert exchange balances into a target asset, and (4) when the owner turns payout on, withdraw one
+asset from the exchange to a withdrawal destination already saved in the exchange account. This model
+covers the plugin, not BTCPay itself.
 
 ## Assets
 
 | Asset | Where it lives | Impact if compromised |
 | --- | --- | --- |
-| Exchange API key and secret | Store setting, encrypted with BTCPay's data-protection key ring | Trading on the account; withdrawal if the user granted it against guidance |
+| Exchange API key and secret (trading) | Store setting, encrypted with BTCPay's data-protection key ring | Trading on the account; withdrawal if the user granted it against guidance (the key test flags it) |
+| Payout key (withdraw-only, optional) | Its own store setting, encrypted the same way | Withdrawals to destinations already saved and verified in the exchange account, i.e. the owner's own accounts |
+| Payout destination name | Payout settings | Payouts to another destination saved in the same exchange account |
 | Hot wallet funds | BTCPay's store wallets. To sweep, the plugin reads the hot wallet's account key from NBXplorer and signs in memory, as BTCPay's own automated payout processor does | Direct loss |
 | Sweep destinations (addresses, xpubs) | Store settings | Funds sent to an attacker |
 | Exchange balances | The user's exchange account | Bad trades, loss through slippage |
@@ -40,7 +44,10 @@ Mitigations marked *(planned)* arrive with the feature that needs them; the rest
 | --- | --- |
 | Database dump or backup reveals exchange keys | Keys encrypted with the data-protection key ring, which is stored apart from the database |
 | Keys leak through logs, pages, API or errors | Keys are write-only in the UI; `ExchangeCredentials.ToString()` hides them; never logged; stored in store settings, which BTCPay's API does not return |
-| Stolen exchange key used to withdraw | The plugin needs and requests no withdrawal permission; the setup guide says not to grant it |
+| Stolen trading key used to withdraw | The trading key needs no withdrawal permission; the setup guide says not to grant it, and its key test fails if it can withdraw. `IExchangeConnector` has no withdrawal call |
+| Stolen payout key used to trade, or one key that can do both | Payout uses a separate key that needs only Query Funds and Withdraw Funds; its key test fails if it can place orders, and payout refuses to save or run with the trading key |
+| Payout sends funds to an attacker | Withdrawals only name a destination already saved in the exchange account; the connector has no call to add, change or choose an address, and the exchange (Kraken) has no API for adding destinations and confirms new ones by email. A destination the exchange lists as unverified is refused. Payout settings need `CanModifyStoreSettings`, and changes of exchange, key, asset or destination are written to the payout activity |
+| Payout drains the exchange account or pays twice | Opt-in, starts in dry run (a quote from the exchange, nothing sent), required daily cap (fees included), minimum, an amount always kept, a highest fee (also sent to the exchange as its max fee), one withdrawal per run and the store's pause switch. Each withdrawal is saved as pending before it is sent; a lost response is matched in the exchange's recent withdrawals by amount, time and destination (never to one already accounted for) and is never retried blindly: unmatched, it waits for the owner to check and remove it, which counts it in full against the day's cap. Withdrawals still in progress at the exchange are left out of what can be sent, so one whose balance hasn't left yet is never sent again |
 | Attacker changes a sweep destination | Settings need `CanModifyStoreSettings`, and any change to sweeping (or to the exchange or key while sweeping is on, or lifting the pause while sweeping is on), Sweep now, removing a pending sweep and resuming a stopped coin also need BTCPay's permissions to sign and broadcast wallet transactions in the store, so a store manager without wallet rights can't redirect sweeps; cold wallet changes are written to the sweep activity and logged as warnings; exchange deposit addresses are fetched from the exchange at send time, never typed in; a settings save during a run is checked under the store's settings lock before the broadcast, so a sweep never goes out under replaced settings |
 | Hot wallet key leaks | The key is only read to sign, kept in memory, never logged, stored or put in a message; wallets without a key on the server are reported, never swept |
 | Forged or replayed trigger causes a sale | No external trigger exists: hedges start from BTCPay's internal invoice events, and the invoice is read again from the database before anything is decided. Each invoice is recorded under its ID the first time it is taken, with the BTC still to sell, and never taken again; records are kept longer than the oldest invoice that can be hedged (30 days), and invoices created before hedging was turned on are never hedged |

@@ -1,12 +1,14 @@
 # Agent and review instructions
 
-Sweep & Sell is a BTCPay Server plugin that moves real money: it sends coins from store hot wallets and
-places market orders on exchanges. Review every change as if a mistake costs funds, because it can.
+Sweep & Sell is a BTCPay Server plugin that moves real money: it sends coins from store hot wallets,
+places orders on exchanges and, when the owner turns payout on, withdraws from the exchange to an account
+the owner saved there. Review every change as if a mistake costs funds, because it can.
 
 ## Layout
 
 - `src/BTCPayServer.Plugins.SweepSell`: the plugin.
-  - `Exchanges/`: `IExchangeConnector` and one folder per exchange (`Kraken/`).
+  - `Exchanges/`: `IExchangeConnector` (trading), `IWithdrawalConnector` (payout) and one folder per exchange (`Kraken/`).
+  - `Conversion/`, `Payout/`: the convert and payout jobs and their saved state.
   - `Settings/`: per-store settings and `SecretProtector`, which encrypts exchange credentials.
   - `Conversion/`: the convert job (sells exchange balances) and `PendingOrders`, the lookup of sells with an
     unknown outcome that every selling job shares.
@@ -36,13 +38,21 @@ dotnet test --project tests/BTCPayServer.Plugins.SweepSell.Tests
 2. **Credentials are encrypted at rest.** Exchange keys are stored only through `SecretProtector`
    (BTCPay's data-protection key ring), never in payment method configs or anything BTCPay's API
    returns, and are never logged, rendered back into a page or put in an exception message.
-3. **Never withdraw from an exchange.** `IExchangeConnector` has no withdrawal call, and none may be
-   added. Setup guides ask users for keys without withdrawal permission.
-4. **Every money-moving action is idempotent.** A sweep, hedge or sale is recorded under a key naming
-   the business fact (e.g. the invoice ID) before or atomically with acting, so a restart, retry or
-   duplicate event never sends or sells twice.
-5. **Every money-moving feature has a dry run** that does everything except broadcast or place the
-   order (exchanges' validate-only order calls where they exist), and respects the store's pause switch.
+3. **Trading never withdraws; payout only pays out to destinations saved in the exchange.**
+   `IExchangeConnector` has no withdrawal call, and none may be added: the trading key is asked for
+   without withdrawal permission, and its key test fails if it can withdraw. Fiat payout is the only
+   feature that withdraws. It goes through `IWithdrawalConnector` with its own key, which must not be
+   able to trade (its key test fails if it can) and is refused if it is the trading key. A withdrawal
+   only names a destination the owner already saved (and the exchange verified) in the exchange account.
+   No code may add or change a destination at the exchange, or send to an address typed into or
+   computed by the plugin.
+4. **Every money-moving action is idempotent.** A sweep, hedge, sale or payout is recorded under a key
+   naming the business fact (e.g. the invoice ID) before or atomically with acting, so a restart, retry or
+   duplicate event never sends or sells twice. Where the exchange takes no client ID (withdrawals), a lost
+   response is looked up in the exchange's history and never retried blindly.
+5. **Every money-moving feature has a dry run** that does everything except broadcast, place the order
+   or withdraw (exchanges' validate-only order calls and withdrawal quotes where they exist), and
+   respects the store's pause switch.
 6. **Respect exchange limits.** Read minimum order sizes, amount precision and minimum deposits from
    the exchange; never hardcode them. Below a minimum, wait and retry later rather than send or sell.
 7. **Fail loudly, not silently.** Errors are logged with context (store, feature, asset, amount) and
