@@ -95,6 +95,9 @@ public class PendingWithdrawal
 
     public string? KeyFingerprint { get; set; }
 
+    /// <summary>The account it was sent from (<see cref="PayoutAccount.Hash"/>), so other stores know which account it holds up.</summary>
+    public string? AccountHash { get; set; }
+
     public string Asset { get; set; } = "";
     public string Destination { get; set; } = "";
 

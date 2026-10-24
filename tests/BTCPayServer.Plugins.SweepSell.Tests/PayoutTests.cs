@@ -687,6 +687,52 @@ public class PayoutTests
     }
 
     [Fact]
+    public async Task AnotherStoresUnsettledWithdrawalCountsForItsOwnAccount()
+    {
+        Configure(minimum: 10m);
+        _main.Settings["test-store-2"] = Copy(_main.Settings[StoreId]);
+        _payouts.Settings["test-store-2"] = Copy(_payouts.Settings[StoreId]);
+        _payouts.Settings[StoreId].Enabled = false;
+        _exchange.Balance = 500m;
+        await Service().RunAsync("test-store-2", Ct);
+        _clock.Advance(TimeSpan.FromMinutes(1));
+        await Service().RunAsync("test-store-2", Ct); // listed, still on hold on test-account
+        Assert.Single(_payouts.States["test-store-2"].Unsettled);
+
+        // The other store moves on to another account; its withdrawal on hold still holds up the first one.
+        _exchange.Accounts["test-payout-key-2"] = "test-account-2";
+        _payouts.Settings["test-store-2"].ProtectedApiKey = Protector.Protect("test-payout-key-2");
+        _exchange.Balance = 0m;
+        _clock.Advance(TimeSpan.FromMinutes(1));
+        await Service().RunAsync("test-store-2", Ct);
+        Assert.Equal(PayoutAccount.For(FakeWithdrawals.ExchangeId, "test-account-2",
+            Protector.Credentials(_payouts.Settings["test-store-2"])!).Hash, _payouts.States["test-store-2"].Account!.Hash);
+
+        _payouts.Settings[StoreId].Enabled = true;
+        _payouts.Settings["test-store-2"].Enabled = false;
+        _exchange.Balance = 500m;
+        _clock.Advance(PayoutService.History + TimeSpan.FromDays(1)); // too old for this store's own read to see it
+        await Service().RunAsync(StoreId, Ct);
+        Assert.Single(_exchange.Withdrawals);
+        Assert.Contains("still has withdrawals it hasn't seen settle from", State.Activity[0].Message);
+    }
+
+    [Fact]
+    public async Task ThisStoresConvertSellingThePayoutAssetStopsPayout()
+    {
+        Configure();
+        _exchange.Balance = 500m;
+        _main.Settings[StoreId].Convert = new ConvertSettings { Enabled = true, DryRun = false, Assets = ["usd"], TargetAsset = "BTC" };
+        await Service().RunAsync(StoreId, Ct);
+        Assert.Empty(_exchange.Withdrawals);
+        Assert.Contains("This store's convert sells USD from the same Fake Exchange account", State.Activity[0].Message);
+
+        _main.Settings[StoreId].Convert.Assets = ["LTC"]; // converting other assets is fine
+        await Service().RunAsync(StoreId, Ct);
+        Assert.Single(_exchange.Withdrawals);
+    }
+
+    [Fact]
     public async Task ATradingKeySavedDuringTheRunIsCheckedBeforeWithdrawing()
     {
         Configure();

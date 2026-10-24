@@ -273,6 +273,7 @@ public class PayoutService(IPayoutRepository payouts, ISweepSellRepository repos
             Id = Guid.NewGuid(),
             ExchangeId = connector.Id,
             KeyFingerprint = credentials.Fingerprint(),
+            AccountHash = account.Hash,
             Asset = asset,
             Destination = payout.Destination,
             Amount = quote.Amount,
@@ -301,7 +302,7 @@ public class PayoutService(IPayoutRepository payouts, ISweepSellRepository repos
             string? shared;
             try
             {
-                shared = await SharedAccountAsync(storeId, connector, credentials, account, cancellationToken);
+                shared = await SharedAccountAsync(storeId, asset, connector, credentials, account, cancellationToken);
             }
             catch (Exception e) when (IsRecordedFailure(e, cancellationToken))
             {
@@ -311,9 +312,7 @@ public class PayoutService(IPayoutRepository payouts, ISweepSellRepository repos
             }
             if (shared is not null)
             {
-                Record(storeId, state, asset, ActivityOutcome.Failed,
-                    $"Another store on this server {shared} the same {connector.Name} account (or {connector.Name} doesn't say which account a key " +
-                    "belongs to). Payout needs an exchange account no other store uses, so give each store its own account. Nothing was withdrawn.");
+                Record(storeId, state, asset, ActivityOutcome.Failed, $"{shared} Nothing was withdrawn.");
                 return;
             }
             // The balance and withdrawals are read again under the lock: a convert sell or another withdrawal of this asset
@@ -581,42 +580,55 @@ public class PayoutService(IPayoutRepository payouts, ISweepSellRepository repos
     }
 
     /// <summary>
-    /// What another store does with the payout's exchange account, when one does, or null. Another store's run wouldn't see
-    /// this one's unlisted withdrawals and could send them again, and its sells could eat into what is kept. Counted:
+    /// Why the payout's exchange account is used elsewhere, when it is, or null. Another store's run wouldn't see this one's
+    /// unlisted withdrawals and could send them again, and sells could eat into what is kept. Counted:
     /// <list type="bullet">
-    /// <item>paying out live (enabled, not a dry run) with the same key, or a key whose account its last run saved as this one;</item>
-    /// <item>any payout state of the account still unresolved (pending or unsettled withdrawals), whatever its settings now;</item>
-    /// <item>trading from the account (convert or hedging on), read from its trading key.</item>
+    /// <item>another store paying out live (enabled, not a dry run) with the same key, or a key whose account its last run saved as this one;</item>
+    /// <item>another store's pending or unsettled withdrawals from the account, whatever its settings now;</item>
+    /// <item>another store trading from the account (convert or hedging on), read from its trading key;</item>
+    /// <item>this store's convert selling the payout asset from the account.</item>
     /// </list>
     /// Each run saves its account before this check, so of two stores paying out together the later run always finds the
     /// earlier one. When the exchange doesn't report accounts, any other store using it counts.
     /// </summary>
-    async Task<string?> SharedAccountAsync(string storeId, IWithdrawalConnector connector, ExchangeCredentials credentials, PayoutAccount account,
-        CancellationToken cancellationToken)
+    async Task<string?> SharedAccountAsync(string storeId, string asset, IWithdrawalConnector connector, ExchangeCredentials credentials,
+        PayoutAccount account, CancellationToken cancellationToken)
     {
+        var name = connector.Name;
+        var unknown = account.Hash is null ? $" ({name} doesn't say which account a key belongs to, so any other use of it counts)" : "";
+        string Shared(string what) =>
+            $"Another store on this server {what} the same {name} account{unknown}. Payout needs an exchange account no other store uses, so give each store its own account.";
+        // Each entry counts for the account it was recorded for; one recorded without an account counts for every account.
+        bool Here(string? exchangeId, string? accountHash) =>
+            exchangeId == connector.Id && (account.Hash is null || accountHash is null || accountHash == account.Hash);
         foreach (var (otherId, other) in await payouts.GetAllAsync())
         {
-            if (otherId == storeId || other.ExchangeId != connector.Id)
+            if (otherId == storeId)
                 continue;
             var otherState = await payouts.GetStateAsync(otherId);
-            var saved = otherState.Account;
-            var unresolved = otherState.Pending.Count > 0 || otherState.Unsettled.Count > 0;
-            if (unresolved && (account.Hash is null || saved is null || saved.Hash == account.Hash))
-                return "still has withdrawals it hasn't seen settle from";
-            if (other is not { Enabled: true, DryRun: false } || protector.Credentials(other) is not { } otherKey)
+            if (otherState.Pending.Any(p => Here(p.ExchangeId, p.AccountHash)) || otherState.Unsettled.Any(u => Here(u.ExchangeId, u.AccountHash)))
+                return Shared("still has withdrawals it hasn't seen settle from");
+            if (other is not { Enabled: true, DryRun: false } || other.ExchangeId != connector.Id || protector.Credentials(other) is not { } otherKey)
                 continue;
             // A saved account counts for the key the other store still has; one saved for an older key is checked by its next run.
+            var saved = otherState.Account;
             if (otherKey.ApiKey == credentials.ApiKey || account.Hash is null ||
                 saved is not null && saved.Hash == account.Hash && saved.KeyFingerprint == otherKey.Fingerprint())
-                return "pays out live from";
+                return Shared("pays out live from");
         }
         foreach (var (otherId, other) in await repository.GetAllAsync())
         {
-            if (otherId == storeId || other.ExchangeId != connector.Id || !(other.Convert.Enabled || other.Hedge.Enabled) ||
-                protector.Credentials(other) is not { } otherTrading)
+            // This store's own trading only counts when convert sells the payout asset: that would sell what payout keeps.
+            var own = otherId == storeId;
+            var sells = own
+                ? other.Convert is { Enabled: true, DryRun: false } && other.Convert.Assets.Contains(asset, StringComparer.OrdinalIgnoreCase)
+                : other.Convert.Enabled || other.Hedge.Enabled;
+            if (!sells || other.ExchangeId != connector.Id || protector.Credentials(other) is not { } trading)
                 continue;
-            if (account.Hash is null || PayoutAccount.For(connector.Id, await connector.GetAccountIdAsync(otherTrading, cancellationToken), otherTrading).Hash == account.Hash)
-                return "trades from";
+            if (account.Hash is null || PayoutAccount.For(connector.Id, await connector.GetAccountIdAsync(trading, cancellationToken), trading).Hash == account.Hash)
+                return own
+                    ? $"This store's convert sells {asset} from the same {name} account{unknown}, so it would sell what payout keeps. Take {asset} out of convert, or pay out from another account."
+                    : Shared("trades from");
         }
         return null;
     }
