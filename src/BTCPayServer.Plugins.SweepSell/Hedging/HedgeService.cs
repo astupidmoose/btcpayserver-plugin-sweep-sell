@@ -148,6 +148,25 @@ public class HedgeService(ISweepSellRepository repository, SecretProtector prote
         foreach (var invoice in found ?? [])
             Take(storeId, hedge, state, invoice, now);
 
+        if (!state.Invoices.Values.Any(i => i.Remaining > 0) && state.Pending.Count == 0)
+            return;
+
+        var exchange = exchanges.Find(settings.ExchangeId);
+        var credentials = protector.Credentials(settings);
+        if (exchange is null || credentials is null)
+        {
+            Record(storeId, state, null, ActivityOutcome.Failed, "No exchange key is saved (or it can't be read), so nothing can be hedged. Save one above.");
+            return;
+        }
+
+        if (!await PendingOrders.ReconcileAsync(state.Pending, exchange, credentials, now,
+                (order, executed) => Sold(state, order, order.SentAt, executed),
+                (asset, outcome, message) => Record(storeId, state, asset, outcome, message),
+                e => IsRecordedFailure(e, cancellationToken), cancellationToken))
+            return;
+
+        // Only once every earlier order's fill is counted against the invoices it was for: moving an invoice to another market
+        // first would leave a late fill unallocated, and the invoice sold again in its new market.
         foreach (var (id, invoice) in state.Invoices.Where(i => i.Value.Remaining > 0).ToList())
         {
             // Taken before hedging was last turned on: turning it on again starts afresh, so what was left isn't sold now.
@@ -181,21 +200,7 @@ public class HedgeService(ISweepSellRepository repository, SecretProtector prote
         }
 
         var markets = state.Invoices.Values.Where(i => i.Remaining > 0 && i.DryRun == hedge.DryRun).Select(i => i.Market).Distinct().Order().ToList();
-        if (markets.Count == 0 && state.Pending.Count == 0)
-            return;
-
-        var exchange = exchanges.Find(settings.ExchangeId);
-        var credentials = protector.Credentials(settings);
-        if (exchange is null || credentials is null)
-        {
-            Record(storeId, state, null, ActivityOutcome.Failed, "No exchange key is saved (or it can't be read), so nothing can be hedged. Save one above.");
-            return;
-        }
-
-        if (!await PendingOrders.ReconcileAsync(state.Pending, exchange, credentials, now,
-                (order, executed) => Sold(state, order, order.SentAt, executed),
-                (asset, outcome, message) => Record(storeId, state, asset, outcome, message),
-                e => IsRecordedFailure(e, cancellationToken), cancellationToken))
+        if (markets.Count == 0)
             return;
 
         decimal available;
@@ -459,6 +464,7 @@ public class HedgeService(ISweepSellRepository repository, SecretProtector prote
         return !current.Paused && now.Enabled && !now.DryRun && current.ExchangeId == exchange.Id &&
                credentials.Equals(protector.Credentials(current)) && // the whole key: a replaced secret must not be used either
                now.EnabledSince == then.EnabledSince && // turned off and on again: the invoices this run planned for are dropped
+               now.Trigger == then.Trigger && now.Amount == then.Amount && // which invoices count, and how much of each
                now.MaxSlippagePercent == then.MaxSlippagePercent && now.DailyCap == then.DailyCap &&
                now.DefaultMarket == then.DefaultMarket && now.Markets.Count == then.Markets.Count &&
                now.Markets.All(m => then.Markets.TryGetValue(m.Key, out var market) && market == m.Value);

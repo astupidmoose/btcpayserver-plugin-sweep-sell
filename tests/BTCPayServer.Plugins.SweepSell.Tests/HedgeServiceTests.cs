@@ -209,6 +209,28 @@ public class HedgeServiceTests
     }
 
     [Fact]
+    public async Task AnEarlierOrdersFillIsCountedBeforeTheInvoiceChangesMarket()
+    {
+        var hedge = Configure(hedge: h => h.Markets["GBP"] = "EUR");
+        Invoice("gbp", 0.1m, currency: "GBP");
+        _exchange.FillUnknown = true;
+        _exchange.OnSell = () => throw new HttpRequestException("timeout");
+        var service = Service();
+        await service.OnInvoiceAsync("gbp", Ct);
+        var pending = Assert.Single(State.Pending);
+
+        // The order filled, and the owner changes the market before the next run finds out.
+        _exchange.OnSell = null;
+        _exchange.FillUnknown = false;
+        _exchange.Found[pending.ClientOrderId] = new OrderLookup(["OAAAAA-BBBBB-CCCCCC"], Open: false, ExecutedAmount: 0.1m);
+        hedge.Markets["GBP"] = "CAD";
+        await service.RunAsync(_storeId, Ct);
+        Assert.Equal("EUR", Assert.Single(_exchange.Orders).Quote); // never sold again for CAD
+        Assert.Equal(0m, State.Invoices["gbp"].Remaining);
+        Assert.Empty(State.Pending);
+    }
+
+    [Fact]
     public async Task ConfirmedOrderIdsAreSavedBeforeTheFillIsLookedUp()
     {
         Configure();
@@ -445,6 +467,8 @@ public class HedgeServiceTests
     [InlineData("market")]
     [InlineData("key")]
     [InlineData("turned off and on")]
+    [InlineData("trigger")]
+    [InlineData("amount")]
     public async Task SettingsChangedDuringTheRunStopTheSell(string change)
     {
         Configure();
@@ -457,6 +481,8 @@ public class HedgeServiceTests
                 case "dry run": settings.Hedge.DryRun = true; break;
                 case "market": settings.Hedge.Markets["CAD"] = "USD"; break;
                 case "turned off and on": settings.Hedge.EnabledSince = Start; break;
+                case "trigger": settings.Hedge.Trigger = settings.Hedge.Trigger == HedgeTrigger.Settled ? HedgeTrigger.Processing : HedgeTrigger.Settled; break;
+                case "amount": settings.Hedge.Amount = settings.Hedge.Amount == HedgeAmount.BtcPaid ? HedgeAmount.InvoiceValue : HedgeAmount.BtcPaid; break;
                 default: settings.ProtectedApiSecret = Protector.Protect("another-secret"); break;
             }
         };
