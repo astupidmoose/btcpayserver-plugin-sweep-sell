@@ -307,7 +307,7 @@ public class PayoutService(IPayoutRepository payouts, ISweepSellRepository repos
             catch (Exception e) when (IsRecordedFailure(e, cancellationToken))
             {
                 Record(storeId, state, asset, ActivityOutcome.Failed,
-                    $"Could not read which {connector.Name} account another store on this server trades from: {e.Message}. Nothing was withdrawn.");
+                    $"Could not read which {connector.Name} account this store's trading key belongs to: {e.Message}. Nothing was withdrawn.");
                 return;
             }
             if (shared is not null)
@@ -585,11 +585,11 @@ public class PayoutService(IPayoutRepository payouts, ISweepSellRepository repos
     /// <list type="bullet">
     /// <item>another store paying out live (enabled, not a dry run) with the same key, or a key whose account its last run saved as this one;</item>
     /// <item>another store's pending or unsettled withdrawals from the account, whatever its settings now;</item>
-    /// <item>another store trading from the account (convert or hedging on), read from its trading key;</item>
     /// <item>this store's convert selling the payout asset from the account.</item>
     /// </list>
     /// Each run saves its account before this check, so of two stores paying out together the later run always finds the
-    /// earlier one. When the exchange doesn't report accounts, any other store using it counts.
+    /// earlier one. When the exchange doesn't report accounts, any other store paying out on it counts. Only what other
+    /// stores' own runs saved is read; their keys are never used.
     /// </summary>
     async Task<string?> SharedAccountAsync(string storeId, string asset, IWithdrawalConnector connector, ExchangeCredentials credentials,
         PayoutAccount account, CancellationToken cancellationToken)
@@ -616,20 +616,14 @@ public class PayoutService(IPayoutRepository payouts, ISweepSellRepository repos
                 saved is not null && saved.Hash == account.Hash && saved.KeyFingerprint == otherKey.Fingerprint())
                 return Shared("pays out live from");
         }
-        foreach (var (otherId, other) in await repository.GetAllAsync())
-        {
-            // This store's own trading only counts when convert sells the payout asset: that would sell what payout keeps.
-            var own = otherId == storeId;
-            var sells = own
-                ? other.Convert is { Enabled: true, DryRun: false } && other.Convert.Assets.Contains(asset, StringComparer.OrdinalIgnoreCase)
-                : other.Convert.Enabled || other.Hedge.Enabled;
-            if (!sells || other.ExchangeId != connector.Id || protector.Credentials(other) is not { } trading)
-                continue;
-            if (account.Hash is null || PayoutAccount.For(connector.Id, await connector.GetAccountIdAsync(trading, cancellationToken), trading).Hash == account.Hash)
-                return own
-                    ? $"This store's convert sells {asset} from the same {name} account{unknown}, so it would sell what payout keeps. Take {asset} out of convert, or pay out from another account."
-                    : Shared("trades from");
-        }
+        // This store's convert selling the payout asset from the same account would sell what payout keeps. Other stores'
+        // keys are never used here: each store's credentials serve only its own runs, so another store trading from the
+        // payout account isn't detected (the setup guide says payout needs an account no other store uses).
+        var own = await repository.GetAsync(storeId);
+        if (own.Convert is { Enabled: true, DryRun: false } && own.Convert.Assets.Contains(asset, StringComparer.OrdinalIgnoreCase) &&
+            own.ExchangeId == connector.Id && protector.Credentials(own) is { } trading &&
+            (account.Hash is null || PayoutAccount.For(connector.Id, await connector.GetAccountIdAsync(trading, cancellationToken), trading).Hash == account.Hash))
+            return $"This store's convert sells {asset} from the same {name} account{unknown}, so it would sell what payout keeps. Take {asset} out of convert, or pay out from another account.";
         return null;
     }
 

@@ -613,8 +613,9 @@ public class PayoutTests
     }
 
     [Fact]
-    public async Task AnotherStoreTradingFromTheAccountStopsPayout()
+    public async Task AnotherStoresTradingKeyIsNeverUsed()
     {
+        // Each store's credentials serve only its own runs: another store trading on the exchange isn't looked up.
         Configure();
         _exchange.Balance = 500m;
         _main.Settings["test-store-2"] = new SweepSellSettings
@@ -622,15 +623,11 @@ public class PayoutTests
             ExchangeId = FakeWithdrawals.ExchangeId,
             ProtectedApiKey = Protector.Protect("test-trading-key-2"),
             ProtectedApiSecret = Protector.Protect("test-trading-secret-2"),
-            Convert = { Enabled = true }
+            Convert = { Enabled = true, DryRun = false, Assets = ["USD"] }
         };
         await Service().RunAsync(StoreId, Ct);
-        Assert.Empty(_exchange.Withdrawals);
-        Assert.Contains("Another store on this server trades from the same Fake Exchange account", State.Activity[0].Message);
-
-        _exchange.Accounts["test-trading-key-2"] = "test-account-2"; // it trades from its own account
-        await Service().RunAsync(StoreId, Ct);
         Assert.Single(_exchange.Withdrawals);
+        Assert.DoesNotContain("test-trading-key-2", _exchange.KeysUsed);
     }
 
     [Fact]
@@ -982,8 +979,14 @@ public class PayoutTests
         /// <summary>The account each key belongs to; one not listed belongs to "test-account". Null means the exchange doesn't say.</summary>
         public Dictionary<string, string?> Accounts { get; } = [];
 
-        public Task<string?> GetAccountIdAsync(ExchangeCredentials credentials, CancellationToken cancellationToken) =>
-            Task.FromResult(Accounts.TryGetValue(credentials.ApiKey, out var account) ? account : "test-account");
+        /// <summary>Every key the account was asked for with.</summary>
+        public List<string> KeysUsed { get; } = [];
+
+        public Task<string?> GetAccountIdAsync(ExchangeCredentials credentials, CancellationToken cancellationToken)
+        {
+            KeysUsed.Add(credentials.ApiKey);
+            return Task.FromResult(Accounts.TryGetValue(credentials.ApiKey, out var account) ? account : "test-account");
+        }
 
         /// <summary>What the trading key's permissions allow that endangers payouts.</summary>
         public List<string> OtherKeyProblems { get; } = [];
