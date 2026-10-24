@@ -54,6 +54,54 @@ public class PayoutTests
     PayoutState State => _payouts.States[StoreId];
 
     [Fact]
+    public async Task ATradingKeyThatCanChangeDestinationsStopsPayout()
+    {
+        Configure();
+        _exchange.Balance = 500m;
+        _exchange.OtherKeyProblems.Add("This key can update withdrawal addresses, so a stolen copy could redirect funds.");
+        await Service().RunAsync(StoreId, Ct);
+        Assert.Empty(_exchange.Withdrawals);
+        Assert.Equal(["test-trading-key"], _exchange.OtherKeysChecked);
+        Assert.Equal(ActivityOutcome.Failed, State.Activity[0].Outcome);
+        Assert.Contains("trading key makes payouts unsafe", State.Activity[0].Message);
+    }
+
+    [Fact]
+    public async Task AWithdrawalSentAfterMidnightCountsOnTheNewDay()
+    {
+        Configure(cap: 1000m);
+        _exchange.Balance = 500m;
+        _clock.Advance(TimeSpan.FromHours(12) - TimeSpan.FromSeconds(30)); // 23:59:30 UTC
+        _payouts.States[StoreId] = new PayoutState();
+        _payouts.States[StoreId].AddWithdrawn(_clock.GetUtcNow(), "USD", 900m); // 100 left today
+        var reads = 0;
+        _exchange.OnRecent = () =>
+        {
+            if (++reads == 2)
+                _clock.Advance(TimeSpan.FromMinutes(1)); // planned before midnight, sent after it
+        };
+        await Service().RunAsync(StoreId, Ct);
+        Assert.Equal(100m, Assert.Single(_exchange.Withdrawals).Amount);
+        Assert.Equal(100m, State.WithdrawnOn(_clock.GetUtcNow(), "USD")); // the next run sees the new day's cap partly used
+    }
+
+    [Fact]
+    public async Task ABalanceThatDropsDuringTheRunStopsTheWithdrawal()
+    {
+        Configure(keep: 100m);
+        _exchange.Balance = 500m;
+        _exchange.OnQuote = () => _exchange.Balance = 400m; // a convert sell of the same asset meanwhile
+        await Service().RunAsync(StoreId, Ct);
+        Assert.Empty(_exchange.Withdrawals);
+        Assert.Equal(ActivityOutcome.Waiting, State.Activity[0].Outcome);
+        Assert.Contains("balance changed during the run", State.Activity[0].Message);
+
+        _exchange.OnQuote = null;
+        await Service().RunAsync(StoreId, Ct);
+        Assert.Equal(300m, Assert.Single(_exchange.Withdrawals).Amount); // the amount to keep stays
+    }
+
+    [Fact]
     public async Task WithdrawsTheBalanceToTheSavedDestination()
     {
         Configure(keep: 20m);
@@ -517,6 +565,7 @@ public class PayoutTests
         public HashSet<string> Unlisted { get; } = [];
         public Action? OnQuote { get; set; }
         public Action? OnWithdraw { get; set; }
+        public Action? OnRecent { get; set; }
 
         public void Settle()
         {
@@ -564,6 +613,7 @@ public class PayoutTests
             CancellationToken cancellationToken)
         {
             Calls.Add("recent");
+            OnRecent?.Invoke();
             return Task.FromResult<IReadOnlyList<WithdrawalRecord>>(Records.Where(r => r.RequestedAt >= since && !Unlisted.Contains(r.Reference)).ToList());
         }
 
@@ -574,5 +624,15 @@ public class PayoutTests
 
         public Task<IReadOnlyList<string>> GetKeyProblemsAsync(ExchangeCredentials credentials, CancellationToken cancellationToken) =>
             Task.FromResult<IReadOnlyList<string>>(KeyProblems.ToList());
+
+        /// <summary>What the trading key's permissions allow that endangers payouts.</summary>
+        public List<string> OtherKeyProblems { get; } = [];
+        public List<string> OtherKeysChecked { get; } = [];
+
+        public Task<IReadOnlyList<string>> GetOtherKeyProblemsAsync(ExchangeCredentials credentials, CancellationToken cancellationToken)
+        {
+            OtherKeysChecked.Add(credentials.ApiKey);
+            return Task.FromResult<IReadOnlyList<string>>(OtherKeyProblems.ToList());
+        }
     }
 }

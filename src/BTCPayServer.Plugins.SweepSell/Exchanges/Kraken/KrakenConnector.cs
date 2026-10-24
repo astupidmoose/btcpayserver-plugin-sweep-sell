@@ -317,7 +317,49 @@ public class KrakenConnector(HttpClient http, TimeProvider? clock = null) : IExc
         checks.Add(await LacksPermissionAsync("No Withdraw Funds",
             () => PrivateAsync(credentials, "WithdrawMethods", [new("asset", "XBT")], cancellationToken),
             "This key can withdraw. Create a key without Withdraw Funds for trading.", cancellationToken));
+        // Payout withdraws to a destination by its name, so no other key may be able to change where a name sends funds.
+        checks.Add(await NoDestinationPermissionsCheckAsync(credentials, cancellationToken));
         return new CredentialsCheck(checks);
+    }
+
+    /// <summary>The permissions that let a key add or change withdrawal destinations, with why each is refused.</summary>
+    internal static readonly Dictionary<string, string> DestinationPermissions = new()
+    {
+        ["add-withdraw-address"] = "This key can add withdrawal addresses, so a stolen copy could send funds anywhere.",
+        ["update-withdraw-address"] = "This key can update withdrawal addresses, so a stolen copy could redirect funds."
+    };
+
+    /// <summary>The key's permissions, from Kraken's own record of the key.</summary>
+    internal async Task<IReadOnlyList<string>> GetPermissionsAsync(ExchangeCredentials credentials, CancellationToken cancellationToken)
+    {
+        var info = Expect<JObject>(await PrivateAsync(credentials, "GetApiKeyInfo", [], cancellationToken), "GetApiKeyInfo");
+        if (info["permissions"] is not JArray permissions || permissions.Any(p => p.Type != JTokenType.String))
+            throw new ExchangeException("Kraken sent no permission list for the key.");
+        return permissions.Select(p => (string)p!).Distinct().ToList();
+    }
+
+    /// <summary>Why the key can add or change withdrawal destinations, read from Kraken's record of its permissions. Empty when it can't.</summary>
+    internal async Task<IReadOnlyList<string>> GetDestinationPermissionProblemsAsync(ExchangeCredentials credentials, CancellationToken cancellationToken) =>
+        (await GetPermissionsAsync(credentials, cancellationToken)).Where(DestinationPermissions.ContainsKey).Select(p => DestinationPermissions[p]).ToList();
+
+    async Task<PermissionCheck> NoDestinationPermissionsCheckAsync(ExchangeCredentials credentials, CancellationToken cancellationToken)
+    {
+        const string check = "No Withdrawal Address Changes";
+        try
+        {
+            var problems = await GetDestinationPermissionProblemsAsync(credentials, cancellationToken);
+            return problems.Count == 0
+                ? new PermissionCheck(check, true, null)
+                : new PermissionCheck(check, false, string.Join(" ", problems) + " Create a trading key without Add or Update Withdrawal Addresses.");
+        }
+        catch (ExchangeException e)
+        {
+            return new PermissionCheck(check, false, $"Could not read the key's permissions: {e.Message}");
+        }
+        catch (Exception e) when (e is HttpRequestException or TaskCanceledException && !cancellationToken.IsCancellationRequested)
+        {
+            return new PermissionCheck(check, false, $"Could not reach Kraken ({e.GetType().Name}). Try again.");
+        }
     }
 
     /// <summary>

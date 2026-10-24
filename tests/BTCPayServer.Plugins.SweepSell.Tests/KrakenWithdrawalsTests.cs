@@ -250,6 +250,17 @@ public class KrakenWithdrawalsTests
     }
 
     [Theory]
+    [InlineData("""["query-funds","modify-trades","query-open-trades"]""", 0)]
+    [InlineData("""["query-funds","modify-trades","add-withdraw-address"]""", 1)]
+    [InlineData("""["modify-trades","update-withdraw-address","add-withdraw-address"]""", 2)]
+    public async Task OtherKeysThatCanChangeDestinationsAreReported(string permissions, int problems)
+    {
+        var (http, kraken) = Setup();
+        http.Responses["/0/private/GetApiKeyInfo"] = $$$"""{"error":[],"result":{"api_key_name":"test","permissions":{{{permissions}}}}}""";
+        Assert.Equal(problems, (await kraken.GetOtherKeyProblemsAsync(Credentials, Ct)).Count);
+    }
+
+    [Theory]
     [InlineData("""{"error":[],"result":{"api_key_name":"test"}}""")]
     [InlineData("""{"error":[],"result":{"permissions":[1]}}""")]
     [InlineData("""{"error":["EGeneral:Unknown method"]}""")]
@@ -266,7 +277,7 @@ public class KrakenWithdrawalsTests
         // Payout only names destinations saved in the exchange account, and trading never withdraws at all.
         var withdrawalCalls = typeof(IWithdrawalConnector).GetMethods().Select(m => m.Name).Where(n => !n.StartsWith("get_")).Order();
         Assert.Equal(
-            ["GetAvailableBalanceAsync", "GetDestinationsAsync", "GetKeyProblemsAsync", "GetRecentWithdrawalsAsync", "QuoteAsync", "TestCredentialsAsync", "WithdrawAsync"],
+            ["GetAvailableBalanceAsync", "GetDestinationsAsync", "GetKeyProblemsAsync", "GetOtherKeyProblemsAsync", "GetRecentWithdrawalsAsync", "QuoteAsync", "TestCredentialsAsync", "WithdrawAsync"],
             withdrawalCalls);
         Assert.DoesNotContain(typeof(IWithdrawalConnector).GetMethods().SelectMany(m => m.GetParameters()), p => p.Name!.Contains("address", StringComparison.OrdinalIgnoreCase));
         Assert.DoesNotContain(typeof(IExchangeConnector).GetMethods(), m => m.Name.Contains("Withdraw", StringComparison.OrdinalIgnoreCase));

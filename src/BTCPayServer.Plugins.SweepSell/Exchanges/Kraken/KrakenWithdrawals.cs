@@ -178,18 +178,18 @@ public class KrakenWithdrawals(KrakenConnector kraken) : IWithdrawalConnector
 
     static readonly Dictionary<string, string> PermissionProblems = new()
     {
-        ["add-withdraw-address"] = "This key can add withdrawal addresses, so a stolen copy could send funds anywhere.",
-        ["update-withdraw-address"] = "This key can update withdrawal addresses, so a stolen copy could redirect funds.",
+        ["add-withdraw-address"] = KrakenConnector.DestinationPermissions["add-withdraw-address"],
+        ["update-withdraw-address"] = KrakenConnector.DestinationPermissions["update-withdraw-address"],
         ["modify-trades"] = "This key can place orders.",
         ["close-trades"] = "This key can cancel or close orders."
     };
 
+    public Task<IReadOnlyList<string>> GetOtherKeyProblemsAsync(ExchangeCredentials credentials, CancellationToken cancellationToken) =>
+        kraken.GetDestinationPermissionProblemsAsync(credentials, cancellationToken);
+
     public async Task<IReadOnlyList<string>> GetKeyProblemsAsync(ExchangeCredentials credentials, CancellationToken cancellationToken)
     {
-        var info = Expect<JObject>(await kraken.PrivateAsync(credentials, "GetApiKeyInfo", [], cancellationToken), "GetApiKeyInfo");
-        if (info["permissions"] is not JArray permissions || permissions.Any(p => p.Type != JTokenType.String))
-            throw new ExchangeException("Kraken sent no permission list for the key.");
-        var problems = permissions.Select(p => (string)p!).Where(p => !AllowedPermissions.Contains(p)).Distinct()
+        var problems = (await kraken.GetPermissionsAsync(credentials, cancellationToken)).Where(p => !AllowedPermissions.Contains(p))
             .Select(p => PermissionProblems.GetValueOrDefault(p, $"This key has the {p} permission, which payout doesn't use."))
             .ToList();
         if (problems.Count > 0)

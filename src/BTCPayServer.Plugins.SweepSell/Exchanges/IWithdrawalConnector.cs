@@ -58,6 +58,12 @@ public interface IWithdrawalConnector
     /// add or change withdrawal destinations (which would let a stolen key send funds anywhere), or trade. Empty when fine.
     /// </summary>
     Task<IReadOnlyList<string>> GetKeyProblemsAsync(ExchangeCredentials credentials, CancellationToken cancellationToken);
+
+    /// <summary>
+    /// Why another key on the same exchange (the store's trading key) makes payouts unsafe: it can add or change withdrawal
+    /// destinations, so a stolen copy could change where the saved destination's name sends funds. Empty when fine.
+    /// </summary>
+    Task<IReadOnlyList<string>> GetOtherKeyProblemsAsync(ExchangeCredentials credentials, CancellationToken cancellationToken);
 }
 
 /// <summary>A withdrawal destination saved in the exchange account, by the name the owner gave it there.</summary>

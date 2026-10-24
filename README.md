@@ -46,9 +46,10 @@ Adding an exchange means implementing `IExchangeConnector` (see `src/.../Exchang
 ## Your exchange key
 
 Create a key for this plugin only, with permission to query funds, deposit funds, query open and closed orders and create
-orders, and **without withdrawal permission**. The key is stored encrypted on your BTCPay server and
-never shown again after you save it. The settings page has a **Test the key** button, which checks
-each permission without trading, and that the key can't withdraw.
+orders, and **without withdrawal permission** or permission to add or update withdrawal addresses. The key
+is stored encrypted on your BTCPay server and never shown again after you save it. The settings page has a
+**Test the key** button, which checks each permission without trading, and that the key can't withdraw or
+change withdrawal addresses. Payout won't run while the trading key can change withdrawal addresses.
 
 Payout needs a second key with only **query funds** and **withdraw funds**: payout refuses a key
 with any other permission, such as an order or withdrawal address permission. **Test the payout key**

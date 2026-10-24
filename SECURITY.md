@@ -27,7 +27,9 @@ See [docs/threat-model.md](docs/threat-model.md) for the full model.
 
 ## Guidance for users
 
-- Create the trading key **without withdrawal permission**. Trading never withdraws.
+- Create the trading key **without withdrawal permission** and without permission to add or update
+  withdrawal addresses. Trading never withdraws, and payout won't run while the trading key can change
+  withdrawal addresses.
 - Payout is optional. If you use it, give it a separate key with only Query Funds and Withdraw Funds
   (payout refuses a key with any other permission), and keep only your own accounts saved as withdrawal
   destinations in your exchange.

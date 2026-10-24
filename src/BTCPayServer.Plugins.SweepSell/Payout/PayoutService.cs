@@ -147,6 +147,25 @@ public class PayoutService(IPayoutRepository payouts, ISweepSellRepository repos
             Record(storeId, state, asset, ActivityOutcome.Failed, $"Could not read the payout key's permissions from {connector.Name}: {e.Message}");
             return;
         }
+        // The destination is named, so a trading key on the same exchange that can add or change destinations could
+        // change where that name sends funds. Checked every run too.
+        if (settings.ExchangeId == connector.Id && protector.Credentials(settings) is { } trading)
+        {
+            try
+            {
+                if (await connector.GetOtherKeyProblemsAsync(trading, cancellationToken) is { Count: > 0 } problems)
+                {
+                    Record(storeId, state, asset, ActivityOutcome.Failed,
+                        $"The store's trading key makes payouts unsafe: {string.Join(" ", problems)} Remove Add and Update Withdrawal Addresses from the trading key.");
+                    return;
+                }
+            }
+            catch (Exception e) when (IsRecordedFailure(e, cancellationToken))
+            {
+                Record(storeId, state, asset, ActivityOutcome.Failed, $"Could not read the trading key's permissions from {connector.Name}: {e.Message}");
+                return;
+            }
+        }
 
         IReadOnlyList<WithdrawalRecord> recent;
         try
@@ -256,8 +275,7 @@ public class PayoutService(IPayoutRepository payouts, ISweepSellRepository repos
             Destination = payout.Destination,
             Amount = quote.Amount,
             NetAmount = quote.NetAmount,
-            Fee = quote.Fee,
-            SentAt = clock.GetUtcNow()
+            Fee = quote.Fee
         };
         string reference;
         // Settings saves take the same lock, so a pause, a new destination or key saved during the run applies first.
@@ -271,16 +289,33 @@ public class PayoutService(IPayoutRepository payouts, ISweepSellRepository repos
                     "The settings changed during the run (paused, payout or its options changed, or another key); nothing was withdrawn.");
                 return;
             }
-            // Read again right before sending, so every withdrawal that could be confused with this one is already known.
+            // The balance and withdrawals are read again under the lock: a convert sell or another withdrawal of this asset
+            // since they were first read must not eat into what is kept, and every withdrawal that could be confused with this
+            // one is known.
+            IReadOnlyList<WithdrawalRecord> before;
+            decimal balanceNow;
             try
             {
-                var before = await connector.GetRecentWithdrawalsAsync(credentials, asset, pending.SentAt - MatchBefore - TimeSpan.FromMinutes(1), cancellationToken);
-                pending.SeenBefore = recent.Concat(before).Where(r => r.RequestedAt >= pending.SentAt - MatchBefore - TimeSpan.FromMinutes(1))
-                    .Select(r => r.Reference).Distinct().ToList();
+                before = await connector.GetRecentWithdrawalsAsync(credentials, asset, clock.GetUtcNow() - History, cancellationToken);
+                balanceNow = await connector.GetAvailableBalanceAsync(credentials, asset, cancellationToken);
             }
             catch (Exception e) when (IsRecordedFailure(e, cancellationToken))
             {
-                Record(storeId, state, asset, ActivityOutcome.Failed, $"Could not read recent {asset} withdrawals from {connector.Name} before withdrawing: {e.Message}. Nothing was withdrawn.");
+                Record(storeId, state, asset, ActivityOutcome.Failed, $"Could not read the {asset} balance and withdrawals from {connector.Name} before withdrawing: {e.Message}. Nothing was withdrawn.");
+                return;
+            }
+            // Stamped right before sending: the withdrawal counts on this UTC day, and the cap is checked again for it, so a
+            // run that crossed midnight can't spend the previous day's remainder.
+            pending.SentAt = clock.GetUtcNow();
+            pending.SeenBefore = recent.Concat(before).Where(r => r.RequestedAt >= pending.SentAt - MatchBefore - TimeSpan.FromMinutes(1))
+                .Select(r => r.Reference).Distinct().ToList();
+            var availableNow = balanceNow - payout.KeepBalance - before.Where(r => r.Status == WithdrawalStatus.InProgress).Sum(r => r.Amount + r.Fee);
+            var leftNow = payout.DailyCap - state.WithdrawnOn(pending.SentAt, asset);
+            if (quote.Amount > availableNow || quote.Amount > leftNow)
+            {
+                Record(storeId, state, asset, ActivityOutcome.Waiting, quote.Amount > leftNow
+                    ? $"Today's cap (UTC) leaves {Amount(Math.Max(leftNow, 0))} {asset}, less than the {Amount(quote.Amount)} {asset} planned, as the day changed during the run. Nothing was withdrawn; the next run plans again."
+                    : $"The {asset} balance changed during the run: {Amount(Math.Max(availableNow, 0))} {asset} can be withdrawn now, less than the {Amount(quote.Amount)} {asset} planned. Nothing was withdrawn; the next run plans again.");
                 return;
             }
             state.Pending.Add(pending);
