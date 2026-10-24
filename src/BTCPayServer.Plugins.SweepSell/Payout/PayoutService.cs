@@ -170,9 +170,9 @@ public class PayoutService(IPayoutRepository payouts, ISweepSellRepository repos
             await payouts.SaveStateAsync(storeId, state);
         }
 
-        // Withdrawals still in progress are remembered by exchange and asset (not by key, so a new key for the same account
+        // Withdrawals still in progress are remembered by account and asset (not by key, so a new key for the same account
         // still holds them back), and read back to the oldest of them.
-        var list = new WithdrawalList(connector.Id, asset);
+        var list = new WithdrawalList(connector.Id, account.Hash, asset);
         var since = Since(state, list);
         IReadOnlyList<WithdrawalRecord> recent;
         try
@@ -298,11 +298,22 @@ public class PayoutService(IPayoutRepository payouts, ISweepSellRepository repos
                 return;
             // Each run pays out what its store sees of the account; a second store paying out the same account wouldn't see
             // this one's withdrawals until they are listed, and could send them again.
-            if (await SharesAccountAsync(storeId, connector, credentials, account))
+            string? shared;
+            try
+            {
+                shared = await SharedAccountAsync(storeId, connector, credentials, account, cancellationToken);
+            }
+            catch (Exception e) when (IsRecordedFailure(e, cancellationToken))
             {
                 Record(storeId, state, asset, ActivityOutcome.Failed,
-                    $"Another store on this server pays out live from the same {connector.Name} account (or {connector.Name} doesn't say which account " +
-                    "a key belongs to). Each exchange account can be paid out by one store only, so give each store its own account. Nothing was withdrawn.");
+                    $"Could not read which {connector.Name} account another store on this server trades from: {e.Message}. Nothing was withdrawn.");
+                return;
+            }
+            if (shared is not null)
+            {
+                Record(storeId, state, asset, ActivityOutcome.Failed,
+                    $"Another store on this server {shared} the same {connector.Name} account (or {connector.Name} doesn't say which account a key " +
+                    "belongs to). Payout needs an exchange account no other store uses, so give each store its own account. Nothing was withdrawn.");
                 return;
             }
             // The balance and withdrawals are read again under the lock: a convert sell or another withdrawal of this asset
@@ -341,7 +352,16 @@ public class PayoutService(IPayoutRepository payouts, ISweepSellRepository repos
                 return;
             }
             state.Pending.Add(pending);
-            await payouts.SaveStateAsync(storeId, state);
+            try
+            {
+                await payouts.SaveStateAsync(storeId, state);
+            }
+            catch
+            {
+                // Not sent, so it must not be saved as pending by the save after the run either.
+                state.Pending.Remove(pending);
+                throw;
+            }
             try
             {
                 reference = await connector.WithdrawAsync(credentials, asset, payout.Destination, quote.Amount, payout.MaxFee, cancellationToken);
@@ -561,25 +581,44 @@ public class PayoutService(IPayoutRepository payouts, ISweepSellRepository repos
     }
 
     /// <summary>
-    /// Whether another store pays out live (enabled, not a dry run) from the same exchange account: with the same key, or
-    /// with a key whose account the other store's last run saved as this one's. Each run saves its account before this
-    /// check, so of two stores turned on together the later run always finds the earlier one. When the exchange doesn't
-    /// report accounts, any other store paying out live on it counts.
+    /// What another store does with the payout's exchange account, when one does, or null. Another store's run wouldn't see
+    /// this one's unlisted withdrawals and could send them again, and its sells could eat into what is kept. Counted:
+    /// <list type="bullet">
+    /// <item>paying out live (enabled, not a dry run) with the same key, or a key whose account its last run saved as this one;</item>
+    /// <item>any payout state of the account still unresolved (pending or unsettled withdrawals), whatever its settings now;</item>
+    /// <item>trading from the account (convert or hedging on), read from its trading key.</item>
+    /// </list>
+    /// Each run saves its account before this check, so of two stores paying out together the later run always finds the
+    /// earlier one. When the exchange doesn't report accounts, any other store using it counts.
     /// </summary>
-    async Task<bool> SharesAccountAsync(string storeId, IWithdrawalConnector connector, ExchangeCredentials credentials, PayoutAccount account)
+    async Task<string?> SharedAccountAsync(string storeId, IWithdrawalConnector connector, ExchangeCredentials credentials, PayoutAccount account,
+        CancellationToken cancellationToken)
     {
         foreach (var (otherId, other) in await payouts.GetAllAsync())
         {
-            if (otherId == storeId || other is not { Enabled: true, DryRun: false } || other.ExchangeId != connector.Id ||
-                protector.Credentials(other) is not { } otherKey)
+            if (otherId == storeId || other.ExchangeId != connector.Id)
                 continue;
-            if (otherKey.ApiKey == credentials.ApiKey || account.Hash is null)
-                return true;
-            // Saved for the key the other store still has; one saved for an older key is checked by that store's next run.
-            if ((await payouts.GetStateAsync(otherId)).Account is { } saved && saved.Hash == account.Hash && saved.KeyFingerprint == otherKey.Fingerprint())
-                return true;
+            var otherState = await payouts.GetStateAsync(otherId);
+            var saved = otherState.Account;
+            var unresolved = otherState.Pending.Count > 0 || otherState.Unsettled.Count > 0;
+            if (unresolved && (account.Hash is null || saved is null || saved.Hash == account.Hash))
+                return "still has withdrawals it hasn't seen settle from";
+            if (other is not { Enabled: true, DryRun: false } || protector.Credentials(other) is not { } otherKey)
+                continue;
+            // A saved account counts for the key the other store still has; one saved for an older key is checked by its next run.
+            if (otherKey.ApiKey == credentials.ApiKey || account.Hash is null ||
+                saved is not null && saved.Hash == account.Hash && saved.KeyFingerprint == otherKey.Fingerprint())
+                return "pays out live from";
         }
-        return false;
+        foreach (var (otherId, other) in await repository.GetAllAsync())
+        {
+            if (otherId == storeId || other.ExchangeId != connector.Id || !(other.Convert.Enabled || other.Hedge.Enabled) ||
+                protector.Credentials(other) is not { } otherTrading)
+                continue;
+            if (account.Hash is null || PayoutAccount.For(connector.Id, await connector.GetAccountIdAsync(otherTrading, cancellationToken), otherTrading).Hash == account.Hash)
+                return "trades from";
+        }
+        return null;
     }
 
     /// <summary>The store's trading key when it is on the payout exchange, where it could change the saved destinations.</summary>
@@ -608,41 +647,45 @@ public class PayoutService(IPayoutRepository payouts, ISweepSellRepository repos
     }
 
     /// <summary>
-    /// How far back withdrawals are read: <see cref="History"/>, or further to the oldest one still unsettled, so a
-    /// withdrawal on hold for longer stays held back from the balance.
+    /// How far back withdrawals are read: <see cref="History"/>, or further to the oldest one still unsettled or pending, so
+    /// a withdrawal on hold (or listed only) after longer is still found.
     /// </summary>
     DateTimeOffset Since(PayoutState state, WithdrawalList list)
     {
         var since = clock.GetUtcNow() - History;
-        return state.Unsettled.Where(list.Holds).Select(u => u.RequestedAt - MatchBefore).Append(since).Min();
+        return state.Unsettled.Where(list.Holds).Select(u => u.RequestedAt)
+            .Concat(state.Pending.Where(p => p.ExchangeId == list.ExchangeId && p.Asset == list.Asset).Select(p => p.SentAt))
+            .Select(t => t - MatchBefore).Append(since).Min();
     }
 
     /// <summary>
     /// Notes which of <paramref name="list"/>'s withdrawals, as read back to <paramref name="since"/>, are still in progress
-    /// and which have settled, and returns the amount of all its unsettled ones, fees included. One the read covers but
-    /// doesn't list is in no account the key can see (a key for another account was saved), so it no longer holds anything
-    /// back here. Other exchanges' and assets' entries are kept for when they are used again.
+    /// and which have settled, and returns the amount of all its unsettled ones, fees included. One that isn't listed any
+    /// more stays unsettled, so its amount is never paid out again; except when the exchange doesn't say which account a
+    /// key belongs to, where one the read covers but doesn't list is taken to be another account's (a key for another
+    /// account was saved), whose balance never held it. Other accounts' and assets' entries are kept for when they are used again.
     /// </summary>
     static decimal Track(PayoutState state, WithdrawalList list, IReadOnlyList<WithdrawalRecord> listed, DateTimeOffset since)
     {
-        state.Unsettled.RemoveAll(u => list.Holds(u) && u.RequestedAt >= since && listed.All(r => r.Reference != u.Reference));
+        if (list.AccountHash is null)
+            state.Unsettled.RemoveAll(u => list.Holds(u) && u.RequestedAt >= since && listed.All(r => r.Reference != u.Reference));
         foreach (var record in listed)
         {
             state.Unsettled.RemoveAll(u => list.Holds(u) && u.Reference == record.Reference);
             if (record.Status == WithdrawalStatus.InProgress)
                 state.Unsettled.Add(new UnsettledWithdrawal
                 {
-                    ExchangeId = list.ExchangeId, Asset = list.Asset, Reference = record.Reference, RequestedAt = record.RequestedAt,
+                    ExchangeId = list.ExchangeId, AccountHash = list.AccountHash, Asset = list.Asset, Reference = record.Reference, RequestedAt = record.RequestedAt,
                     Amount = record.Amount + record.Fee
                 });
         }
         return state.Unsettled.Where(list.Holds).Sum(u => u.Amount);
     }
 
-    /// <summary>The exchange and asset whose withdrawals a run reads.</summary>
-    sealed record WithdrawalList(string ExchangeId, string Asset)
+    /// <summary>The exchange account (by hash, null when the exchange doesn't report one) and asset whose withdrawals a run reads.</summary>
+    sealed record WithdrawalList(string ExchangeId, string? AccountHash, string Asset)
     {
-        public bool Holds(UnsettledWithdrawal u) => u.ExchangeId == ExchangeId && u.Asset == Asset;
+        public bool Holds(UnsettledWithdrawal u) => u.ExchangeId == ExchangeId && u.AccountHash == AccountHash && u.Asset == Asset;
     }
 
     /// <summary>Whether the settings saved now still allow the live withdrawal a run planned with <paramref name="planned"/>.</summary>

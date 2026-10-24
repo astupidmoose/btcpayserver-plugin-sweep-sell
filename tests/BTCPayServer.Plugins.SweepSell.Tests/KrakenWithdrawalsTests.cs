@@ -261,6 +261,19 @@ public class KrakenWithdrawalsTests
     }
 
     [Theory]
+    [InlineData("\"0\"", "\"0\"", false)]
+    [InlineData("\"1893456000\"", "\"0\"", true)]
+    [InlineData("\"0\"", "\"1893456000\"", true)]
+    public async Task KeysThatCanQueryOnlyPartOfTheHistoryAreRefused(string from, string to, bool refused)
+    {
+        var (http, kraken) = Setup();
+        http.Responses["/0/private/GetApiKeyInfo"] =
+            $$$"""{"error":[],"result":{"api_key_name":"test","permissions":["query-funds","withdraw-funds"],"query_from":{{{from}}},"query_to":{{{to}}}}}""";
+        var found = await kraken.GetKeyProblemsAsync(Credentials, Ct);
+        Assert.Equal(refused, found.Any(p => p.Contains("only part of the account's history")));
+    }
+
+    [Theory]
     [InlineData("""{"error":[],"result":{"api_key_name":"test","iban":"TEST 0000 0000 0001"}}""", "TEST 0000 0000 0001")]
     [InlineData("""{"error":[],"result":{"api_key_name":"test","iban":""}}""", null)]
     [InlineData("""{"error":[],"result":{"api_key_name":"test"}}""", null)]

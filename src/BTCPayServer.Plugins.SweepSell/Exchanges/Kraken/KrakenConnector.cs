@@ -330,12 +330,22 @@ public class KrakenConnector(HttpClient http, TimeProvider? clock = null) : IExc
     };
 
     /// <summary>The key's permissions, from Kraken's own record of the key.</summary>
-    internal async Task<IReadOnlyList<string>> GetPermissionsAsync(ExchangeCredentials credentials, CancellationToken cancellationToken)
+    internal async Task<IReadOnlyList<string>> GetPermissionsAsync(ExchangeCredentials credentials, CancellationToken cancellationToken) =>
+        (await GetKeyInfoAsync(credentials, cancellationToken)).Permissions;
+
+    /// <summary>
+    /// Kraken's record of the key: its permissions, and whether it may query only part of the account's history (a query
+    /// start or end date is set).
+    /// </summary>
+    internal async Task<(IReadOnlyList<string> Permissions, bool QueryLimited)> GetKeyInfoAsync(ExchangeCredentials credentials,
+        CancellationToken cancellationToken)
     {
         var info = Expect<JObject>(await PrivateAsync(credentials, "GetApiKeyInfo", [], cancellationToken), "GetApiKeyInfo");
         if (info["permissions"] is not JArray permissions || permissions.Any(p => p.Type != JTokenType.String))
             throw new ExchangeException("Kraken sent no permission list for the key.");
-        return permissions.Select(p => (string)p!).Distinct().ToList();
+        // "0" (or absent) means no limit; anything else, or a value that can't be read, is taken as a limit.
+        var limited = new[] { "query_from", "query_to" }.Any(f => Text(info[f]) is { } v && v != "0");
+        return (permissions.Select(p => (string)p!).Distinct().ToList(), limited);
     }
 
     /// <summary>The account's internal IBAN (IIBAN) from Kraken's record of the key, the same for every key of the account.</summary>

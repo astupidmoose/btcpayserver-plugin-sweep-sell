@@ -32,8 +32,7 @@ public class PayoutState
 
     /// <summary>
     /// Withdrawals the exchange listed as still in progress (on hold, awaiting cancellation, or not final yet). Kept until it
-    /// lists them as final, however long that takes, so their amount is never paid out again; dropped only when the payout
-    /// key's account doesn't list them at all.
+    /// lists them as final, however long that takes, so their amount is never paid out again.
     /// </summary>
     public List<UnsettledWithdrawal> Unsettled { get; set; } = [];
 
@@ -124,8 +123,10 @@ public class PendingWithdrawal
 
 public class UnsettledWithdrawal
 {
-    /// <summary>The exchange and asset whose withdrawal list showed it: only that list shows when it becomes final.</summary>
+    /// <summary>The exchange, account (<see cref="PayoutAccount.Hash"/>) and asset whose withdrawal list showed it: only that list shows when it becomes final.</summary>
     public string? ExchangeId { get; set; }
+
+    public string? AccountHash { get; set; }
 
     public string Asset { get; set; } = "";
 

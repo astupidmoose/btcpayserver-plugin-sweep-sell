@@ -508,7 +508,7 @@ public class PayoutTests
     }
 
     [Fact]
-    public async Task AWithdrawalAnotherAccountsKeyDoesntListHoldsNothingBack()
+    public async Task AnotherAccountsUnsettledWithdrawalIsKeptButNotHeldBack()
     {
         Configure(minimum: 10m);
         _exchange.Balance = 500m;
@@ -517,14 +517,28 @@ public class PayoutTests
         await Service().RunAsync(StoreId, Ct);
         Assert.Single(State.Unsettled);
 
-        // A key for another account on the same exchange: its list doesn't have the withdrawal, and its balance never held it.
+        // A key for another account on the same exchange: its balance never held the withdrawal.
+        _exchange.Accounts["test-other-account-key"] = "test-account-2";
         _payouts.Settings[StoreId].ProtectedApiKey = Protector.Protect("test-other-account-key");
         _exchange.Records.Clear();
         _exchange.Balance = 300m;
         _clock.Advance(TimeSpan.FromDays(1));
         await Service().RunAsync(StoreId, Ct);
         Assert.Equal(300m, _exchange.Withdrawals[1].Amount);
-        Assert.DoesNotContain(State.Unsettled, u => u.Reference == "REF-1");
+        _exchange.Settle();
+        _clock.Advance(TimeSpan.FromMinutes(1));
+        await Service().RunAsync(StoreId, Ct); // listed and done on that account
+        Assert.Empty(State.Pending);
+
+        // Back on the first account after the usual history: the withdrawal still on hold there is held back again.
+        _exchange.Records.Clear();
+        _exchange.Records.Add(new WithdrawalRecord("REF-1", "test-bank", 499m, 1m, Start, WithdrawalStatus.InProgress));
+        _payouts.Settings[StoreId].ProtectedApiKey = Protector.Protect("test-payout-key");
+        _exchange.Balance = 500m;
+        _clock.Advance(PayoutService.History);
+        await Service().RunAsync(StoreId, Ct);
+        Assert.Equal(2, _exchange.Withdrawals.Count);
+        Assert.Contains("500 in withdrawals still in progress", State.Activity[0].Message);
     }
 
     [Fact]
@@ -596,6 +610,80 @@ public class PayoutTests
         Assert.Contains("would withdraw 300 USD", State.Activity[0].Message);
         Assert.Empty(_exchange.Withdrawals);
         Assert.Empty(State.Pending);
+    }
+
+    [Fact]
+    public async Task AnotherStoreTradingFromTheAccountStopsPayout()
+    {
+        Configure();
+        _exchange.Balance = 500m;
+        _main.Settings["test-store-2"] = new SweepSellSettings
+        {
+            ExchangeId = FakeWithdrawals.ExchangeId,
+            ProtectedApiKey = Protector.Protect("test-trading-key-2"),
+            ProtectedApiSecret = Protector.Protect("test-trading-secret-2"),
+            Convert = { Enabled = true }
+        };
+        await Service().RunAsync(StoreId, Ct);
+        Assert.Empty(_exchange.Withdrawals);
+        Assert.Contains("Another store on this server trades from the same Fake Exchange account", State.Activity[0].Message);
+
+        _exchange.Accounts["test-trading-key-2"] = "test-account-2"; // it trades from its own account
+        await Service().RunAsync(StoreId, Ct);
+        Assert.Single(_exchange.Withdrawals);
+    }
+
+    [Fact]
+    public async Task AnotherStoresUnresolvedWithdrawalKeepsTheAccountBlockedAfterItsPayoutIsTurnedOff()
+    {
+        Configure();
+        _main.Settings["test-store-2"] = Copy(_main.Settings[StoreId]);
+        _payouts.Settings["test-store-2"] = Copy(_payouts.Settings[StoreId]);
+        _payouts.Settings["test-store-2"].ProtectedApiKey = Protector.Protect("test-payout-key-2"); // same account
+        _exchange.Balance = 500m;
+        _exchange.LoseResponse = true;
+        _exchange.OnWithdraw = () => _exchange.Unlisted.Add(_exchange.Records[^1].Reference); // and it isn't listed yet
+        await Service().RunAsync("test-store-2", Ct);
+        Assert.Single(_payouts.States["test-store-2"].Pending);
+        _exchange.LoseResponse = false;
+        _exchange.OnWithdraw = null;
+        _payouts.Settings["test-store-2"].Enabled = false;
+
+        _exchange.Balance = 500m; // not taken from the balance yet
+        await Service().RunAsync(StoreId, Ct);
+        Assert.Single(_exchange.Withdrawals);
+        Assert.Contains("still has withdrawals it hasn't seen settle from", State.Activity[0].Message);
+    }
+
+    [Fact]
+    public async Task APendingWithdrawalListedAfterTheUsualHistoryIsStillFound()
+    {
+        Configure();
+        _exchange.Balance = 500m;
+        _exchange.LoseResponse = true;
+        _exchange.OnWithdraw = () => _exchange.Unlisted.Add(_exchange.Records[^1].Reference);
+        await Service().RunAsync(StoreId, Ct);
+        _exchange.LoseResponse = false;
+        _exchange.OnWithdraw = null;
+
+        _clock.Advance(PayoutService.History + TimeSpan.FromDays(1));
+        _exchange.Unlisted.Clear(); // listed at last, with the time it was requested
+        _exchange.Settle();
+        await Service().RunAsync(StoreId, Ct);
+        Assert.Empty(State.Pending);
+        Assert.Contains(State.Activity, a => a.Message.StartsWith("Found the earlier withdrawal"));
+    }
+
+    [Fact]
+    public async Task APendingWithdrawalThatCouldntBeSavedIsNeitherSentNorKept()
+    {
+        Configure();
+        _exchange.Balance = 500m;
+        _payouts.FailNextPendingSave = true;
+        await Service().RunAsync(StoreId, Ct);
+        Assert.Empty(_exchange.Withdrawals);
+        Assert.Empty(State.Pending); // the save after the run doesn't keep it
+        Assert.Contains("unexpected error", State.Activity[0].Message);
     }
 
     [Fact]
@@ -742,7 +830,19 @@ public class PayoutTests
         public Task<IReadOnlyDictionary<string, PayoutSettings>> GetAllAsync() => Task.FromResult<IReadOnlyDictionary<string, PayoutSettings>>(Settings);
         // Stored as copies, like a database, so a test sees only what was saved.
         public Task<PayoutState> GetStateAsync(string storeId) => Task.FromResult(States.TryGetValue(storeId, out var s) ? Copy(s) : new PayoutState());
-        public Task SaveStateAsync(string storeId, PayoutState state) { States[storeId] = Copy(state); return Task.CompletedTask; }
+        public Task SaveStateAsync(string storeId, PayoutState state)
+        {
+            if (FailNextPendingSave && state.Pending.Count > 0)
+            {
+                FailNextPendingSave = false;
+                throw new InvalidOperationException("The database is unavailable");
+            }
+            States[storeId] = Copy(state);
+            return Task.CompletedTask;
+        }
+
+        /// <summary>The next save of a state with a pending withdrawal fails.</summary>
+        public bool FailNextPendingSave { get; set; }
     }
 
     /// <summary>

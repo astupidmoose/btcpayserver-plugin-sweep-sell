@@ -192,9 +192,13 @@ public class KrakenWithdrawals(KrakenConnector kraken) : IWithdrawalConnector
 
     public async Task<IReadOnlyList<string>> GetKeyProblemsAsync(ExchangeCredentials credentials, CancellationToken cancellationToken)
     {
-        var problems = (await kraken.GetPermissionsAsync(credentials, cancellationToken)).Where(p => !AllowedPermissions.Contains(p))
+        var (permissions, queryLimited) = await kraken.GetKeyInfoAsync(credentials, cancellationToken);
+        var problems = permissions.Where(p => !AllowedPermissions.Contains(p))
             .Select(p => PermissionProblems.GetValueOrDefault(p, $"This key has the {p} permission, which payout doesn't use."))
             .ToList();
+        // Payout reads back to the oldest withdrawal it still accounts for; a key that can't see that far would lose it.
+        if (queryLimited)
+            problems.Add("This key may query only part of the account's history (a query start or end date is set), so older withdrawals couldn't be accounted for.");
         if (problems.Count > 0)
             problems.Add("Create a payout key with only Query Funds and Withdraw Funds.");
         return problems;
