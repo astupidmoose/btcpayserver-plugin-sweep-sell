@@ -109,17 +109,17 @@ public class KrakenConnector(HttpClient http, TimeProvider? clock = null) : IExc
         if (fresh && IsTrue(method["gen-address"]))
             parameters.Add(new("new", "true"));
         var result = Expect<JArray>(await PrivateAsync(credentials, "DepositAddresses", parameters, cancellationToken), "DepositAddresses");
-        var now = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
         var usable = result.OfType<JObject>()
             .Where(a => !string.IsNullOrEmpty(Text(a["address"])))
-            // expiretm 0 means the address never expires; an entry without one is not trusted.
-            .Where(a => long.TryParse(Text(a["expiretm"]), NumberStyles.None, CultureInfo.InvariantCulture, out var expires) && (expires == 0 || expires > now))
+            // Only addresses that never expire (expiretm 0): Kraken doesn't guarantee credit to one marked to expire, and a
+            // sweep may confirm well after it is built. An entry without an expiry is not trusted either.
+            .Where(a => long.TryParse(Text(a["expiretm"]), NumberStyles.None, CultureInfo.InvariantCulture, out var expires) && expires == 0)
             .ToList();
         var entry = parameters.Any(p => p.Key == "new")
             ? usable.FirstOrDefault(a => IsTrue(a["new"]))
               ?? throw new ExchangeException($"Kraken did not return the new {asset} deposit address it was asked for.")
             : usable.FirstOrDefault()
-              ?? throw new ExchangeException($"Kraken returned no unexpired {asset} deposit address. Create one in Kraken first.");
+              ?? throw new ExchangeException($"Kraken returned no {asset} deposit address that never expires. Create one in Kraken first.");
         // Kraken returns a destination tag (XRP) or memo (e.g. XLM) beside the address when the asset needs one.
         var tag = new[] { Text(entry["tag"]), Text(entry["memo"]) }.FirstOrDefault(t => !string.IsNullOrEmpty(t));
         return new DepositDestination(Text(entry["address"])!, tag);

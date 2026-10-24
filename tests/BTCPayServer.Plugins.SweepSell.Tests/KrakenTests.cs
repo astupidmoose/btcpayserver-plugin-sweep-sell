@@ -239,6 +239,7 @@ public class KrakenTests
 
     [Theory]
     [InlineData("""{"address":"DExpired","expiretm":"1000"}""")]
+    [InlineData("""{"address":"DExpiresLater","expiretm":"4102444800"}""")] // marked to expire, even in the future
     [InlineData("""{"address":"DNoExpiry"}""")] // no expiry information: not trusted
     [InlineData("""{"address":"DNullExpiry","expiretm":null}""")]
     public async Task ExpiredOrUndatedAddressesAreNeverReturned(string entry)

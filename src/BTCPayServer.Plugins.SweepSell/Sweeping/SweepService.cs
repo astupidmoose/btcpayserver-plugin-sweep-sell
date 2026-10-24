@@ -221,8 +221,9 @@ public class SweepService(ISweepSellRepository repository, SecretProtector prote
                         $"Today's cap of {Amount(rule.DailyCap)} {code} is reached. Sweeping resumes tomorrow (UTC).");
                     return;
                 }
-                if (left < balance)
-                    amount = left;
+                // Always bounded: the wallet is read again when the sweep is built, and a payment arriving meanwhile must
+                // not take the sweep past the cap. An amount above the balance still sweeps everything.
+                amount = left;
             }
 
             var minimumDeposit = await exchange.GetMinimumDepositAsync(credentials, code, cancellationToken);
@@ -245,6 +246,13 @@ public class SweepService(ISweepSellRepository repository, SecretProtector prote
             {
                 var index = Math.Max(rule.ColdStartIndex, state.NextColdIndex.GetValueOrDefault(ColdKey(rule.ColdDestination)));
                 var (address, derived) = wallets.GetColdAddress(code, rule.ColdDestination, index);
+                if (derived && index == int.MaxValue)
+                {
+                    // The last unhardened index: the next one can't be counted, so the address would be reused.
+                    Record(storeId, state, code, ActivityOutcome.Failed,
+                        $"The cold wallet's extended public key has no unused address left after index {index}. Set a new cold wallet. Nothing was sent.");
+                    return;
+                }
                 coldAddress = address;
                 coldIndex = derived ? index : null;
             }

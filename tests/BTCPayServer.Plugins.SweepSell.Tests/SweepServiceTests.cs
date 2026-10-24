@@ -130,6 +130,20 @@ public class SweepServiceTests
     }
 
     [Fact]
+    public async Task TheLastAddressOfAnExtendedKeyIsNeverUsed()
+    {
+        Configure(rule: r =>
+        {
+            r.ColdPercent = 10;
+            r.ColdDestination = "xpub-cold";
+            r.ColdStartIndex = int.MaxValue;
+        });
+        await Service().RunAsync(_storeId, wait: false, Ct);
+        Assert.Empty(_wallets.Built);
+        Assert.Contains("no unused address left", State.Activity[0].Message);
+    }
+
+    [Fact]
     public async Task FixedColdAddressIsReused()
     {
         Configure(rule: r =>
@@ -161,6 +175,15 @@ public class SweepServiceTests
         _clock.Advance(TimeSpan.FromDays(1));
         await service.RunAsync(_storeId, wait: false, Ct);
         Assert.Equal(0.4m, _wallets.Built[1].Amount);
+    }
+
+    [Fact]
+    public async Task TheCapBoundsTheSweepEvenAboveTheBalance()
+    {
+        // A payment arriving between reading the balance and building the sweep must not take it past the cap.
+        Configure(balance: 0.3m, rule: r => r.DailyCap = 0.5m);
+        await Service().RunAsync(_storeId, wait: false, Ct);
+        Assert.Equal(0.5m, Assert.Single(_wallets.Built).Amount);
     }
 
     [Fact]
