@@ -27,6 +27,12 @@ public class PayoutState
     /// </summary>
     public List<string> Known { get; set; } = [];
 
+    /// <summary>
+    /// Withdrawals the exchange listed as still in progress (on hold, awaiting cancellation, or not final yet). Kept until it
+    /// lists them as final, however long that takes, so their amount is never paid out again.
+    /// </summary>
+    public List<UnsettledWithdrawal> Unsettled { get; set; } = [];
+
     /// <summary>UTC day (yyyy-MM-dd) that <see cref="Withdrawn"/> counts, for the daily cap.</summary>
     public string? WithdrawnDay { get; set; }
 
@@ -107,4 +113,13 @@ public class PendingWithdrawal
     /// of the same amount and destination must not be mistaken for it when the response is lost.
     /// </summary>
     public List<string> SeenBefore { get; set; } = [];
+}
+
+public class UnsettledWithdrawal
+{
+    public string Reference { get; set; } = "";
+    public DateTimeOffset RequestedAt { get; set; }
+
+    /// <summary>What leaves the account, fees included.</summary>
+    public decimal Amount { get; set; }
 }

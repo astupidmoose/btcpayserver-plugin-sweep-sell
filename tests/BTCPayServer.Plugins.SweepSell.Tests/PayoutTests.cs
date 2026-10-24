@@ -363,6 +363,12 @@ public class PayoutTests
         _exchange.Balance = 100m; // more arrived meanwhile
         _clock.Advance(TimeSpan.FromMinutes(1));
         await Service().RunAsync(StoreId, Ct);
+        Assert.Single(State.Pending); // listed, but taken for it only once nothing else can match
+        Assert.Equal(ActivityOutcome.Waiting, State.Activity[0].Outcome);
+        Assert.Contains("may be the earlier withdrawal", State.Activity[0].Message);
+
+        _clock.Advance(PayoutService.MatchAfter);
+        await Service().RunAsync(StoreId, Ct);
         Assert.Empty(State.Pending);
         Assert.Contains("REF-1", State.Known);
         Assert.Contains(State.Activity, a => a.Outcome == ActivityOutcome.Sent && a.Message.StartsWith("Found the earlier withdrawal"));
@@ -381,6 +387,7 @@ public class PayoutTests
         _exchange.LoseResponse = false;
         _exchange.Records[0] = _exchange.Records[0] with { Status = WithdrawalStatus.Failed };
         _exchange.Balance = 0m;
+        _clock.Advance(PayoutService.MatchAfter);
         await Service().RunAsync(StoreId, Ct);
         Assert.Empty(State.Pending);
         Assert.Equal(0m, State.WithdrawnOn(_clock.GetUtcNow(), "USD"));
@@ -405,6 +412,77 @@ public class PayoutTests
         await Service().RunAsync(StoreId, Ct);
         Assert.Single(State.Pending); // still unknown: never matched to the earlier one, so nothing is sent again
         Assert.Single(_exchange.Withdrawals);
+    }
+
+    [Fact]
+    public async Task ALaterWithdrawalIsNeverTakenForALostOneThatIsListedLate()
+    {
+        Configure();
+        _exchange.Balance = 500m;
+        _exchange.LoseResponse = true; // accepted, but the answer is lost and the exchange is slow to list it
+        _exchange.OnWithdraw = () => _exchange.Unlisted.Add(_exchange.Records[^1].Reference);
+        await Service().RunAsync(StoreId, Ct);
+        _exchange.LoseResponse = false;
+        _exchange.OnWithdraw = null;
+
+        // The owner withdraws the same amount to the same destination by hand, and that one is listed first.
+        _clock.Advance(TimeSpan.FromMinutes(10));
+        _exchange.Records.Add(new WithdrawalRecord("HAND-1", "test-bank", 499m, 1m, _clock.GetUtcNow(), WithdrawalStatus.Succeeded));
+        await Service().RunAsync(StoreId, Ct);
+        Assert.Single(State.Pending); // not taken for it while the real one may still be listed
+        Assert.DoesNotContain("HAND-1", State.Known);
+
+        _exchange.Unlisted.Clear();
+        _clock.Advance(PayoutService.MatchAfter);
+        _exchange.Balance = 500m;
+        await Service().RunAsync(StoreId, Ct);
+        Assert.Single(State.Pending); // both listed now: which is which needs the owner
+        Assert.Contains("Several withdrawals", State.Activity[0].Message);
+        Assert.Single(_exchange.Withdrawals);
+    }
+
+    [Fact]
+    public async Task AWithdrawalOnHoldLongerThanTheHistoryStaysHeldBack()
+    {
+        Configure(minimum: 10m);
+        _exchange.Balance = 500m;
+        await Service().RunAsync(StoreId, Ct);
+        Assert.Equal(500m, Assert.Single(_exchange.Withdrawals).Amount);
+        _clock.Advance(TimeSpan.FromMinutes(1));
+        await Service().RunAsync(StoreId, Ct); // listed, still in progress (on hold)
+        Assert.Empty(State.Pending);
+
+        // Kraken hasn't taken it from the balance yet, and it is still on hold after the usual history.
+        _exchange.Balance = 500m;
+        _clock.Advance(PayoutService.History + TimeSpan.FromDays(1));
+        await Service().RunAsync(StoreId, Ct);
+        Assert.Single(_exchange.Withdrawals); // never paid out again
+        Assert.Contains("500 in withdrawals still in progress", State.Activity[0].Message);
+
+        // Once it is final, payout resumes.
+        _exchange.Settle();
+        _exchange.Balance = 100m;
+        _clock.Advance(TimeSpan.FromDays(1));
+        await Service().RunAsync(StoreId, Ct);
+        Assert.Empty(State.Unsettled);
+        Assert.Equal([500m, 100m], _exchange.Withdrawals.Select(w => w.Amount));
+    }
+
+    [Fact]
+    public async Task ATradingKeySavedDuringTheRunIsCheckedBeforeWithdrawing()
+    {
+        Configure();
+        _exchange.Balance = 500m;
+        _exchange.OnQuote = () =>
+        {
+            _main.Settings[StoreId].ProtectedApiKey = Protector.Protect("test-new-trading-key");
+            _exchange.OtherKeyProblems.Add("This key can add withdrawal addresses.");
+        };
+        await Service().RunAsync(StoreId, Ct);
+        Assert.Empty(_exchange.Withdrawals);
+        Assert.Empty(State.Pending);
+        Assert.Equal(["test-trading-key", "test-new-trading-key"], _exchange.OtherKeysChecked);
+        Assert.Contains("trading key makes payouts unsafe", State.Activity[0].Message);
     }
 
     [Fact]

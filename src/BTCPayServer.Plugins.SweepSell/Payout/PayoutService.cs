@@ -149,34 +149,21 @@ public class PayoutService(IPayoutRepository payouts, ISweepSellRepository repos
         }
         // The destination is named, so a trading key on the same exchange that can add or change destinations could
         // change where that name sends funds. Checked every run too.
-        if (settings.ExchangeId == connector.Id && protector.Credentials(settings) is { } trading)
-        {
-            try
-            {
-                if (await connector.GetOtherKeyProblemsAsync(trading, cancellationToken) is { Count: > 0 } problems)
-                {
-                    Record(storeId, state, asset, ActivityOutcome.Failed,
-                        $"The store's trading key makes payouts unsafe: {string.Join(" ", problems)} Remove Add and Update Withdrawal Addresses from the trading key.");
-                    return;
-                }
-            }
-            catch (Exception e) when (IsRecordedFailure(e, cancellationToken))
-            {
-                Record(storeId, state, asset, ActivityOutcome.Failed, $"Could not read the trading key's permissions from {connector.Name}: {e.Message}");
-                return;
-            }
-        }
+        var trading = TradingKey(settings, connector);
+        if (trading is not null && !await TradingKeyIsSafeAsync(storeId, state, asset, connector, trading, cancellationToken))
+            return;
 
         IReadOnlyList<WithdrawalRecord> recent;
         try
         {
-            recent = await connector.GetRecentWithdrawalsAsync(credentials, asset, clock.GetUtcNow() - History, cancellationToken);
+            recent = await connector.GetRecentWithdrawalsAsync(credentials, asset, Since(state), cancellationToken);
         }
         catch (Exception e) when (IsRecordedFailure(e, cancellationToken))
         {
             Record(storeId, state, asset, ActivityOutcome.Failed, $"Could not read recent {asset} withdrawals from {connector.Name}: {e.Message}");
             return;
         }
+        var inProgress = Track(state, recent);
         if (!Reconcile(storeId, state, asset, connector, credentials, recent))
             return;
 
@@ -199,7 +186,6 @@ public class PayoutService(IPayoutRepository payouts, ISweepSellRepository repos
         }
         // A withdrawal still in progress may not have left the balance yet. Leaving its amount on the exchange means nothing
         // is ever paid out twice; if it had already left, this run withdraws that much less and a later run sends the rest.
-        var inProgress = recent.Where(r => r.Status == WithdrawalStatus.InProgress).Sum(r => r.Amount + r.Fee);
         var available = balance - payout.KeepBalance - inProgress;
         var amount = Math.Min(available, left);
         if (amount <= 0 || amount < payout.Minimum)
@@ -283,12 +269,17 @@ public class PayoutService(IPayoutRepository payouts, ISweepSellRepository repos
         await gate.WaitAsync(cancellationToken);
         try
         {
-            if (!StillApplies(await repository.GetAsync(storeId), await payouts.GetAsync(storeId), payout, connector, credentials))
+            var settingsNow = await repository.GetAsync(storeId);
+            if (!StillApplies(settingsNow, await payouts.GetAsync(storeId), payout, connector, credentials))
             {
                 Record(storeId, state, asset, ActivityOutcome.Waiting,
                     "The settings changed during the run (paused, payout or its options changed, or another key); nothing was withdrawn.");
                 return;
             }
+            // A trading key saved since the check above is checked too, before anything is sent.
+            if (TradingKey(settingsNow, connector) is { } tradingNow && !tradingNow.Equals(trading) &&
+                !await TradingKeyIsSafeAsync(storeId, state, asset, connector, tradingNow, cancellationToken))
+                return;
             // The balance and withdrawals are read again under the lock: a convert sell or another withdrawal of this asset
             // since they were first read must not eat into what is kept, and every withdrawal that could be confused with this
             // one is known.
@@ -296,7 +287,7 @@ public class PayoutService(IPayoutRepository payouts, ISweepSellRepository repos
             decimal balanceNow;
             try
             {
-                before = await connector.GetRecentWithdrawalsAsync(credentials, asset, clock.GetUtcNow() - History, cancellationToken);
+                before = await connector.GetRecentWithdrawalsAsync(credentials, asset, Since(state), cancellationToken);
                 balanceNow = await connector.GetAvailableBalanceAsync(credentials, asset, cancellationToken);
             }
             catch (Exception e) when (IsRecordedFailure(e, cancellationToken))
@@ -309,7 +300,7 @@ public class PayoutService(IPayoutRepository payouts, ISweepSellRepository repos
             pending.SentAt = clock.GetUtcNow();
             pending.SeenBefore = recent.Concat(before).Where(r => r.RequestedAt >= pending.SentAt - MatchBefore - TimeSpan.FromMinutes(1))
                 .Select(r => r.Reference).Distinct().ToList();
-            var availableNow = balanceNow - payout.KeepBalance - before.Where(r => r.Status == WithdrawalStatus.InProgress).Sum(r => r.Amount + r.Fee);
+            var availableNow = balanceNow - payout.KeepBalance - Track(state, before);
             var leftNow = payout.DailyCap - state.WithdrawnOn(pending.SentAt, asset);
             if (quote.Amount > availableNow || quote.Amount > leftNow)
             {
@@ -388,6 +379,15 @@ public class PayoutService(IPayoutRepository payouts, ISweepSellRepository repos
                 continue;
             }
             var matches = recent.Where(r => Matches(r, pending, state)).ToList();
+            if (matches.Count == 1 && clock.GetUtcNow() < pending.SentAt + MatchAfter)
+            {
+                // Another withdrawal of the same amount and destination made after this one may be what is listed so far:
+                // it is taken only once every withdrawal that could be it is listed.
+                Record(storeId, state, pending.Asset, ActivityOutcome.Waiting,
+                    $"{connector.Name} lists a withdrawal that may be {what} ({matches[0].Reference}). It is taken for it once no other withdrawal can " +
+                    $"match, after {pending.SentAt + MatchAfter:u}. Nothing more is withdrawn until then.");
+                continue;
+            }
             if (matches.Count == 1)
             {
                 var found = matches[0];
@@ -527,6 +527,56 @@ public class PayoutService(IPayoutRepository payouts, ISweepSellRepository repos
         {
             storeLock.Release();
         }
+    }
+
+    /// <summary>The store's trading key when it is on the payout exchange, where it could change the saved destinations.</summary>
+    ExchangeCredentials? TradingKey(SweepSellSettings settings, IWithdrawalConnector connector) =>
+        settings.ExchangeId == connector.Id ? protector.Credentials(settings) : null;
+
+    /// <summary>Whether <paramref name="trading"/> can't change withdrawal destinations; records why not when it can, or can't be checked.</summary>
+    async Task<bool> TradingKeyIsSafeAsync(string storeId, PayoutState state, string asset, IWithdrawalConnector connector, ExchangeCredentials trading,
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            if (await connector.GetOtherKeyProblemsAsync(trading, cancellationToken) is { Count: > 0 } problems)
+            {
+                Record(storeId, state, asset, ActivityOutcome.Failed,
+                    $"The store's trading key makes payouts unsafe: {string.Join(" ", problems)} Remove Add and Update Withdrawal Addresses from the trading key. Nothing was withdrawn.");
+                return false;
+            }
+            return true;
+        }
+        catch (Exception e) when (IsRecordedFailure(e, cancellationToken))
+        {
+            Record(storeId, state, asset, ActivityOutcome.Failed, $"Could not read the trading key's permissions from {connector.Name}: {e.Message}. Nothing was withdrawn.");
+            return false;
+        }
+    }
+
+    /// <summary>
+    /// How far back withdrawals are read: <see cref="History"/>, or further to the oldest one still unsettled, so a
+    /// withdrawal on hold for longer stays held back from the balance.
+    /// </summary>
+    DateTimeOffset Since(PayoutState state)
+    {
+        var since = clock.GetUtcNow() - History;
+        return state.Unsettled.Count == 0 ? since : new[] { since, state.Unsettled.Min(u => u.RequestedAt) - MatchBefore }.Min();
+    }
+
+    /// <summary>
+    /// Notes which listed withdrawals are still in progress and which have settled, and returns the amount of all unsettled
+    /// ones, fees included. One that isn't listed any more stays unsettled: its amount is never paid out again.
+    /// </summary>
+    static decimal Track(PayoutState state, IReadOnlyList<WithdrawalRecord> listed)
+    {
+        foreach (var record in listed)
+        {
+            state.Unsettled.RemoveAll(u => u.Reference == record.Reference);
+            if (record.Status == WithdrawalStatus.InProgress)
+                state.Unsettled.Add(new UnsettledWithdrawal { Reference = record.Reference, RequestedAt = record.RequestedAt, Amount = record.Amount + record.Fee });
+        }
+        return state.Unsettled.Sum(u => u.Amount);
     }
 
     /// <summary>Whether the settings saved now still allow the live withdrawal a run planned with <paramref name="planned"/>.</summary>
