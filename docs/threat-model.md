@@ -23,6 +23,12 @@ deposit address and other configured destinations, (2) sell on the exchange when
 - **BTCPay events to the plugin:** invoice and payment events come from inside the BTCPay process, not
   from webhooks. There is no inbound endpoint that can trigger a sweep or sale.
 
+## Assumptions
+
+- **One BTCPay Server process per database.** BTCPay Server is deployed as a single process, and the
+  plugin's per-store job locks live in that process. Two processes sharing one database could run a
+  store's jobs twice; that setup is not supported.
+
 ## Threats and mitigations
 
 Mitigations marked *(planned)* arrive with the feature that needs them; the rest are in place.

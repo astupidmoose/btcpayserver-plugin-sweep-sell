@@ -38,6 +38,7 @@ public class ConvertService(ISweepSellRepository repository, SecretProtector pro
     public const int MaxParallelStores = 4;
 
     static readonly ConcurrentDictionary<string, SemaphoreSlim> StoreLocks = new();
+    static readonly ConcurrentDictionary<string, SemaphoreSlim> SettingsLocks = new();
 
     /// <summary>Runs every store whose interval has passed.</summary>
     public async Task RunDueAsync(CancellationToken cancellationToken)
@@ -85,6 +86,12 @@ public class ConvertService(ISweepSellRepository repository, SecretProtector pro
             {
                 await RunAsync(storeId, settings, state, cancellationToken);
             }
+            catch (Exception e) when (!cancellationToken.IsCancellationRequested)
+            {
+                // Anything unexpected still reaches the owner, not only the server log. Pending orders were saved before sending.
+                logger.LogError(e, "Sweep & Sell convert run of store {StoreId} stopped on an unexpected error", storeId);
+                Record(storeId, state, null, ActivityOutcome.Failed, $"The run stopped on an unexpected error: {e.Message}");
+            }
             finally
             {
                 await repository.SaveConvertStateAsync(storeId, state);
@@ -116,7 +123,7 @@ public class ConvertService(ISweepSellRepository repository, SecretProtector pro
         {
             balances = await exchange.GetAvailableBalancesAsync(credentials, cancellationToken);
         }
-        catch (Exception e) when (IsExchangeFailure(e, cancellationToken))
+        catch (Exception e) when (IsRecordedFailure(e, cancellationToken))
         {
             Record(storeId, state, null, ActivityOutcome.Failed, $"Could not read balances from {exchange.Name}: {e.Message}");
             return;
@@ -168,7 +175,7 @@ public class ConvertService(ISweepSellRepository repository, SecretProtector pro
                     continue;
                 }
             }
-            catch (Exception e) when (IsExchangeFailure(e, cancellationToken))
+            catch (Exception e) when (IsRecordedFailure(e, cancellationToken))
             {
                 Record(storeId, state, asset, ActivityOutcome.Failed, $"Could not read the {asset}/{target} market on {exchange.Name}: {e.Message}");
                 continue;
@@ -182,7 +189,7 @@ public class ConvertService(ISweepSellRepository repository, SecretProtector pro
                     Record(storeId, state, asset, ActivityOutcome.DryRun,
                         $"Dry run: would sell up to {Amount(amount)} {asset} for {target} at {Amount(limitPrice)} or better ({check.Description}). {exchange.Name} accepted the order check; nothing was sold.");
                 }
-                catch (Exception e) when (IsExchangeFailure(e, cancellationToken))
+                catch (Exception e) when (IsRecordedFailure(e, cancellationToken))
                 {
                     Record(storeId, state, asset, ActivityOutcome.Failed, $"Dry run: {exchange.Name} rejected selling {Amount(amount)} {asset} for {target}: {e.Message}");
                 }
@@ -201,27 +208,44 @@ public class ConvertService(ISweepSellRepository repository, SecretProtector pro
                 ReferencePrice = reference,
                 SentAt = clock.GetUtcNow()
             };
-            state.Pending.Add(pending);
-            await repository.SaveConvertStateAsync(storeId, state);
             OrderResult result;
+            // Settings saves take the same lock, so a pause, a new key or other changes saved during the run apply before
+            // anything more is sent, and the settings page can't report a pause while an order is going out.
+            var settingsLock = SettingsLock(storeId);
+            await settingsLock.WaitAsync(cancellationToken);
             try
             {
-                result = await exchange.SellAsync(credentials, asset, target, amount, limitPrice, pending.ClientOrderId, validateOnly: false, cancellationToken);
+                if (!StillApplies(await repository.GetAsync(storeId), settings, asset, exchange, credentials))
+                {
+                    Record(storeId, state, null, ActivityOutcome.Waiting,
+                        "The settings changed during the run (paused, conversion or its options changed, or another key); nothing more is sent this run.");
+                    return;
+                }
+                state.Pending.Add(pending);
+                await repository.SaveConvertStateAsync(storeId, state);
+                try
+                {
+                    result = await exchange.SellAsync(credentials, asset, target, amount, limitPrice, pending.ClientOrderId, validateOnly: false, cancellationToken);
+                }
+                catch (ExchangeException e) when (e.Rejected)
+                {
+                    // The exchange refused the order outright, so there is nothing to look up later.
+                    state.Pending.Remove(pending);
+                    Record(storeId, state, asset, ActivityOutcome.Failed,
+                        $"{exchange.Name} refused selling {Amount(amount)} {asset} for {target}: {e.Message}. Nothing was sold.");
+                    continue;
+                }
+                catch (Exception e) when (!cancellationToken.IsCancellationRequested)
+                {
+                    // The order may or may not exist: keep it pending and stop selling until it is looked up.
+                    Record(storeId, state, asset, ActivityOutcome.Failed,
+                        $"Selling {Amount(amount)} {asset} for {target} failed or got no answer: {e.Message}. The next run checks {exchange.Name} for the order before selling again.");
+                    return;
+                }
             }
-            catch (ExchangeException e) when (e.Rejected)
+            finally
             {
-                // The exchange refused the order outright, so there is nothing to look up later.
-                state.Pending.Remove(pending);
-                Record(storeId, state, asset, ActivityOutcome.Failed,
-                    $"{exchange.Name} refused selling {Amount(amount)} {asset} for {target}: {e.Message}. Nothing was sold.");
-                continue;
-            }
-            catch (Exception e) when (!cancellationToken.IsCancellationRequested)
-            {
-                // The order may or may not exist: keep it pending and stop selling until it is looked up.
-                Record(storeId, state, asset, ActivityOutcome.Failed,
-                    $"Selling {Amount(amount)} {asset} for {target} failed or got no answer: {e.Message}. The next run checks {exchange.Name} for the order before selling again.");
-                return;
+                settingsLock.Release();
             }
             pending.OrderIds = result.OrderIds.ToList();
 
@@ -231,7 +255,7 @@ public class ConvertService(ISweepSellRepository repository, SecretProtector pro
             {
                 fill = await exchange.FindOrderAsync(credentials, pending.ClientOrderId, cancellationToken);
             }
-            catch (Exception e) when (IsExchangeFailure(e, cancellationToken))
+            catch (Exception e) when (IsRecordedFailure(e, cancellationToken))
             {
                 logger.LogWarning("Sweep & Sell convert, store {StoreId}: could not look up the {Asset} fill: {Error}", storeId, asset, e.Message);
             }
@@ -278,7 +302,7 @@ public class ConvertService(ISweepSellRepository repository, SecretProtector pro
             {
                 lookup = await exchange.FindOrderAsync(credentials, pending.ClientOrderId, cancellationToken);
             }
-            catch (Exception e) when (IsExchangeFailure(e, cancellationToken))
+            catch (Exception e) when (IsRecordedFailure(e, cancellationToken))
             {
                 Record(storeId, state, pending.Asset, ActivityOutcome.Failed,
                     $"Could not look up the earlier sell of {Amount(pending.Amount)} {pending.Asset} on {exchange.Name}: {e.Message}. Nothing is sold until it is found.");
@@ -363,7 +387,36 @@ public class ConvertService(ISweepSellRepository repository, SecretProtector pro
         }
     }
 
+    /// <summary>
+    /// Runs <paramref name="action"/> (a settings save) while no live order of the store is being sent. Waits at most for
+    /// one order request, never for a whole run.
+    /// </summary>
+    public async Task<T> WithSettingsLockAsync<T>(string storeId, Func<Task<T>> action, CancellationToken cancellationToken)
+    {
+        var settingsLock = SettingsLock(storeId);
+        await settingsLock.WaitAsync(cancellationToken);
+        try
+        {
+            return await action();
+        }
+        finally
+        {
+            settingsLock.Release();
+        }
+    }
+
+    /// <summary>Whether the settings saved now still allow the live sell a run planned with <paramref name="planned"/>.</summary>
+    bool StillApplies(SweepSellSettings current, SweepSellSettings planned, string asset, IExchangeConnector exchange, ExchangeCredentials credentials)
+    {
+        var (now, then) = (current.Convert, planned.Convert);
+        return !current.Paused && now.Enabled && !now.DryRun && current.ExchangeId == exchange.Id &&
+               protector.Credentials(current)?.Fingerprint() == credentials.Fingerprint() &&
+               now.TargetAsset == then.TargetAsset && now.Assets.Contains(asset) &&
+               now.DailyCap == then.DailyCap && now.MaxSlippagePercent == then.MaxSlippagePercent;
+    }
+
     static SemaphoreSlim StoreLock(string storeId) => StoreLocks.GetOrAdd(storeId, _ => new SemaphoreSlim(1, 1));
+    static SemaphoreSlim SettingsLock(string storeId) => SettingsLocks.GetOrAdd(storeId, _ => new SemaphoreSlim(1, 1));
 
     void Record(string storeId, ConvertState state, string? asset, ActivityOutcome outcome, string message)
     {
@@ -378,8 +431,9 @@ public class ConvertService(ISweepSellRepository repository, SecretProtector pro
         state.Add(new ActivityEntry { At = clock.GetUtcNow(), Asset = asset, Outcome = outcome, Message = message });
     }
 
-    static bool IsExchangeFailure(Exception e, CancellationToken cancellationToken) =>
-        e is ExchangeException or HttpRequestException || e is TaskCanceledException && !cancellationToken.IsCancellationRequested;
+    // Arithmetic failures (an absurd balance or price overflowing a decimal) are recorded per asset like exchange errors.
+    static bool IsRecordedFailure(Exception e, CancellationToken cancellationToken) =>
+        e is ExchangeException or HttpRequestException or ArithmeticException || e is TaskCanceledException && !cancellationToken.IsCancellationRequested;
 
     static string Amount(decimal value) => value.ToString("0.########", CultureInfo.InvariantCulture);
 }

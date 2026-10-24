@@ -497,6 +497,75 @@ public class ConvertTests
     }
 
     [Fact]
+    public async Task PauseSavedDuringARunStopsTheNextOrder()
+    {
+        Configure();
+        _exchange.Balances["DOGE"] = 300m;
+        _exchange.OnPrice = () => _repository.Settings[StoreId].Paused = true; // saved while the run reads the market
+        await Service().RunAsync(StoreId, Ct);
+        Assert.Empty(_exchange.Orders);
+        Assert.Empty(State.Pending);
+        Assert.Contains("settings changed during the run", State.Activity[0].Message);
+    }
+
+    [Fact]
+    public async Task NewKeySavedDuringARunStopsTheNextOrder()
+    {
+        Configure();
+        _exchange.Balances["DOGE"] = 300m;
+        _exchange.OnPrice = () => _repository.Settings[StoreId].ProtectedApiKey = Protector.Protect("another-api-key");
+        await Service().RunAsync(StoreId, Ct);
+        Assert.Empty(_exchange.Orders);
+    }
+
+    [Fact]
+    public async Task SettingsSaveWaitsOnlyForAnOrderBeingSent()
+    {
+        Configure(assets: "DOGE");
+        _exchange.Balances["DOGE"] = 300m;
+        var gate = new TaskCompletionSource();
+        _exchange.SellGates["DOGE"] = gate.Task;
+        var service = Service();
+        var run = service.RunAsync(StoreId, Ct);
+        Task<bool> save;
+        try
+        {
+            while (_exchange.Orders.Count == 0)
+                await Task.Delay(10, Ct);
+            save = service.WithSettingsLockAsync(StoreId, () => Task.FromResult(true), Ct);
+            await Task.Delay(50, Ct);
+            Assert.False(save.IsCompleted);
+        }
+        finally
+        {
+            gate.TrySetResult(); // never leave the store's job holding its locks
+        }
+        Assert.True(await save);
+        await run;
+    }
+
+    [Fact]
+    public async Task ArithmeticOverflowIsRecordedForTheAsset()
+    {
+        Configure();
+        _exchange.Balances["DOGE"] = decimal.MaxValue; // rounding to 8 decimals overflows
+        _exchange.Balances["LTC"] = 2m;
+        await Service().RunAsync(StoreId, Ct);
+        Assert.Contains(State.Activity, a => a.Asset == "DOGE" && a.Outcome == ActivityOutcome.Failed);
+        Assert.Contains(State.Activity, a => a.Asset == "LTC" && a.Outcome == ActivityOutcome.Sold);
+    }
+
+    [Fact]
+    public async Task UnexpectedErrorsReachTheActivity()
+    {
+        Configure();
+        _exchange.BalanceError = new InvalidOperationException("something odd");
+        await Service().RunAsync(StoreId, Ct);
+        Assert.Equal(ActivityOutcome.Failed, State.Activity[0].Outcome);
+        Assert.Contains("something odd", State.Activity[0].Message);
+    }
+
+    [Fact]
     public async Task ExchangeErrorsAreRecordedNotThrown()
     {
         Configure();
@@ -570,7 +639,8 @@ public class ConvertTests
         public System.Collections.Concurrent.ConcurrentDictionary<string, SweepSellSettings> Settings { get; } = new();
         public System.Collections.Concurrent.ConcurrentDictionary<string, ConvertState> States { get; } = new();
 
-        public Task<SweepSellSettings> GetAsync(string storeId) => Task.FromResult(Settings.GetValueOrDefault(storeId) ?? new SweepSellSettings());
+        public Task<SweepSellSettings> GetAsync(string storeId) =>
+            Task.FromResult(Settings.TryGetValue(storeId, out var s) ? Copy(s) : new SweepSellSettings());
         public Task SaveAsync(string storeId, SweepSellSettings settings) { Settings[storeId] = settings; return Task.CompletedTask; }
         public Task<IReadOnlyDictionary<string, SweepSellSettings>> GetAllAsync() => Task.FromResult<IReadOnlyDictionary<string, SweepSellSettings>>(Settings);
 
@@ -580,8 +650,7 @@ public class ConvertTests
 
         public Task SaveConvertStateAsync(string storeId, ConvertState state) { States[storeId] = Copy(state); return Task.CompletedTask; }
 
-        static ConvertState Copy(ConvertState s) =>
-            Newtonsoft.Json.JsonConvert.DeserializeObject<ConvertState>(Newtonsoft.Json.JsonConvert.SerializeObject(s))!;
+        static T Copy<T>(T s) => Newtonsoft.Json.JsonConvert.DeserializeObject<T>(Newtonsoft.Json.JsonConvert.SerializeObject(s))!;
     }
 
     /// <summary>
@@ -608,6 +677,7 @@ public class ConvertTests
         /// <summary>Sells of a coin listed here wait for its task.</summary>
         public System.Collections.Concurrent.ConcurrentDictionary<string, Task> SellGates { get; } = new();
         public Exception? FindError { get; set; }
+        public Action? OnPrice { get; set; }
 
         public Task<IReadOnlyDictionary<string, decimal>> GetAvailableBalancesAsync(ExchangeCredentials credentials, CancellationToken cancellationToken)
         {
@@ -620,7 +690,11 @@ public class ConvertTests
         public Task<MarketRules> GetMarketRulesAsync(string baseAsset, string quoteAsset, CancellationToken cancellationToken) =>
             Task.FromResult(new MarketRules(baseAsset, quoteAsset, 0.05m, 0m, 8, 8));
 
-        public Task<MarketPrice> GetPriceAsync(string baseAsset, string quoteAsset, CancellationToken cancellationToken) => Task.FromResult(Price);
+        public Task<MarketPrice> GetPriceAsync(string baseAsset, string quoteAsset, CancellationToken cancellationToken)
+        {
+            OnPrice?.Invoke();
+            return Task.FromResult(Price);
+        }
 
         public async Task<OrderResult> SellAsync(ExchangeCredentials credentials, string baseAsset, string quoteAsset, decimal amount, decimal limitPrice,
             Guid clientOrderId, bool validateOnly, CancellationToken cancellationToken)

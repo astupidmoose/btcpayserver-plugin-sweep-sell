@@ -43,25 +43,18 @@ public class UISweepSellController(ISweepSellRepository repository, SecretProtec
         var updated = Apply(saved, vm, protector);
         if (ModelState.IsValid)
         {
-            if (KeyChanges(saved, updated))
+            // Saved while no order is being sent: a run checks the saved settings again under this lock before each order,
+            // so once this returns no order goes out under the old settings (e.g. after pausing), and pending orders seen
+            // here include every order sent so far.
+            var conflict = await convert.WithSettingsLockAsync(storeId, async () =>
             {
-                // A convert run could send an order with the old key between the check and the save, so they wait for it.
-                var conflict = await convert.WithStoreLockAsync(storeId, async () =>
-                {
-                    var pending = (await repository.GetConvertStateAsync(storeId)).Pending;
-                    if (PendingConflict(updated, pending, protector) is { } error)
-                        return error;
-                    await repository.SaveAsync(storeId, updated);
-                    return null;
-                }, cancellationToken);
-                if (conflict is not null)
-                    ModelState.AddModelError(nameof(vm.ExchangeId), conflict);
-            }
-            else
-            {
-                // Pausing, removing the key and other settings never wait for a run.
+                if (KeyChanges(saved, updated) && PendingConflict(updated, (await repository.GetConvertStateAsync(storeId)).Pending, protector) is { } error)
+                    return error;
                 await repository.SaveAsync(storeId, updated);
-            }
+                return null;
+            }, cancellationToken);
+            if (conflict is not null)
+                ModelState.AddModelError(nameof(vm.ExchangeId), conflict);
         }
         if (!ModelState.IsValid)
             return View(SettingsView, ToViewModel(saved, await repository.GetConvertStateAsync(storeId), vm));
@@ -155,7 +148,7 @@ public class UISweepSellController(ISweepSellRepository repository, SecretProtec
 
     /// <summary>
     /// Whether a save puts a different key (or exchange) in place, which pending orders must be checked against.
-    /// Removing the key isn't a change here: with no key nothing runs, and removing it must never wait or be blocked.
+    /// Removing the key isn't a change here: with no key nothing runs, and removing it must never be blocked.
     /// </summary>
     public static bool KeyChanges(SweepSellSettings saved, SweepSellSettings updated) =>
         updated.HasCredentials && (updated.ExchangeId != saved.ExchangeId || updated.ProtectedApiKey != saved.ProtectedApiKey ||
