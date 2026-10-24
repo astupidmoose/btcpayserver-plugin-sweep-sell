@@ -369,8 +369,9 @@ public class ConvertService(ISweepSellRepository repository, SecretProtector pro
             if (pending is null)
                 return false;
             state.Pending.Remove(pending);
-            // What it sold isn't known here, so its full value counts against today's cap: the cap is never exceeded.
-            state.AddSold(pending.SentAt, pending.TargetAsset, pending.Amount * pending.ReferencePrice);
+            // What it sold isn't known here, so its full value counts against today's cap (the day of removal, which an
+            // order sent on an earlier day wouldn't touch): the cap is never exceeded.
+            state.AddSold(clock.GetUtcNow(), pending.TargetAsset, pending.Amount * pending.ReferencePrice);
             Record(storeId, state, pending.Asset, ActivityOutcome.Failed,
                 $"The pending sell of {Amount(pending.Amount)} {pending.Asset} (client order {clientOrderId:D}) was removed by hand. " +
                 $"Its full value counts against today's cap, since what it sold isn't known. Selling resumes.");

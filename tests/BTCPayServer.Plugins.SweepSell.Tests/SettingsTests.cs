@@ -325,4 +325,60 @@ public class SettingsTests
             f.SweepEnabled = false;
             f.ExchangeId = null;
         })));
+
+    static SweepSellSettings Sweeping(bool enabled = true) => new()
+    {
+        ExchangeId = "kraken",
+        ProtectedApiKey = Protector.Protect("old-key"),
+        ProtectedApiSecret = Protector.Protect("old-secret"),
+        Sweep = new SweepSettings { Enabled = enabled, Rules = [new SweepRule { CryptoCode = "BTC", Enabled = true, MinimumBalance = 0.01m }] }
+    };
+
+    [Fact]
+    public void ListingAnotherWalletsCoinIsNotASweepChange()
+    {
+        var saved = Sweeping();
+        var updated = Sweeping();
+        updated.Sweep.Rules[0].MinimumBalance = 0.010m;
+        updated.Sweep.Rules.Add(new SweepRule { CryptoCode = "LTC" });
+        updated.Paused = true;
+        updated.ProtectedApiKey = saved.ProtectedApiKey;
+        updated.ProtectedApiSecret = saved.ProtectedApiSecret;
+        Assert.False(UISweepSellController.ChangesSweeps(saved, updated));
+    }
+
+    [Theory]
+    [InlineData("rule")]
+    [InlineData("cold")]
+    [InlineData("dry run")]
+    [InlineData("new rule")]
+    [InlineData("key")]
+    [InlineData("exchange")]
+    public void SweepChangesAreDetected(string change)
+    {
+        var saved = Sweeping();
+        var updated = Sweeping();
+        updated.ProtectedApiKey = saved.ProtectedApiKey;
+        updated.ProtectedApiSecret = saved.ProtectedApiSecret;
+        switch (change)
+        {
+            case "rule": updated.Sweep.Rules[0].MinimumBalance = 0.02m; break;
+            case "cold": updated.Sweep.Rules[0].ColdPercent = 10; updated.Sweep.Rules[0].ColdDestination = "cold-address"; break;
+            case "dry run": updated.Sweep.DryRun = false; break;
+            case "new rule": updated.Sweep.Rules.Add(new SweepRule { CryptoCode = "LTC", Enabled = true }); break;
+            case "key": updated.ProtectedApiSecret = Protector.Protect("new-secret"); break;
+            default: updated.ExchangeId = "other"; break;
+        }
+        Assert.True(UISweepSellController.ChangesSweeps(saved, updated));
+    }
+
+    [Fact]
+    public void KeyChangesWhileSweepingIsOffAreNotSweepChanges()
+    {
+        var saved = Sweeping(enabled: false);
+        var updated = Sweeping(enabled: false);
+        Assert.True(UISweepSellController.KeyChanges(saved, updated)); // a new key, but nothing is swept to it
+        Assert.False(UISweepSellController.ChangesSweeps(saved, updated));
+        Assert.False(UISweepSellController.ChangesSweeps(saved, new SweepSellSettings { Sweep = saved.Sweep })); // removing the key
+    }
 }

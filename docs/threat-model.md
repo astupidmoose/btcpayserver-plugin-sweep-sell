@@ -17,7 +17,8 @@ deposit address and other configured destinations, (2) sell on the exchange when
 ## Trust boundaries
 
 - **Browser to BTCPay:** store owners change settings through BTCPay's authenticated UI. Only users with
-  `CanModifyStoreSettings` on the store reach the plugin's pages.
+  `CanModifyStoreSettings` on the store reach the plugin's pages; sweep settings also need the store's wallet
+  signing and broadcasting permissions.
 - **BTCPay to the exchange:** HTTPS to the exchange's public API, authenticated per the exchange's
   scheme. Exchange responses are untrusted input.
 - **BTCPay events to the plugin:** invoice, payment and wallet events come from inside the BTCPay process
@@ -40,7 +41,7 @@ Mitigations marked *(planned)* arrive with the feature that needs them; the rest
 | Database dump or backup reveals exchange keys | Keys encrypted with the data-protection key ring, which is stored apart from the database |
 | Keys leak through logs, pages, API or errors | Keys are write-only in the UI; `ExchangeCredentials.ToString()` hides them; never logged; stored in store settings, which BTCPay's API does not return |
 | Stolen exchange key used to withdraw | The plugin needs and requests no withdrawal permission; the setup guide says not to grant it |
-| Attacker changes a sweep destination | Settings need `CanModifyStoreSettings` (the same permission that can already spend a hot wallet in BTCPay); cold wallet changes are written to the sweep activity and logged as warnings; exchange deposit addresses are fetched from the exchange at send time, never typed in; a settings save during a run is checked under the store's settings lock before the broadcast, so a sweep never goes out under replaced settings |
+| Attacker changes a sweep destination | Settings need `CanModifyStoreSettings`, and any change to sweeping (or to the exchange or key while sweeping is on), Sweep now and removing a pending sweep also need BTCPay's permissions to sign and broadcast wallet transactions in the store, so a store manager without wallet rights can't redirect sweeps; cold wallet changes are written to the sweep activity and logged as warnings; exchange deposit addresses are fetched from the exchange at send time, never typed in; a settings save during a run is checked under the store's settings lock before the broadcast, so a sweep never goes out under replaced settings |
 | Hot wallet key leaks | The key is only read to sign, kept in memory, never logged, stored or put in a message; wallets without a key on the server are reported, never swept |
 | Forged or replayed trigger causes a sale | No external trigger exists; each sale is recorded under its invoice ID and never repeated *(planned)* |
 | Restart or retry sends or sells twice | Convert saves each live order as pending (with its client order ID) before sending it, and a store runs one job at a time. Each sweep is signed, then saved as pending with its raw transaction before it is broadcast; until the wallet or node knows it, nothing more of that coin is swept and only that same transaction is rebroadcast, which can be mined only once. A sweep the node refuses on its first broadcast was never sent and is dropped; one refused on rebroadcast may still be on the network, so it stays pending until the owner checks it and removes it (it then counts against the daily cap). Stores sharing a wallet take a wallet lock, so they never build from the same coins at once. Hedges *(planned)* |

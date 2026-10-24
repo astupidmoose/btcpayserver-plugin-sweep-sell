@@ -157,26 +157,42 @@ public class SweepService(ISweepSellRepository repository, SecretProtector prote
         ExchangeCredentials credentials, CancellationToken cancellationToken)
     {
         var code = rule.CryptoCode;
-        if (state.Pending.FirstOrDefault(p => p.CryptoCode == code) is { } earlier && !await SettlePendingAsync(storeId, state, earlier, cancellationToken))
-            return;
-
         var wallet = await wallets.GetWalletAsync(storeId, code, cancellationToken);
-        if (wallet is null)
+        var earlier = state.Pending.FirstOrDefault(p => string.Equals(p.CryptoCode, code, StringComparison.OrdinalIgnoreCase));
+        // An earlier sweep is settled under the lock of the wallet it spends from, like a new one is built.
+        var walletKey = earlier?.WalletKey ?? wallet?.Key;
+        if (walletKey is null)
         {
             Record(storeId, state, code, ActivityOutcome.Failed, $"This store has no {code} on-chain wallet to sweep.");
             return;
         }
-        if (!wallet.IsHot)
-        {
-            Record(storeId, state, code, ActivityOutcome.Failed,
-                $"The {code} wallet isn't a hot wallet on this server, so it can't be swept automatically.");
-            return;
-        }
 
-        var walletLock = WalletLocks.GetOrAdd($"{code}:{wallet.Key}", _ => new SemaphoreSlim(1, 1));
+        var walletLock = WalletLock(code, walletKey);
         await walletLock.WaitAsync(cancellationToken);
         try
         {
+            if (earlier is not null && !await SettlePendingAsync(storeId, state, earlier, cancellationToken))
+                return;
+            if (wallet is null)
+            {
+                Record(storeId, state, code, ActivityOutcome.Failed, $"This store has no {code} on-chain wallet to sweep.");
+                return;
+            }
+            if (!wallet.IsHot)
+            {
+                Record(storeId, state, code, ActivityOutcome.Failed,
+                    $"The {code} wallet isn't a hot wallet on this server, so it can't be swept automatically.");
+                return;
+            }
+            if (wallet.Key != walletKey)
+                return; // the earlier sweep was from a wallet since replaced; the new one is swept on the next run, under its own lock
+            // A store sharing this wallet may have a sweep whose broadcast isn't settled; its coins must not be spent again here.
+            if (await OtherStorePendingAsync(storeId, wallet) is { } otherStore)
+            {
+                Record(storeId, state, code, ActivityOutcome.Waiting,
+                    $"Another store using this {code} wallet ({otherStore}) has a sweep that isn't settled yet. Waiting for it.");
+                return;
+            }
             var balance = await wallets.GetBalanceAsync(wallet, rule.IncludeUnconfirmed, cancellationToken);
             var coins = rule.IncludeUnconfirmed ? "" : " confirmed";
             if (balance <= 0 || balance < rule.MinimumBalance)
@@ -254,6 +270,7 @@ public class SweepService(ISweepSellRepository repository, SecretProtector prote
                 var pending = new PendingSweep
                 {
                     CryptoCode = code,
+                    WalletKey = wallet.Key,
                     Txid = sweep.Txid,
                     Hex = sweep.Hex,
                     ExchangeId = exchange.Id,
@@ -315,8 +332,19 @@ public class SweepService(ISweepSellRepository repository, SecretProtector prote
             return true;
         }
         BroadcastOutcome outcome;
+        // Rebroadcasting sends funds like a first broadcast: only while the store is live, checked under the settings lock.
+        var settingsLock = SettingsGate.For(storeId);
+        await settingsLock.WaitAsync(cancellationToken);
         try
         {
+            var current = await repository.GetAsync(storeId);
+            if (current.Paused || !current.Sweep.Enabled || current.Sweep.DryRun)
+            {
+                Record(storeId, state, code, ActivityOutcome.Waiting,
+                    $"The earlier sweep of {Amount(pending.Spent)} {code} ({pending.Txid}) isn't on the network, and sweeping is paused, off or in dry run, so it isn't rebroadcast. " +
+                    "Nothing more is swept until it is found or removed under Pending sweeps.");
+                return false;
+            }
             outcome = await wallets.BroadcastAsync(code, pending.Hex, cancellationToken);
         }
         catch (Exception e) when (!cancellationToken.IsCancellationRequested)
@@ -324,6 +352,10 @@ public class SweepService(ISweepSellRepository repository, SecretProtector prote
             Record(storeId, state, code, ActivityOutcome.Failed,
                 $"Could not rebroadcast the earlier sweep of {Amount(pending.Spent)} {code} ({pending.Txid}): {e.Message}. Nothing more is swept until it is found.");
             return false;
+        }
+        finally
+        {
+            settingsLock.Release();
         }
         if (outcome.Accepted)
         {
@@ -338,10 +370,11 @@ public class SweepService(ISweepSellRepository repository, SecretProtector prote
 
     void Sent(string storeId, SweepState state, PendingSweep pending, string what)
     {
+        var now = clock.GetUtcNow();
         state.Pending.Remove(pending);
-        state.Swept.Add(pending.CreatedAt, pending.CryptoCode, pending.Spent);
-        if (pending.ColdDestination is { } cold && pending.ColdIndex is { } index)
-            state.NextColdIndex[cold] = Math.Max(state.NextColdIndex.GetValueOrDefault(cold), index + 1);
+        // Counted when known sent, not when signed: a sweep settled a day late still counts against the day it is found.
+        state.Swept.Add(now, pending.CryptoCode, pending.Spent);
+        UseColdAddress(state, pending);
         if (pending.ToExchange > 0)
         {
             state.Awaiting.Add(new AwaitingDeposit
@@ -350,11 +383,33 @@ public class SweepService(ISweepSellRepository repository, SecretProtector prote
                 Txid = pending.Txid,
                 Amount = pending.ToExchange,
                 ExchangeId = pending.ExchangeId,
-                SentAt = pending.CreatedAt
+                // Watched from when it is known sent, so a sweep settled late still gets the full watch.
+                SentAt = now
             });
         }
         Record(storeId, state, pending.CryptoCode, ActivityOutcome.Sent, $"Sent {what} ({pending.Txid}).");
     }
+
+    static void UseColdAddress(SweepState state, PendingSweep pending)
+    {
+        if (pending.ColdDestination is { } cold && pending.ColdIndex is { } index)
+            state.NextColdIndex[cold] = Math.Max(state.NextColdIndex.GetValueOrDefault(cold), index + 1);
+    }
+
+    /// <summary>Another store with an unsettled sweep from <paramref name="wallet"/>, if any. Called under the wallet's lock.</summary>
+    async Task<string?> OtherStorePendingAsync(string storeId, StoreWallet wallet)
+    {
+        foreach (var other in (await repository.GetAllAsync()).Keys.Where(id => id != storeId))
+        {
+            var state = await repository.GetSweepStateAsync(other);
+            if (state.Pending.Any(p => p.WalletKey == wallet.Key && string.Equals(p.CryptoCode, wallet.CryptoCode, StringComparison.OrdinalIgnoreCase)))
+                return other;
+        }
+        return null;
+    }
+
+    static SemaphoreSlim WalletLock(string cryptoCode, string walletKey) =>
+        WalletLocks.GetOrAdd($"{cryptoCode.ToUpperInvariant()}:{walletKey}", _ => new SemaphoreSlim(1, 1));
 
     /// <summary>
     /// Checks every sweep sent to the exchange. Once one is credited, the store converts straight away instead of waiting
@@ -469,7 +524,10 @@ public class SweepService(ISweepSellRepository repository, SecretProtector prote
             if (pending is null)
                 return false;
             state.Pending.Remove(pending);
-            state.Swept.Add(pending.CreatedAt, pending.CryptoCode, pending.Spent);
+            // Whether it went through isn't known here, so it is treated as sent: it counts against today's cap, and its
+            // cold address isn't used again.
+            state.Swept.Add(clock.GetUtcNow(), pending.CryptoCode, pending.Spent);
+            UseColdAddress(state, pending);
             Record(storeId, state, pending.CryptoCode, ActivityOutcome.Failed,
                 $"The pending sweep of {Amount(pending.Spent)} {pending.CryptoCode} ({pending.Txid}) was removed by hand. " +
                 "It counts against today's cap, since whether it went through isn't known. Sweeping resumes.");

@@ -39,6 +39,10 @@ public class SweepState
 public class PendingSweep
 {
     public string CryptoCode { get; set; } = "";
+
+    /// <summary>The wallet it spends from (<see cref="StoreWallet.Key"/>), whose lock covers settling it.</summary>
+    public string? WalletKey { get; set; }
+
     public string Txid { get; set; } = "";
 
     /// <summary>The signed transaction. Rebroadcasting it is always safe: it can only ever be mined once.</summary>

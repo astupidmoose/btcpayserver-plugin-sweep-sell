@@ -14,6 +14,7 @@ using BTCPayServer.Plugins.SweepSell.Conversion;
 using BTCPayServer.Plugins.SweepSell.Exchanges;
 using BTCPayServer.Plugins.SweepSell.Settings;
 using BTCPayServer.Plugins.SweepSell.Sweeping;
+using BTCPayServer.Plugins.Wallets;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.Extensions.Logging;
@@ -24,7 +25,8 @@ namespace BTCPayServer.Plugins.SweepSell.Controllers;
 [Authorize(AuthenticationSchemes = AuthenticationSchemes.Cookie)]
 [Authorize(Policy = Policies.CanModifyStoreSettings, AuthenticationSchemes = AuthenticationSchemes.Cookie)]
 public class UISweepSellController(ISweepSellRepository repository, SecretProtector protector, ExchangeRegistry exchanges,
-    ConvertService convert, SweepService sweep, IStoreWallets wallets, ILogger<UISweepSellController> logger) : Controller
+    ConvertService convert, SweepService sweep, IStoreWallets wallets, IAuthorizationService authorization, ILogger<UISweepSellController> logger)
+    : Controller
 {
     public const string SettingsView = SweepSellPlugin.ViewsDirectory + "/Settings.cshtml";
 
@@ -32,6 +34,40 @@ public class UISweepSellController(ISweepSellRepository repository, SecretProtec
     public async Task<IActionResult> Settings(string storeId, CancellationToken cancellationToken)
     {
         return View(SettingsView, await ToViewModelAsync(storeId, await repository.GetAsync(storeId), null, cancellationToken));
+    }
+
+    public const string NoSpendPermission =
+        "Sweeping spends from the store's wallets: changing it, or the exchange key it sends to, needs permission to sign and broadcast wallet transactions in this store.";
+
+    /// <summary>
+    /// Whether the user may spend from the store's wallets, as BTCPay asks before signing and broadcasting from them.
+    /// Sweep settings and anything that decides where sweeps go need it, not just the store settings permission.
+    /// </summary>
+    async Task<bool> CanSpendAsync(string storeId) =>
+        (await authorization.AuthorizeAsync(User, storeId, WalletPolicies.CanSignWalletTransactions)).Succeeded &&
+        (await authorization.AuthorizeAsync(User, storeId, WalletPolicies.CanBroadcastWalletTransactions)).Succeeded;
+
+    /// <summary>
+    /// Whether a save changes what sweeps do: any sweep setting, or the exchange or key while sweeping is (or becomes) on,
+    /// since sweeps send to that exchange account.
+    /// </summary>
+    public static bool ChangesSweeps(SweepSellSettings saved, SweepSellSettings updated) =>
+        !SameSweeps(saved.Sweep, updated.Sweep) || (saved.Sweep.Enabled || updated.Sweep.Enabled) && KeyChanges(saved, updated);
+
+    static bool SameSweeps(SweepSettings a, SweepSettings b)
+    {
+        // A coin without a rule and one with an untouched, disabled rule sweep the same: the page lists every wallet's coin.
+        static Dictionary<string, SweepRule> Rules(SweepSettings s) => s.Rules
+            .Where(r => r.Enabled || r.MinimumBalance != 0 || r.ColdPercent != 0 || !string.IsNullOrEmpty(r.ColdDestination) ||
+                        r.ColdStartIndex != 0 || r.DailyCap != 0 || r.IncludeUnconfirmed)
+            .GroupBy(r => r.CryptoCode.ToUpperInvariant())
+            .ToDictionary(g => g.Key, g => g.First());
+        var (ra, rb) = (Rules(a), Rules(b));
+        return a.Enabled == b.Enabled && a.DryRun == b.DryRun && a.IntervalMinutes == b.IntervalMinutes && a.FeeTargetBlocks == b.FeeTargetBlocks &&
+               ra.Count == rb.Count && ra.All(r => rb.TryGetValue(r.Key, out var o) && r.Value.Enabled == o.Enabled &&
+                                                 r.Value.MinimumBalance == o.MinimumBalance && r.Value.ColdPercent == o.ColdPercent &&
+                                                 r.Value.ColdDestination == o.ColdDestination && r.Value.ColdStartIndex == o.ColdStartIndex &&
+                                                 r.Value.DailyCap == o.DailyCap && r.Value.IncludeUnconfirmed == o.IncludeUnconfirmed);
     }
 
     [HttpPost("")]
@@ -42,6 +78,7 @@ public class UISweepSellController(ISweepSellRepository repository, SecretProtec
         if (!ModelState.IsValid)
             return View(SettingsView, await ToViewModelAsync(storeId, await repository.GetAsync(storeId), vm, cancellationToken));
 
+        var canSpend = await CanSpendAsync(storeId);
         // Read, checked and saved while no order is being sent: a run checks the saved settings again under this lock before
         // each order, so once this returns no order goes out under the old settings (e.g. after pausing), and the pending
         // orders and settings seen here include every order and save made so far.
@@ -49,6 +86,8 @@ public class UISweepSellController(ISweepSellRepository repository, SecretProtec
         {
             var current = await repository.GetAsync(storeId);
             var next = Apply(current, vm, protector);
+            if (!canSpend && ChangesSweeps(current, next))
+                return (current, next, NoSpendPermission);
             if (KeyChanges(current, next) && PendingConflict(next, (await repository.GetConvertStateAsync(storeId)).Pending, protector) is { } error)
                 return (current, next, error);
             await repository.SaveAsync(storeId, next);
@@ -56,7 +95,7 @@ public class UISweepSellController(ISweepSellRepository repository, SecretProtec
         }, cancellationToken);
         if (conflict is not null)
         {
-            ModelState.AddModelError(nameof(vm.ExchangeId), conflict);
+            ModelState.AddModelError(conflict == NoSpendPermission ? nameof(vm.SweepEnabled) : nameof(vm.ExchangeId), conflict);
             return View(SettingsView, await ToViewModelAsync(storeId, saved, vm, cancellationToken));
         }
 
@@ -156,6 +195,8 @@ public class UISweepSellController(ISweepSellRepository repository, SecretProtec
     [HttpPost("sweep/run")]
     public async Task<IActionResult> RunSweep(string storeId, CancellationToken cancellationToken)
     {
+        if (!await CanSpendAsync(storeId))
+            return Forbid();
         var result = await sweep.RunAsync(storeId, wait: false, cancellationToken);
         TempData.SetStatusMessageModel(new StatusMessageModel
         {
@@ -174,6 +215,8 @@ public class UISweepSellController(ISweepSellRepository repository, SecretProtec
     [HttpPost("sweep/pending/{txid}/remove")]
     public async Task<IActionResult> RemovePendingSweep(string storeId, string txid, CancellationToken cancellationToken)
     {
+        if (!await CanSpendAsync(storeId))
+            return Forbid();
         var removed = await sweep.RemovePendingAsync(storeId, txid, cancellationToken);
         TempData.SetStatusMessageModel(new StatusMessageModel
         {
@@ -407,6 +450,7 @@ public class UISweepSellController(ISweepSellRepository repository, SecretProtec
             SweepPending = sweepState.Pending,
             SweepAwaiting = sweepState.Awaiting,
             SweepActivity = sweepState.Activity,
+            CanSpend = await CanSpendAsync(storeId),
             // Saved but undecryptable (e.g. restored on a server with other data-protection keys) counts as not saved.
             HasCredentials = protector.Credentials(settings) is not null,
             CredentialsUnreadable = settings.HasCredentials && protector.Credentials(settings) is null,
@@ -491,6 +535,9 @@ public class SweepSellSettingsViewModel
     public List<AwaitingDeposit> SweepAwaiting { get; set; } = [];
 
     public List<ActivityEntry> SweepActivity { get; set; } = [];
+
+    /// <summary>Whether the user may change sweeps (sign and broadcast wallet transactions in the store). Not posted.</summary>
+    public bool CanSpend { get; set; }
 
     public bool HasCredentials { get; set; }
 

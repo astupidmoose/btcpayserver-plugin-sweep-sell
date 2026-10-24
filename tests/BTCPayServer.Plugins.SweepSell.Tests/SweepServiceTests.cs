@@ -235,6 +235,84 @@ public class SweepServiceTests
     }
 
     [Fact]
+    public async Task PendingSweepIsNotRebroadcastInDryRun()
+    {
+        Configure();
+        _wallets.BroadcastResults.Enqueue(() => throw new HttpRequestException("timeout"));
+        var service = Service();
+        await service.RunAsync(_storeId, wait: false, Ct);
+        Assert.Single(State.Pending);
+
+        _repository.Settings[_storeId].Sweep.DryRun = true;
+        await service.RunAsync(_storeId, wait: false, Ct);
+        Assert.Single(_wallets.Broadcasts);
+        Assert.Single(State.Pending);
+        Assert.Single(_wallets.Built); // and nothing new is built while it is unsettled
+        Assert.Contains("isn't rebroadcast", State.Activity[0].Message);
+
+        // Still found when the wallet sees it, in dry run too: finding it sends nothing.
+        _wallets.Statuses[State.Pending[0].Txid] = TransactionStatus.Confirmed;
+        await service.RunAsync(_storeId, wait: false, Ct);
+        Assert.Empty(State.Pending);
+        Assert.Single(_wallets.Broadcasts);
+    }
+
+    [Fact]
+    public async Task SweepSettledLateCountsAndIsWatchedFromWhenItIsFound()
+    {
+        Configure(rule: r => r.DailyCap = 5m);
+        _wallets.BroadcastResults.Enqueue(() => throw new HttpRequestException("timeout"));
+        var service = Service();
+        await service.RunAsync(_storeId, wait: false, Ct);
+        _clock.Advance(TimeSpan.FromDays(2));
+        await service.RunAsync(_storeId, wait: false, Ct); // rebroadcast accepted two days later
+        Assert.Equal(1m, State.Swept.On(_clock.GetUtcNow(), "BTC"));
+        Assert.Equal(_clock.GetUtcNow(), Assert.Single(State.Awaiting).SentAt);
+        await service.WatchDepositsAsync(Ct);
+        Assert.Single(State.Awaiting); // not timed out straight away
+    }
+
+    [Fact]
+    public async Task RemovedSweepCountsTodayAndUsesUpItsColdAddress()
+    {
+        Configure(rule: r =>
+        {
+            r.DailyCap = 5m;
+            r.ColdPercent = 10;
+            r.ColdDestination = "xpub-cold";
+        });
+        _wallets.BroadcastResults.Enqueue(() => throw new HttpRequestException("timeout"));
+        var service = Service();
+        await service.RunAsync(_storeId, wait: false, Ct);
+        var pending = Assert.Single(State.Pending);
+        _clock.Advance(TimeSpan.FromDays(1));
+        Assert.True(await service.RemovePendingAsync(_storeId, pending.Txid, Ct));
+        Assert.Equal(1m, State.Swept.On(_clock.GetUtcNow(), "BTC"));
+        Assert.Equal(1, State.NextColdIndex["xpub-cold"]);
+        await service.RunAsync(_storeId, wait: false, Ct);
+        Assert.Equal("xpub-cold/1", _wallets.Built[1].ColdAddress);
+    }
+
+    [Fact]
+    public async Task SharedWalletWaitsForAnotherStoresUnsettledSweep()
+    {
+        var second = _storeId + "-second";
+        Configure();
+        Configure(second);
+        _wallets.Keys[$"{_storeId}:BTC"] = "shared-wallet";
+        _wallets.Keys[$"{second}:BTC"] = "shared-wallet";
+        _wallets.BroadcastResults.Enqueue(() => throw new HttpRequestException("timeout"));
+        var service = Service();
+        await service.RunAsync(_storeId, wait: false, Ct);
+        Assert.Single(State.Pending);
+
+        await service.RunAsync(second, wait: false, Ct);
+        Assert.Single(_wallets.Built);
+        var other = _repository.SweepStates[second];
+        Assert.Contains("Another store using this BTC wallet", other.Activity[0].Message);
+    }
+
+    [Fact]
     public async Task WalletsThatCannotBeSweptAreReported()
     {
         Configure();
