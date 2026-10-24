@@ -31,11 +31,8 @@ public enum ConvertRunResult
 public class ConvertService(ISweepSellRepository repository, SecretProtector protector, ExchangeRegistry exchanges,
     TimeProvider clock, ILogger<ConvertService> logger)
 {
-    /// <summary>
-    /// How long an order the exchange has no record of stays pending before it counts as never placed. Connectors make
-    /// live orders expire well before this (see <see cref="IExchangeConnector.SellAsync"/>).
-    /// </summary>
-    public static readonly TimeSpan PendingGrace = TimeSpan.FromMinutes(5);
+    /// <summary>How long an order the exchange has no record of stays pending before it counts as never placed.</summary>
+    public static TimeSpan PendingGrace => PendingOrders.Grace;
 
     /// <summary>How many stores convert at the same time, so one slow exchange doesn't hold up the others.</summary>
     public const int MaxParallelStores = 4;
@@ -288,74 +285,13 @@ public class ConvertService(ISweepSellRepository repository, SecretProtector pro
     }
 
     /// <summary>Looks up every pending order. True when none is left, so selling may continue.</summary>
-    async Task<bool> ReconcileAsync(string storeId, ConvertState state, IExchangeConnector exchange, ExchangeCredentials credentials,
-        CancellationToken cancellationToken)
-    {
-        var fingerprint = credentials.Fingerprint();
-        foreach (var pending in state.Pending.ToList())
-        {
-            if (pending.ExchangeId != exchange.Id || pending.KeyFingerprint != fingerprint)
-            {
-                // Another account would report no such order, and the order would wrongly count as never placed.
-                Record(storeId, state, pending.Asset, ActivityOutcome.Failed,
-                    $"The earlier sell of {Amount(pending.Amount)} {pending.Asset} (client order {pending.ClientOrderId:D}) was sent with a different exchange key, so it can't be checked with this one. " +
-                    "Put that key back, or check the order in your exchange yourself and then remove it under Pending orders. Nothing is sold until then.");
-                return false;
-            }
-            OrderLookup? lookup;
-            try
-            {
-                lookup = await exchange.FindOrderAsync(credentials, pending.ClientOrderId, cancellationToken);
-            }
-            catch (Exception e) when (IsRecordedFailure(e, cancellationToken))
-            {
-                Record(storeId, state, pending.Asset, ActivityOutcome.Failed,
-                    $"Could not look up the earlier sell of {Amount(pending.Amount)} {pending.Asset} on {exchange.Name}: {e.Message}. Nothing is sold until it is found.");
-                return false;
-            }
-            if (lookup is null)
-            {
-                if (pending.OrderIds.Count > 0)
-                {
-                    // The exchange confirmed this order, so it exists; it is never treated as unplaced and sold again.
-                    Record(storeId, state, pending.Asset, clock.GetUtcNow() - pending.SentAt < PendingGrace ? ActivityOutcome.Waiting : ActivityOutcome.Failed,
-                        $"The sell of {Amount(pending.Amount)} {pending.Asset} ({string.Join(", ", pending.OrderIds)}) was placed but {exchange.Name} doesn't list it. " +
-                        "If this lasts, check it in your exchange and remove it under Pending orders. Nothing is sold until then.");
-                    continue;
-                }
-                if (clock.GetUtcNow() - pending.SentAt < PendingGrace)
-                {
-                    Record(storeId, state, pending.Asset, ActivityOutcome.Waiting,
-                        $"The earlier {pending.Asset} sell isn't on {exchange.Name} yet. Checking again on the next run.");
-                    continue;
-                }
-                state.Pending.Remove(pending);
-                Record(storeId, state, pending.Asset, ActivityOutcome.Failed,
-                    $"The earlier sell of {Amount(pending.Amount)} {pending.Asset} was never placed on {exchange.Name}. It will be tried again.");
-                continue;
-            }
-            if (lookup.Open)
-            {
-                Record(storeId, state, pending.Asset, ActivityOutcome.Waiting,
-                    $"The earlier {pending.Asset} sell ({string.Join(", ", lookup.OrderIds)}) is still open on {exchange.Name}.");
-                continue;
-            }
-            state.Pending.Remove(pending);
-            var orders = string.Join(", ", lookup.OrderIds);
-            if (lookup.ExecutedAmount <= 0)
-            {
-                // Closed without a fill: no buyer at the floor, canceled or expired. Nothing was sold, so selling may retry.
-                Record(storeId, state, pending.Asset, ActivityOutcome.Waiting,
-                    $"The earlier sell of {Amount(pending.Amount)} {pending.Asset} ({orders}) closed on {exchange.Name} without selling anything. It will be tried again.");
-                continue;
-            }
+    Task<bool> ReconcileAsync(string storeId, ConvertState state, IExchangeConnector exchange, ExchangeCredentials credentials,
+        CancellationToken cancellationToken) =>
+        PendingOrders.ReconcileAsync(state.Pending, exchange, credentials, clock.GetUtcNow(),
             // Counted on the day it was sent: an immediate-or-cancel order fills when it arrives, however late it is found.
-            state.AddSold(pending.SentAt, pending.TargetAsset, lookup.ExecutedAmount * pending.ReferencePrice);
-            Record(storeId, state, pending.Asset, ActivityOutcome.Sold,
-                $"Found the earlier sell on {exchange.Name}: {Amount(lookup.ExecutedAmount)} of {Amount(pending.Amount)} {pending.Asset} sold for {pending.TargetAsset} ({orders}).");
-        }
-        return state.Pending.Count == 0;
-    }
+            (order, executed) => state.AddSold(order.SentAt, order.TargetAsset, executed * order.ReferencePrice),
+            (asset, outcome, message) => Record(storeId, state, asset, outcome, message),
+            e => IsRecordedFailure(e, cancellationToken), cancellationToken);
 
     /// <summary>
     /// Drops a pending order the owner has checked on the exchange themselves. Waits for a running job of the store,

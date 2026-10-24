@@ -1,5 +1,6 @@
 using BTCPayServer.Plugins.SweepSell.Conversion;
 using BTCPayServer.Plugins.SweepSell.Exchanges;
+using BTCPayServer.Plugins.SweepSell.Hedging;
 using BTCPayServer.Plugins.SweepSell.Settings;
 using BTCPayServer.Plugins.SweepSell.Sweeping;
 
@@ -34,6 +35,13 @@ sealed class MemoryRepository : ISweepSellRepository
         Task.FromResult(SweepStates.TryGetValue(storeId, out var s) ? Copy(s) : new SweepState());
 
     public Task SaveSweepStateAsync(string storeId, SweepState state) { SweepStates[storeId] = Copy(state); return Task.CompletedTask; }
+
+    public System.Collections.Concurrent.ConcurrentDictionary<string, HedgeState> HedgeStates { get; } = new();
+
+    public Task<HedgeState> GetHedgeStateAsync(string storeId) =>
+        Task.FromResult(HedgeStates.TryGetValue(storeId, out var s) ? Copy(s) : new HedgeState());
+
+    public Task SaveHedgeStateAsync(string storeId, HedgeState state) { HedgeStates[storeId] = Copy(state); return Task.CompletedTask; }
 
     static T Copy<T>(T s) => Newtonsoft.Json.JsonConvert.DeserializeObject<T>(Newtonsoft.Json.JsonConvert.SerializeObject(s))!;
 }
@@ -223,4 +231,24 @@ sealed class FakeWallets : IStoreWallets
 
     public Task<TransactionStatus> GetStatusAsync(string cryptoCode, string txid, CancellationToken cancellationToken) =>
         Task.FromResult(Statuses.GetValueOrDefault(txid, TransactionStatus.Unknown));
+}
+
+/// <summary>Invoices kept in memory, by ID.</summary>
+sealed class FakeInvoices : IStoreInvoices
+{
+    public Dictionary<string, HedgeInvoice> Invoices { get; } = new();
+    public int Scans { get; private set; }
+    public Exception? ScanError { get; set; }
+
+    public Task<IReadOnlyList<HedgeInvoice>> GetPaidSinceAsync(string storeId, DateTimeOffset since, CancellationToken cancellationToken)
+    {
+        Scans++;
+        if (ScanError is not null)
+            throw ScanError;
+        return Task.FromResult<IReadOnlyList<HedgeInvoice>>(Invoices.Values
+            .Where(i => i.StoreId == storeId && i.CreatedAt >= since && i.Status != HedgeInvoiceStatus.Other).ToList());
+    }
+
+    public Task<HedgeInvoice?> GetAsync(string invoiceId, CancellationToken cancellationToken) =>
+        Task.FromResult(Invoices.GetValueOrDefault(invoiceId));
 }

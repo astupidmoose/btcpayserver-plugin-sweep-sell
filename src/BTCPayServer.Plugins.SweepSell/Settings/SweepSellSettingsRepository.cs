@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Linq;
 using System.Threading.Tasks;
 using BTCPayServer.Plugins.SweepSell.Conversion;
+using BTCPayServer.Plugins.SweepSell.Hedging;
 using BTCPayServer.Plugins.SweepSell.Sweeping;
 using BTCPayServer.Services.Stores;
 
@@ -22,6 +23,9 @@ public interface ISweepSellRepository
 
     Task<SweepState> GetSweepStateAsync(string storeId);
     Task SaveSweepStateAsync(string storeId, SweepState state);
+
+    Task<HedgeState> GetHedgeStateAsync(string storeId);
+    Task SaveHedgeStateAsync(string storeId, HedgeState state);
 }
 
 /// <summary>Reads and writes a store's <see cref="SweepSellSettings"/>. Store settings are not returned by BTCPay's API.</summary>
@@ -30,6 +34,7 @@ public class SweepSellSettingsRepository(StoreRepository storeRepository) : ISwe
     public const string SettingName = "SweepSell.Settings";
     public const string ConvertStateName = "SweepSell.ConvertState";
     public const string SweepStateName = "SweepSell.SweepState";
+    public const string HedgeStateName = "SweepSell.HedgeState";
 
     public async Task<SweepSellSettings> GetAsync(string storeId) =>
         await storeRepository.GetSettingAsync<SweepSellSettings>(storeId, SettingName) ?? new SweepSellSettings();
@@ -53,4 +58,10 @@ public class SweepSellSettingsRepository(StoreRepository storeRepository) : ISwe
 
     public Task SaveSweepStateAsync(string storeId, SweepState state) =>
         storeRepository.UpdateSetting(storeId, SweepStateName, state);
+
+    public async Task<HedgeState> GetHedgeStateAsync(string storeId) =>
+        await storeRepository.GetSettingAsync<HedgeState>(storeId, HedgeStateName) ?? new HedgeState();
+
+    public Task SaveHedgeStateAsync(string storeId, HedgeState state) =>
+        storeRepository.UpdateSetting(storeId, HedgeStateName, state);
 }

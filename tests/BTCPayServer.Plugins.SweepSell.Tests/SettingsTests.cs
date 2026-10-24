@@ -2,6 +2,7 @@ using BTCPayServer.Plugins.SweepSell.Conversion;
 using BTCPayServer.Plugins.SweepSell.Controllers;
 using BTCPayServer.Plugins.SweepSell.Exchanges;
 using BTCPayServer.Plugins.SweepSell.Exchanges.Kraken;
+using BTCPayServer.Plugins.SweepSell.Hedging;
 using BTCPayServer.Plugins.SweepSell.Settings;
 using BTCPayServer.Plugins.SweepSell.Sweeping;
 using Microsoft.AspNetCore.DataProtection;
@@ -398,4 +399,89 @@ public class SettingsTests
         Assert.False(UISweepSellController.ChangesSweeps(saved, updated));
         Assert.False(UISweepSellController.ChangesSweeps(saved, new SweepSellSettings { Sweep = saved.Sweep })); // removing the key
     }
+
+    static readonly DateTimeOffset Now = new(2030, 1, 1, 0, 0, 0, TimeSpan.Zero);
+
+    [Fact]
+    public void HedgeSettingsAreParsedAndSaved()
+    {
+        var settings = UISweepSellController.Apply(Saved(), new SweepSellSettingsViewModel
+        {
+            ExchangeId = "kraken",
+            HedgeEnabled = true,
+            HedgeDryRun = false,
+            HedgeTrigger = HedgeTrigger.Processing,
+            HedgeAmount = HedgeAmount.InvoiceValue,
+            HedgeMarkets = "gbp=cad; EUR = CAD",
+            HedgeDefaultMarket = " usd ",
+            HedgeMaxSlippagePercent = 1.5m,
+            HedgeDailyCap = 0.5m
+        }, Protector, Now);
+        var hedge = settings.Hedge;
+        Assert.Equal((true, false, HedgeTrigger.Processing, HedgeAmount.InvoiceValue, "USD", 1.5m, 0.5m, Now),
+            (hedge.Enabled, hedge.DryRun, hedge.Trigger, hedge.Amount, hedge.DefaultMarket, hedge.MaxSlippagePercent, hedge.DailyCap, hedge.EnabledSince!.Value));
+        Assert.Equal(new Dictionary<string, string> { ["GBP"] = "CAD", ["EUR"] = "CAD" }, hedge.Markets);
+        Assert.Equal("CAD", hedge.MarketFor("gbp"));
+        Assert.Equal("USD", hedge.MarketFor("AUD"));
+    }
+
+    [Fact]
+    public void HedgeIsOffDryRunAndOnSettledByDefault()
+    {
+        var hedge = new SweepSellSettings().Hedge;
+        Assert.Equal((false, true, HedgeTrigger.Settled, HedgeAmount.BtcPaid), (hedge.Enabled, hedge.DryRun, hedge.Trigger, hedge.Amount));
+        Assert.Equal("CAD", hedge.MarketFor("cad")); // the invoice currency itself
+        Assert.True(new SweepSellSettingsViewModel().HedgeDryRun);
+    }
+
+    [Fact]
+    public void HedgeStartsFromWhenItIsTurnedOn()
+    {
+        var on = new SweepSellSettingsViewModel { ExchangeId = "kraken", HedgeEnabled = true };
+        var first = UISweepSellController.Apply(Saved(), on, Protector, Now);
+        Assert.Equal(Now, first.Hedge.EnabledSince);
+        var kept = UISweepSellController.Apply(first, on, Protector, Now.AddDays(1));
+        Assert.Equal(Now, kept.Hedge.EnabledSince);
+        var off = UISweepSellController.Apply(kept, new SweepSellSettingsViewModel { ExchangeId = "kraken" }, Protector, Now.AddDays(2));
+        Assert.Null(off.Hedge.EnabledSince);
+        Assert.Equal(Now.AddDays(3), UISweepSellController.Apply(off, on, Protector, Now.AddDays(3)).Hedge.EnabledSince);
+    }
+
+    static List<string> HedgeErrors(Action<SweepSellSettingsViewModel> form)
+    {
+        var vm = new SweepSellSettingsViewModel { ExchangeId = "kraken", HedgeEnabled = true };
+        form(vm);
+        return UISweepSellController.ValidateHedge(vm).Select(e => e.Field).ToList();
+    }
+
+    [Fact]
+    public void ValidHedgeFormHasNoErrors() => Assert.Empty(HedgeErrors(f => f.HedgeMarkets = "GBP=CAD, EUR=CAD"));
+
+    [Theory]
+    [InlineData("markets", "HedgeMarkets")]
+    [InlineData("marketBtc", "HedgeMarkets")]
+    [InlineData("default", "HedgeDefaultMarket")]
+    [InlineData("defaultBtc", "HedgeDefaultMarket")]
+    [InlineData("slippage", "HedgeMaxSlippagePercent")]
+    [InlineData("cap", "HedgeDailyCap")]
+    [InlineData("exchange", "HedgeEnabled")]
+    [InlineData("convertBtc", "ConvertAssets")]
+    public void HedgeOptionsAreValidated(string problem, string field) =>
+        Assert.Equal([field], HedgeErrors(f =>
+        {
+            switch (problem)
+            {
+                case "markets": f.HedgeMarkets = "GBP CAD"; break;
+                case "marketBtc": f.HedgeMarkets = "GBP=BTC"; break;
+                case "default": f.HedgeDefaultMarket = "U S D"; break;
+                case "defaultBtc": f.HedgeDefaultMarket = "btc"; break;
+                case "slippage": f.HedgeMaxSlippagePercent = 50; break;
+                case "cap": f.HedgeDailyCap = -1; break;
+                case "exchange": f.ExchangeId = null; break;
+                default:
+                    f.ConvertEnabled = true;
+                    f.ConvertAssets = "LTC, btc";
+                    break;
+            }
+        }));
 }

@@ -12,6 +12,7 @@ using BTCPayServer.Abstractions.Models;
 using BTCPayServer.Client;
 using BTCPayServer.Plugins.SweepSell.Conversion;
 using BTCPayServer.Plugins.SweepSell.Exchanges;
+using BTCPayServer.Plugins.SweepSell.Hedging;
 using BTCPayServer.Plugins.SweepSell.Settings;
 using BTCPayServer.Plugins.SweepSell.Sweeping;
 using BTCPayServer.Plugins.Wallets;
@@ -25,7 +26,8 @@ namespace BTCPayServer.Plugins.SweepSell.Controllers;
 [Authorize(AuthenticationSchemes = AuthenticationSchemes.Cookie)]
 [Authorize(Policy = Policies.CanModifyStoreSettings, AuthenticationSchemes = AuthenticationSchemes.Cookie)]
 public class UISweepSellController(ISweepSellRepository repository, SecretProtector protector, ExchangeRegistry exchanges,
-    ConvertService convert, SweepService sweep, IStoreWallets wallets, IAuthorizationService authorization, ILogger<UISweepSellController> logger)
+    ConvertService convert, SweepService sweep, IStoreWallets wallets, HedgeService hedge, IAuthorizationService authorization, TimeProvider clock,
+    ILogger<UISweepSellController> logger)
     : Controller
 {
     public const string SettingsView = SweepSellPlugin.ViewsDirectory + "/Settings.cshtml";
@@ -75,7 +77,7 @@ public class UISweepSellController(ISweepSellRepository repository, SecretProtec
     [HttpPost("")]
     public async Task<IActionResult> Settings(string storeId, SweepSellSettingsViewModel vm, CancellationToken cancellationToken)
     {
-        foreach (var (field, error) in Validate(vm, exchanges).Concat(ValidateSweep(vm, wallets)))
+        foreach (var (field, error) in Validate(vm, exchanges).Concat(ValidateSweep(vm, wallets)).Concat(ValidateHedge(vm)))
             ModelState.AddModelError(field, error);
         if (!ModelState.IsValid)
             return View(SettingsView, await ToViewModelAsync(storeId, await repository.GetAsync(storeId), vm, cancellationToken));
@@ -87,10 +89,11 @@ public class UISweepSellController(ISweepSellRepository repository, SecretProtec
         var (saved, updated, conflict) = await convert.WithSettingsLockAsync(storeId, async () =>
         {
             var current = await repository.GetAsync(storeId);
-            var next = Apply(current, vm, protector);
+            var next = Apply(current, vm, protector, clock.GetUtcNow());
             if (!canSpend && ChangesSweeps(current, next))
                 return (current, next, NoSpendPermission);
-            if (KeyChanges(current, next) && PendingConflict(next, (await repository.GetConvertStateAsync(storeId)).Pending, protector) is { } error)
+            var pending = (await repository.GetConvertStateAsync(storeId)).Pending.Concat((await repository.GetHedgeStateAsync(storeId)).Pending).ToList();
+            if (KeyChanges(current, next) && PendingConflict(next, pending, protector) is { } error)
                 return (current, next, error);
             await repository.SaveAsync(storeId, next);
             return (current, next, (string?)null);
@@ -107,12 +110,13 @@ public class UISweepSellController(ISweepSellRepository repository, SecretProtec
         // Never log the key itself; whether one is saved is enough to follow what happened.
         logger.LogInformation("Sweep & Sell settings of store {StoreId} saved: exchange {Exchange}, credentials {Credentials}, paused {Paused}, " +
                               "convert {Convert} ({ConvertMode}, {ConvertAssets} to {ConvertTarget} every {ConvertInterval} min), " +
-                              "sweep {Sweep} ({SweepMode}, coins {SweepCoins})",
+                              "sweep {Sweep} ({SweepMode}, coins {SweepCoins}), hedge {Hedge} ({HedgeMode}, at {HedgeTrigger})",
             storeId, updated.ExchangeId ?? "none", updated.HasCredentials ? "saved" : "none", updated.Paused,
             updated.Convert.Enabled ? "on" : "off", updated.Convert.DryRun ? "dry run" : "live", string.Join(",", updated.Convert.Assets),
             updated.Convert.TargetAsset, updated.Convert.IntervalMinutes,
             updated.Sweep.Enabled ? "on" : "off", updated.Sweep.DryRun ? "dry run" : "live",
-            string.Join(",", updated.Sweep.Rules.Where(r => r.Enabled).Select(r => r.CryptoCode)));
+            string.Join(",", updated.Sweep.Rules.Where(r => r.Enabled).Select(r => r.CryptoCode)),
+            updated.Hedge.Enabled ? "on" : "off", updated.Hedge.DryRun ? "dry run" : "live", updated.Hedge.Trigger);
         TempData.SetStatusMessageModel(new StatusMessageModel
         {
             Severity = StatusMessageModel.StatusSeverity.Success,
@@ -242,6 +246,36 @@ public class UISweepSellController(ISweepSellRepository repository, SecretProtec
         return RedirectToAction(nameof(Settings), new { storeId });
     }
 
+    [HttpPost("hedge/run")]
+    public async Task<IActionResult> RunHedge(string storeId, CancellationToken cancellationToken)
+    {
+        var result = await hedge.RunAsync(storeId, cancellationToken);
+        TempData.SetStatusMessageModel(new StatusMessageModel
+        {
+            Severity = result == HedgeRunResult.Ran ? StatusMessageModel.StatusSeverity.Success : StatusMessageModel.StatusSeverity.Warning,
+            Message = result switch
+            {
+                HedgeRunResult.Ran => "Hedge ran. What it did is listed under Hedge activity.",
+                HedgeRunResult.Paused => "Sweep & Sell is paused for this store; nothing was hedged.",
+                HedgeRunResult.Disabled => "Turn on Hedge on payment and save first.",
+                _ => "A hedge run is already in progress. Try again in a moment."
+            }
+        });
+        return RedirectToAction(nameof(Settings), new { storeId });
+    }
+
+    [HttpPost("hedge/pending/{clientOrderId:guid}/remove")]
+    public async Task<IActionResult> RemovePendingHedge(string storeId, Guid clientOrderId, CancellationToken cancellationToken)
+    {
+        var removed = await hedge.RemovePendingAsync(storeId, clientOrderId, cancellationToken);
+        TempData.SetStatusMessageModel(new StatusMessageModel
+        {
+            Severity = removed ? StatusMessageModel.StatusSeverity.Success : StatusMessageModel.StatusSeverity.Warning,
+            Message = removed ? "Pending order removed and counted as sold. Hedging resumes on the next run." : "That order is no longer pending."
+        });
+        return RedirectToAction(nameof(Settings), new { storeId });
+    }
+
     /// <summary>
     /// Whether a save puts a different key (or exchange) in place, which pending orders must be checked against.
     /// Removing the key isn't a change here: with no key nothing runs, and removing it must never be blocked.
@@ -303,6 +337,43 @@ public class UISweepSellController(ISweepSellRepository repository, SecretProtec
             yield return (nameof(vm.ExchangeId), "Pick the exchange this key belongs to.");
     }
 
+    /// <summary>Hedge form errors, by field.</summary>
+    public static IEnumerable<(string Field, string Error)> ValidateHedge(SweepSellSettingsViewModel vm)
+    {
+        var (markets, badMarket) = ParseMarkets(vm.HedgeMarkets);
+        if (badMarket is not null)
+            yield return (nameof(vm.HedgeMarkets), $"\"{badMarket}\" isn't a currency and market, e.g. GBP=CAD.");
+        else if (markets.Any(m => m.Value == HedgeService.Asset))
+            yield return (nameof(vm.HedgeMarkets), "BTC is what is sold; pick a market to sell it for, e.g. CAD.");
+        var defaultMarket = Clean(vm.HedgeDefaultMarket)?.ToUpperInvariant();
+        if (defaultMarket is not null && (!Ticker.IsMatch(defaultMarket) || defaultMarket == HedgeService.Asset))
+            yield return (nameof(vm.HedgeDefaultMarket), "Enter the ticker to sell BTC for, e.g. USD, or leave it empty to use each invoice's currency.");
+        if (vm.HedgeMaxSlippagePercent is < ConvertSettings.MinSlippageLimit or > ConvertSettings.MaxSlippageLimit)
+            yield return (nameof(vm.HedgeMaxSlippagePercent),
+                $"Allow between {ConvertSettings.MinSlippageLimit}% and {ConvertSettings.MaxSlippageLimit}% below the 24-hour average.");
+        if (vm.HedgeDailyCap < 0)
+            yield return (nameof(vm.HedgeDailyCap), "The daily cap can't be negative. Use 0 for no cap.");
+        if (vm.HedgeEnabled && string.IsNullOrWhiteSpace(vm.ExchangeId))
+            yield return (nameof(vm.HedgeEnabled), "Pick an exchange to hedge on.");
+        // Convert sells all of an asset's balance, which would also sell the BTC kept on the exchange for hedges.
+        if (vm.HedgeEnabled && vm.ConvertEnabled && Tickers(vm.ConvertAssets).Contains(HedgeService.Asset))
+            yield return (nameof(vm.ConvertAssets), "BTC is hedged per invoice, so it can't also be in the coins to convert.");
+    }
+
+    /// <summary>"gbp=cad, EUR = CAD" → GBP: CAD, EUR: CAD; the first entry that doesn't parse, if any.</summary>
+    static (Dictionary<string, string> Markets, string? Bad) ParseMarkets(string? value)
+    {
+        var markets = new Dictionary<string, string>();
+        foreach (var entry in (value ?? "").Split([',', ';', '\n', '\r'], StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+        {
+            var parts = entry.Split('=', StringSplitOptions.TrimEntries);
+            if (parts.Length != 2 || !Ticker.IsMatch(parts[0].ToUpperInvariant()) || !Ticker.IsMatch(parts[1].ToUpperInvariant()))
+                return (markets, entry);
+            markets[parts[0].ToUpperInvariant()] = parts[1].ToUpperInvariant();
+        }
+        return (markets, null);
+    }
+
     /// <summary>Sweep form errors, by field. Cold wallets are checked against the coin's network on this server.</summary>
     public static IEnumerable<(string Field, string Error)> ValidateSweep(SweepSellSettingsViewModel vm, IStoreWallets wallets)
     {
@@ -361,7 +432,7 @@ public class UISweepSellController(ISweepSellRepository repository, SecretProtec
     /// The settings after a save. Keys are write-only on the page: an empty field keeps the saved key,
     /// "remove" clears both, and a new pair replaces both.
     /// </summary>
-    public static SweepSellSettings Apply(SweepSellSettings saved, SweepSellSettingsViewModel vm, SecretProtector protector)
+    public static SweepSellSettings Apply(SweepSellSettings saved, SweepSellSettingsViewModel vm, SecretProtector protector, DateTimeOffset? now = null)
     {
         var updated = new SweepSellSettings
         {
@@ -396,6 +467,21 @@ public class UISweepSellController(ISweepSellRepository repository, SecretProtec
                     DailyCap = r.DailyCap,
                     IncludeUnconfirmed = r.IncludeUnconfirmed
                 }).ToList()
+            },
+            Hedge = new HedgeSettings
+            {
+                Enabled = vm.HedgeEnabled,
+                DryRun = vm.HedgeDryRun,
+                Trigger = vm.HedgeTrigger,
+                Amount = vm.HedgeAmount,
+                Markets = ParseMarkets(vm.HedgeMarkets).Markets,
+                DefaultMarket = Clean(vm.HedgeDefaultMarket)?.ToUpperInvariant(),
+                MaxSlippagePercent = vm.HedgeMaxSlippagePercent,
+                DailyCap = vm.HedgeDailyCap,
+                // Hedging covers invoices created from when it was turned on; turning it off and on again starts afresh.
+                EnabledSince = !vm.HedgeEnabled ? null
+                    : saved.Hedge.Enabled && saved.Hedge.EnabledSince is { } since ? since
+                    : now ?? DateTimeOffset.UtcNow
             }
         };
         var key = Clean(vm.ApiKey);
@@ -420,6 +506,7 @@ public class UISweepSellController(ISweepSellRepository repository, SecretProtec
     {
         var convertState = await repository.GetConvertStateAsync(storeId);
         var sweepState = await repository.GetSweepStateAsync(storeId);
+        var hedgeState = await repository.GetHedgeStateAsync(storeId);
         // One row per coin the store has an on-chain wallet for, plus any saved rule whose wallet was removed since.
         var rules = posted?.SweepRules ?? (await wallets.GetCryptoCodesAsync(storeId, cancellationToken))
             .Select(code => settings.Sweep.Rules.FirstOrDefault(r => string.Equals(r.CryptoCode, code, StringComparison.OrdinalIgnoreCase))
@@ -468,6 +555,20 @@ public class UISweepSellController(ISweepSellRepository repository, SecretProtec
             SweepStopped = sweepState.Stopped,
             SweepActivity = sweepState.Activity,
             CanSpend = await CanSpendAsync(storeId),
+            HedgeEnabled = posted?.HedgeEnabled ?? settings.Hedge.Enabled,
+            HedgeDryRun = posted?.HedgeDryRun ?? settings.Hedge.DryRun,
+            HedgeTrigger = posted?.HedgeTrigger ?? settings.Hedge.Trigger,
+            HedgeAmount = posted?.HedgeAmount ?? settings.Hedge.Amount,
+            HedgeMarkets = posted?.HedgeMarkets ?? string.Join(", ", settings.Hedge.Markets.OrderBy(m => m.Key).Select(m => $"{m.Key}={m.Value}")),
+            HedgeDefaultMarket = posted?.HedgeDefaultMarket ?? settings.Hedge.DefaultMarket,
+            HedgeMaxSlippagePercent = posted?.HedgeMaxSlippagePercent ?? settings.Hedge.MaxSlippagePercent,
+            HedgeDailyCap = posted?.HedgeDailyCap ?? settings.Hedge.DailyCap,
+            HedgeEnabledSince = settings.Hedge.EnabledSince,
+            HedgeLastRun = hedgeState.LastRun,
+            HedgePending = hedgeState.Pending,
+            HedgeQueued = hedgeState.Invoices.Where(i => i.Value.Remaining > 0).OrderBy(i => i.Value.AddedAt)
+                .Select(i => new QueuedHedge(i.Key, i.Value.Remaining, i.Value.Amount, i.Value.Market, i.Value.DryRun)).ToList(),
+            HedgeActivity = hedgeState.Activity,
             // Saved but undecryptable (e.g. restored on a server with other data-protection keys) counts as not saved.
             HasCredentials = protector.Credentials(settings) is not null,
             CredentialsUnreadable = settings.HasCredentials && protector.Credentials(settings) is null,
@@ -486,6 +587,8 @@ public class UISweepSellController(ISweepSellRepository repository, SecretProtec
 }
 
 public record ExchangeOption(string Id, string Name, string KeyPermissionsHelp);
+
+public record QueuedHedge(string InvoiceId, decimal Remaining, decimal Amount, string Market, bool DryRun);
 
 public class SweepSellSettingsViewModel
 {
@@ -557,6 +660,40 @@ public class SweepSellSettingsViewModel
 
     /// <summary>Whether the user may change sweeps (sign and broadcast wallet transactions in the store). Not posted.</summary>
     public bool CanSpend { get; set; }
+
+    [Display(Name = "Hedge on payment")]
+    public bool HedgeEnabled { get; set; }
+
+    [Display(Name = "Dry run")]
+    public bool HedgeDryRun { get; set; } = true;
+
+    [Display(Name = "Hedge when the invoice is")]
+    public HedgeTrigger HedgeTrigger { get; set; } = HedgeTrigger.Settled;
+
+    [Display(Name = "What to hedge")]
+    public HedgeAmount HedgeAmount { get; set; } = HedgeAmount.BtcPaid;
+
+    [Display(Name = "Markets by invoice currency")]
+    public string? HedgeMarkets { get; set; }
+
+    [Display(Name = "Default market")]
+    public string? HedgeDefaultMarket { get; set; }
+
+    [Display(Name = "Lowest price, % below the 24-hour average")]
+    public decimal HedgeMaxSlippagePercent { get; set; } = 2m;
+
+    [Display(Name = "Daily cap (BTC)")]
+    public decimal HedgeDailyCap { get; set; }
+
+    public DateTimeOffset? HedgeEnabledSince { get; set; }
+
+    public DateTimeOffset? HedgeLastRun { get; set; }
+
+    public List<PendingOrder> HedgePending { get; set; } = [];
+
+    public List<QueuedHedge> HedgeQueued { get; set; } = [];
+
+    public List<ActivityEntry> HedgeActivity { get; set; } = [];
 
     public bool HasCredentials { get; set; }
 
