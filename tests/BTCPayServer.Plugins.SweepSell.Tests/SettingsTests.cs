@@ -114,6 +114,21 @@ public class SettingsTests
             Assert.Contains(errors, e => e.Field == errorField);
     }
 
+    [Theory]
+    [InlineData(0, "other", null, false, false)] // nothing pending: anything goes
+    [InlineData(1, "kraken", null, false, false)] // pending, settings unchanged
+    [InlineData(1, "other", null, false, true)] // pending, exchange changes
+    [InlineData(1, "kraken", "new-key", false, true)] // pending, new key typed
+    [InlineData(1, "other", "new-key", true, false)] // removing the key is never blocked
+    public void PendingOrdersBlockExchangeAndKeyChanges(int pending, string exchangeId, string? apiKey, bool clear, bool blocked)
+    {
+        var conflict = UISweepSellController.PendingConflict(Saved(), new SweepSellSettingsViewModel
+        {
+            ExchangeId = exchangeId, ApiKey = apiKey, ApiSecret = apiKey is null ? null : "new-secret", ClearCredentials = clear
+        }, pending);
+        Assert.Equal(blocked, conflict is not null);
+    }
+
     [Fact]
     public void ConvertNeedsAnExchange()
     {

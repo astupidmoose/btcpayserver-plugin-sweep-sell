@@ -38,11 +38,14 @@ public class UISweepSellController(ISweepSellRepository repository, SecretProtec
     public async Task<IActionResult> Settings(string storeId, SweepSellSettingsViewModel vm)
     {
         var saved = await repository.GetAsync(storeId);
+        var state = await repository.GetConvertStateAsync(storeId);
         foreach (var (field, error) in Validate(vm, exchanges))
             ModelState.AddModelError(field, error);
+        if (PendingConflict(saved, vm, state.Pending.Count) is { } conflict)
+            ModelState.AddModelError(nameof(vm.ExchangeId), conflict);
         var updated = Apply(saved, vm, protector);
         if (!ModelState.IsValid)
-            return View(SettingsView, ToViewModel(saved, await repository.GetConvertStateAsync(storeId), vm));
+            return View(SettingsView, ToViewModel(saved, state, vm));
 
         await repository.SaveAsync(storeId, updated);
         // Never log the key itself; whether one is saved is enough to follow what happened.
@@ -118,6 +121,33 @@ public class UISweepSellController(ISweepSellRepository repository, SecretProtec
             }
         });
         return RedirectToAction(nameof(Settings), new { storeId });
+    }
+
+    [HttpPost("convert/pending/{clientOrderId:guid}/remove")]
+    public async Task<IActionResult> RemovePending(string storeId, Guid clientOrderId, CancellationToken cancellationToken)
+    {
+        var removed = await convert.RemovePendingAsync(storeId, clientOrderId, cancellationToken);
+        TempData.SetStatusMessageModel(new StatusMessageModel
+        {
+            Severity = removed ? StatusMessageModel.StatusSeverity.Success : StatusMessageModel.StatusSeverity.Warning,
+            Message = removed ? "Pending order removed. Selling resumes on the next run." : "That order is no longer pending."
+        });
+        return RedirectToAction(nameof(Settings), new { storeId });
+    }
+
+    /// <summary>
+    /// Changing the exchange or entering a new key while orders are pending would make them impossible to look up.
+    /// Removing the key is always allowed: it must never be blocked in an emergency.
+    /// </summary>
+    public static string? PendingConflict(SweepSellSettings saved, SweepSellSettingsViewModel vm, int pendingOrders)
+    {
+        if (pendingOrders == 0 || vm.ClearCredentials)
+            return null;
+        var exchangeChanges = Clean(vm.ExchangeId) != saved.ExchangeId;
+        var newKey = Clean(vm.ApiKey) is not null || Clean(vm.ApiSecret) is not null;
+        return exchangeChanges || newKey
+            ? "Orders are still being checked with the exchange. Wait for them to be found (see Pending orders), or remove them there after checking your exchange, before changing the exchange or key."
+            : null;
     }
 
     static readonly Regex Ticker = new("^[A-Z0-9]{2,10}$", RegexOptions.CultureInvariant);
@@ -202,7 +232,7 @@ public class UISweepSellController(ISweepSellRepository repository, SecretProtec
         ConvertTarget = posted?.ConvertTarget ?? settings.Convert.TargetAsset,
         ConvertIntervalMinutes = posted?.ConvertIntervalMinutes ?? settings.Convert.IntervalMinutes,
         ConvertLastRun = state.LastRun,
-        ConvertPending = state.Pending.Count,
+        ConvertPending = state.Pending,
         ConvertActivity = state.Activity,
         // Saved but undecryptable (e.g. restored on a server with other data-protection keys) counts as not saved.
         HasCredentials = protector.Credentials(settings) is not null,
@@ -256,7 +286,7 @@ public class SweepSellSettingsViewModel
 
     public DateTimeOffset? ConvertLastRun { get; set; }
 
-    public int ConvertPending { get; set; }
+    public List<PendingOrder> ConvertPending { get; set; } = [];
 
     public List<ActivityEntry> ConvertActivity { get; set; } = [];
 

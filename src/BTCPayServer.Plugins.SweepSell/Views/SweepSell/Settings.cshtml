@@ -129,11 +129,37 @@
         <h4 class="mt-5 mb-2">Recent activity</h4>
         <p class="text-secondary">
             Last convert run: @(Model.ConvertLastRun?.ToString("u") ?? "never").
-            @if (Model.ConvertPending > 0)
-            {
-                <span class="text-warning">@Model.ConvertPending order(s) are being checked with the exchange; nothing more is sold until they are found.</span>
-            }
         </p>
+        @if (Model.ConvertPending.Count > 0)
+        {
+            <h5 class="mt-3">Pending orders</h5>
+            <p class="text-warning">
+                These sells got no clear answer from the exchange. Each run looks them up; nothing more is sold until they are found.
+                Remove one only after checking in your exchange whether it went through.
+            </p>
+            <div class="table-responsive">
+                <table class="table">
+                    <thead>
+                        <tr><th>Sent (UTC)</th><th>Sell</th><th>Client order ID</th><th></th></tr>
+                    </thead>
+                    <tbody>
+                        @foreach (var pending in Model.ConvertPending)
+                        {
+                            <tr>
+                                <td class="text-nowrap">@pending.SentAt.ToString("u")</td>
+                                <td>@pending.Amount @pending.Asset for @pending.TargetAsset</td>
+                                <td><code>@pending.ClientOrderId.ToString("D")</code></td>
+                                <td>
+                                    <form method="post" asp-action="RemovePending" asp-route-storeId="@storeId" asp-route-clientOrderId="@pending.ClientOrderId">
+                                        <button type="submit" class="btn btn-sm btn-outline-danger">Remove</button>
+                                    </form>
+                                </td>
+                            </tr>
+                        }
+                    </tbody>
+                </table>
+            </div>
+        }
         @if (Model.ConvertActivity.Count == 0)
         {
             <p class="text-secondary">Nothing yet.</p>

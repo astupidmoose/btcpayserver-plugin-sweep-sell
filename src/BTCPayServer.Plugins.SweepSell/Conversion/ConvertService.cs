@@ -159,6 +159,8 @@ public class ConvertService(ISweepSellRepository repository, SecretProtector pro
             var pending = new PendingOrder
             {
                 ClientOrderId = Guid.NewGuid(),
+                ExchangeId = exchange.Id,
+                KeyFingerprint = credentials.Fingerprint(),
                 Asset = asset,
                 TargetAsset = target,
                 Amount = amount,
@@ -188,8 +190,17 @@ public class ConvertService(ISweepSellRepository repository, SecretProtector pro
     async Task<bool> ReconcileAsync(string storeId, ConvertState state, IExchangeConnector exchange, ExchangeCredentials credentials,
         CancellationToken cancellationToken)
     {
+        var fingerprint = credentials.Fingerprint();
         foreach (var pending in state.Pending.ToList())
         {
+            if (pending.ExchangeId != exchange.Id || pending.KeyFingerprint != fingerprint)
+            {
+                // Another account would report no such order, and the order would wrongly count as never placed.
+                Record(storeId, state, pending.Asset, ActivityOutcome.Failed,
+                    $"The earlier {pending.Asset} sell was sent with a different exchange key, so it can't be checked with this one. " +
+                    "Put that key back, or check the order in your exchange yourself and then remove it under Pending orders. Nothing is sold until then.");
+                return false;
+            }
             OrderLookup? lookup;
             try
             {
@@ -225,6 +236,32 @@ public class ConvertService(ISweepSellRepository repository, SecretProtector pro
                 $"Found the earlier sell on {exchange.Name}: {Amount(lookup.ExecutedAmount)} {pending.Asset} sold for {pending.TargetAsset} ({string.Join(", ", lookup.OrderIds)}).");
         }
         return state.Pending.Count == 0;
+    }
+
+    /// <summary>
+    /// Drops a pending order the owner has checked on the exchange themselves. Waits for a running job of the store,
+    /// so the removal can't be overwritten by it. False when there is no such order.
+    /// </summary>
+    public async Task<bool> RemovePendingAsync(string storeId, Guid clientOrderId, CancellationToken cancellationToken)
+    {
+        var storeLock = StoreLocks.GetOrAdd(storeId, _ => new SemaphoreSlim(1, 1));
+        await storeLock.WaitAsync(cancellationToken);
+        try
+        {
+            var state = await repository.GetConvertStateAsync(storeId);
+            var pending = state.Pending.FirstOrDefault(p => p.ClientOrderId == clientOrderId);
+            if (pending is null)
+                return false;
+            state.Pending.Remove(pending);
+            Record(storeId, state, pending.Asset, ActivityOutcome.Failed,
+                $"The pending sell of {Amount(pending.Amount)} {pending.Asset} (client order {clientOrderId:D}) was removed by hand. Selling resumes.");
+            await repository.SaveConvertStateAsync(storeId, state);
+            return true;
+        }
+        finally
+        {
+            storeLock.Release();
+        }
     }
 
     void Record(string storeId, ConvertState state, string? asset, ActivityOutcome outcome, string message)

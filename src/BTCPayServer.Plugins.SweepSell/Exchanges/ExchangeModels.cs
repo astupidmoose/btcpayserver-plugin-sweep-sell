@@ -10,6 +10,10 @@ public sealed record ExchangeCredentials(string ApiKey, string ApiSecret)
 {
     // Keep the secret out of logs and exception messages.
     public override string ToString() => "ExchangeCredentials { ApiKey = ***, ApiSecret = *** }";
+
+    /// <summary>Tells keys apart without storing them: the start of the SHA-256 of the API key (the public half).</summary>
+    public string Fingerprint() =>
+        Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(ApiKey)))[..16];
 }
 
 /// <summary>

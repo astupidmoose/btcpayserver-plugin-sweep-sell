@@ -39,6 +39,12 @@ public class ConvertState
 public class PendingOrder
 {
     public Guid ClientOrderId { get; set; }
+
+    /// <summary>The exchange and key the order was sent with: a client order ID only means something on that account.</summary>
+    public string? ExchangeId { get; set; }
+
+    public string? KeyFingerprint { get; set; }
+
     public string Asset { get; set; } = "";
     public string TargetAsset { get; set; } = "";
     public decimal Amount { get; set; }

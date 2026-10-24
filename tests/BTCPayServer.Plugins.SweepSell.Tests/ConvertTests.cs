@@ -135,7 +135,7 @@ public class ConvertTests
         var id = Guid.NewGuid();
         _repository.States[StoreId] = new ConvertState
         {
-            Pending = [new PendingOrder { ClientOrderId = id, Asset = "DOGE", TargetAsset = "BTC", Amount = 300m, SentAt = _clock.GetUtcNow() }]
+            Pending = [Pending(id)]
         };
         _exchange.Found[id] = new OrderLookup(["ODDDDD-EEEEE-FFFFFF"], Open: true, ExecutedAmount: 0m);
         _exchange.Balances["LTC"] = 1m;
@@ -143,6 +143,62 @@ public class ConvertTests
         await Service().RunAsync(StoreId, Ct);
         Assert.Empty(_exchange.Orders);
         Assert.Single(State.Pending);
+    }
+
+    PendingOrder Pending(Guid id, string apiKey = "test-api-key") => new()
+    {
+        ClientOrderId = id,
+        ExchangeId = FakeExchange.ExchangeId,
+        KeyFingerprint = new ExchangeCredentials(apiKey, "unused").Fingerprint(),
+        Asset = "DOGE",
+        TargetAsset = "BTC",
+        Amount = 300m,
+        SentAt = _clock.GetUtcNow()
+    };
+
+    [Fact]
+    public async Task PendingOrdersRememberTheirExchangeAndKey()
+    {
+        Configure();
+        _exchange.Balances["DOGE"] = 300m;
+        _exchange.OnSell = () => throw new HttpRequestException("connection reset");
+        await Service().RunAsync(StoreId, Ct);
+        var pending = Assert.Single(State.Pending);
+        Assert.Equal(FakeExchange.ExchangeId, pending.ExchangeId);
+        Assert.Equal(new ExchangeCredentials("test-api-key", "unused").Fingerprint(), pending.KeyFingerprint);
+        Assert.DoesNotContain("test-api-key", Newtonsoft.Json.JsonConvert.SerializeObject(State));
+    }
+
+    [Fact]
+    public async Task PendingOrderFromAnotherKeyIsNeverLookedUpOrDropped()
+    {
+        Configure();
+        var id = Guid.NewGuid();
+        _repository.States[StoreId] = new ConvertState { Pending = [Pending(id, apiKey: "earlier-api-key")] };
+        _exchange.Balances["DOGE"] = 300m;
+        _clock.Advance(TimeSpan.FromHours(1)); // well past the grace period
+        await Service().RunAsync(StoreId, Ct);
+        Assert.DoesNotContain("find", _exchange.Calls);
+        Assert.Empty(_exchange.Orders);
+        Assert.Single(State.Pending);
+        Assert.Contains("different exchange key", State.Activity[0].Message);
+    }
+
+    [Fact]
+    public async Task RemovingAPendingOrderByHandResumesSelling()
+    {
+        Configure();
+        var id = Guid.NewGuid();
+        _repository.States[StoreId] = new ConvertState { Pending = [Pending(id, apiKey: "earlier-api-key")] };
+        var service = Service();
+        Assert.False(await service.RemovePendingAsync(StoreId, Guid.NewGuid(), Ct));
+        Assert.True(await service.RemovePendingAsync(StoreId, id, Ct));
+        Assert.Empty(State.Pending);
+        Assert.Contains("removed by hand", State.Activity[0].Message);
+
+        _exchange.Balances["DOGE"] = 300m;
+        await service.RunAsync(StoreId, Ct);
+        Assert.Single(_exchange.Orders);
     }
 
     [Fact]
