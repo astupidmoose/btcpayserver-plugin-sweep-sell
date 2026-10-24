@@ -610,6 +610,35 @@ public class HedgeServiceTests
     }
 
     [Fact]
+    public async Task AnInvoiceThatCantBeReadIsFoundByListingTheStore()
+    {
+        Configure();
+        Invoice("inv-1", 0.1m);
+        Invoice("inv-2", 0.1m);
+        _invoices.ReadFailures = 1;
+        await Service().OnInvoicesAsync(_storeId, ["inv-1", "inv-2"], Ct);
+        Assert.Equal(1, _invoices.Scans);
+        Assert.Equal([0.2m], _exchange.Orders.Select(o => o.Amount));
+    }
+
+    [Fact]
+    public async Task AnInvoiceThatCantBeReadOrListedIsRecorded()
+    {
+        Configure();
+        Invoice("inv-1", 0.1m);
+        _invoices.ReadFailures = 1;
+        _invoices.ScanError = new InvalidOperationException("database unavailable");
+        await Service().OnInvoicesAsync(_storeId, ["inv-1"], Ct);
+        Assert.Empty(_exchange.Orders);
+        Assert.Contains("Could not list the store's paid invoices", State.Activity[0].Message);
+
+        _invoices.ScanError = null;
+        _clock.Advance(HedgeService.ScanInterval);
+        await Service().RunDueAsync(Ct); // the next scan picks it up
+        Assert.Single(_exchange.Orders);
+    }
+
+    [Fact]
     public async Task AStoreWaitingOnItsExchangeDoesNotHoldUpAnotherStore()
     {
         Configure();

@@ -251,6 +251,16 @@ sealed class FakeInvoices : IStoreInvoices
             .Where(i => i.StoreId == storeId && i.CreatedAt >= since && i.Status != HedgeInvoiceStatus.Other).ToList());
     }
 
-    public Task<HedgeInvoice?> GetAsync(string invoiceId, CancellationToken cancellationToken) =>
-        Task.FromResult(Invoices.GetValueOrDefault(invoiceId));
+    /// <summary>How many of the next single-invoice reads fail.</summary>
+    public int ReadFailures { get; set; }
+
+    public Task<HedgeInvoice?> GetAsync(string invoiceId, CancellationToken cancellationToken)
+    {
+        if (ReadFailures > 0)
+        {
+            ReadFailures--;
+            throw new InvalidOperationException("database unavailable");
+        }
+        return Task.FromResult(Invoices.GetValueOrDefault(invoiceId));
+    }
 }

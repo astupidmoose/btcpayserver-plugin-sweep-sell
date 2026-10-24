@@ -87,8 +87,22 @@ public class HedgeService(ISweepSellRepository repository, SecretProtector prote
     {
         var found = new List<HedgeInvoice>();
         foreach (var invoiceId in invoiceIds)
-            if (await invoices.GetAsync(invoiceId, cancellationToken) is { } invoice)
-                found.Add(invoice);
+        {
+            try
+            {
+                if (await invoices.GetAsync(invoiceId, cancellationToken) is { } invoice)
+                    found.Add(invoice);
+            }
+            catch (Exception e) when (!cancellationToken.IsCancellationRequested)
+            {
+                // Not dropped: the store's paid invoices are listed instead, which finds this one too, or records why it can't.
+                logger.LogWarning(e, "Sweep & Sell could not read invoice {InvoiceId}; listing store {StoreId}'s paid invoices instead", invoiceId, storeId);
+                var settings = await repository.GetAsync(storeId);
+                if (!settings.Paused && settings.Hedge.Enabled)
+                    await RunAsync(storeId, wait: true, null, cancellationToken, scan: true);
+                return;
+            }
+        }
         await HedgeAsync(storeId, found, cancellationToken);
     }
 
@@ -466,7 +480,7 @@ public class HedgeService(ISweepSellRepository repository, SecretProtector prote
         if (market == Asset)
         {
             Record(storeId, state, Asset, ActivityOutcome.Failed,
-                $"Invoice {invoice.Id} is priced in BTC and no market is set for it, so it isn't hedged. Set a default market to hedge BTC invoices.");
+                $"Invoice {invoice.Id} is priced in BTC and no market is set for it, so it isn't hedged, now or once one is set. Set a default market to hedge BTC invoices paid from then on.");
             return;
         }
         // Whole satoshis: the exchange rounds amounts down anyway.
