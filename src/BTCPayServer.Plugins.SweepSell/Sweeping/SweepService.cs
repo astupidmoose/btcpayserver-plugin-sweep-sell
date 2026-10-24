@@ -140,7 +140,8 @@ public class SweepService(ISweepSellRepository repository, SecretProtector prote
             Record(storeId, state, null, ActivityOutcome.Failed, "No exchange key is saved (or it can't be read), so there is nowhere to sweep to. Save one above.");
             return;
         }
-        foreach (var rule in settings.Sweep.Rules.Where(r => r.Enabled))
+        var enabled = settings.Sweep.Rules.Where(r => r.Enabled).ToList();
+        foreach (var rule in enabled)
         {
             try
             {
@@ -149,6 +150,28 @@ public class SweepService(ISweepSellRepository repository, SecretProtector prote
             catch (Exception e) when (IsRecordedFailure(e, cancellationToken))
             {
                 Record(storeId, state, rule.CryptoCode, ActivityOutcome.Failed, $"Could not sweep {rule.CryptoCode}: {e.Message}");
+            }
+        }
+        // A sweep whose broadcast wasn't confirmed is still looked for after its rule is turned off or removed: it may be on the
+        // network, with a deposit to watch, and it holds back other stores sharing the wallet. It is never rebroadcast then.
+        foreach (var pending in state.Pending.Where(p => !enabled.Any(r => string.Equals(r.CryptoCode, p.CryptoCode, StringComparison.OrdinalIgnoreCase))).ToList())
+        {
+            var walletKey = pending.WalletKey ?? (await wallets.GetWalletAsync(storeId, pending.CryptoCode, cancellationToken))?.Key;
+            if (walletKey is null)
+                continue;
+            var walletLock = WalletLock(pending.CryptoCode, walletKey);
+            await walletLock.WaitAsync(cancellationToken);
+            try
+            {
+                await SettlePendingAsync(storeId, state, pending, cancellationToken);
+            }
+            catch (Exception e) when (IsRecordedFailure(e, cancellationToken))
+            {
+                Record(storeId, state, pending.CryptoCode, ActivityOutcome.Failed, $"Could not check the earlier {pending.CryptoCode} sweep ({pending.Txid}): {e.Message}");
+            }
+            finally
+            {
+                walletLock.Release();
             }
         }
     }
@@ -260,6 +283,13 @@ public class SweepService(ISweepSellRepository repository, SecretProtector prote
                 new SweepRequest(rule.IncludeUnconfirmed, amount, deposit.Address, coldAddress, coldAddress is null ? 0 : rule.ColdPercent,
                     Math.Clamp(settings.Sweep.FeeTargetBlocks, SweepSettings.MinFeeTargetBlocks, SweepSettings.MaxFeeTargetBlocks)),
                 cancellationToken);
+            // The wallet is read again to build the sweep, and something else on the server may have spent from it meanwhile.
+            if (sweep.Balance < rule.MinimumBalance)
+            {
+                Record(storeId, state, code, ActivityOutcome.Waiting,
+                    $"The wallet holds {Amount(sweep.Balance)} {code}{coins}, below the minimum of {Amount(rule.MinimumBalance)} {code}. Waiting for more.");
+                return;
+            }
             if (sweep.Amounts.ToExchange < minimumDeposit)
             {
                 Record(storeId, state, code, ActivityOutcome.Waiting,
@@ -365,11 +395,20 @@ public class SweepService(ISweepSellRepository repository, SecretProtector prote
         try
         {
             var current = await repository.GetAsync(storeId);
-            if (current.Paused || !current.Sweep.Enabled || current.Sweep.DryRun)
+            if (current.Paused || !current.Sweep.Enabled || current.Sweep.DryRun ||
+                !current.Sweep.Rules.Any(r => r.Enabled && string.Equals(r.CryptoCode, code, StringComparison.OrdinalIgnoreCase)))
             {
                 Record(storeId, state, code, ActivityOutcome.Waiting,
-                    $"The earlier sweep of {Amount(pending.Spent)} {code} ({pending.Txid}) isn't on the network, and sweeping is paused, off or in dry run, so it isn't rebroadcast. " +
+                    $"The earlier sweep of {Amount(pending.Spent)} {code} ({pending.Txid}) isn't on the network, and sweeping (or its {code} rule) is paused, off or in dry run, so it isn't rebroadcast. " +
                     "Nothing more is swept until it is found or removed under Pending sweeps.");
+                return false;
+            }
+            if (state.Stopped.TryGetValue(code.ToUpperInvariant(), out var stopped))
+            {
+                // Stopped to prevent any further send to the exchange, so a sweep still waiting to go out stays out.
+                Record(storeId, state, code, ActivityOutcome.Waiting,
+                    $"The earlier sweep of {Amount(pending.Spent)} {code} ({pending.Txid}) isn't on the network, and sweeping {code} is stopped since the exchange failed or returned " +
+                    $"the deposit of {stopped.Txid}, so it isn't rebroadcast. Resume {code} under Stopped coins, or remove the sweep under Pending sweeps.");
                 return false;
             }
             outcome = await wallets.BroadcastAsync(code, pending.Hex, cancellationToken);

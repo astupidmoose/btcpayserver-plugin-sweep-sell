@@ -199,7 +199,7 @@ sealed class FakeWallets : IStoreWallets
         var txid = Interlocked.Increment(ref _txids).ToString("x64");
         lock (_signed)
             _signed["signed-" + txid] = (id, swept);
-        return new SignedSweep(txid, "signed-" + txid, new SweepAmounts(toExchange, toCold, Fee, Balances[id] - swept));
+        return new SignedSweep(txid, "signed-" + txid, new SweepAmounts(toExchange, toCold, Fee, Balances[id] - swept), Balances[id]);
     }
 
     public Task<BroadcastOutcome> BroadcastAsync(string cryptoCode, string hex, CancellationToken cancellationToken)

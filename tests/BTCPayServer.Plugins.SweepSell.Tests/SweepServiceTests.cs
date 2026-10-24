@@ -84,6 +84,24 @@ public class SweepServiceTests
     }
 
     [Fact]
+    public async Task WalletSpentBelowTheMinimumWhileBuildingWaits()
+    {
+        // Something else on the server spends from the wallet after the balance check: the sweep built from what is left is dropped.
+        Configure(balance: 1m);
+        _wallets.OnBuild = () =>
+        {
+            _wallets.Balances[$"{_storeId}:BTC"] = 0.005m;
+            return Task.CompletedTask;
+        };
+        await Service().RunAsync(_storeId, wait: false, Ct);
+        Assert.Single(_wallets.Built);
+        Assert.Empty(_wallets.Broadcasts);
+        Assert.Empty(State.Pending);
+        Assert.Equal(ActivityOutcome.Waiting, State.Activity[0].Outcome);
+        Assert.Contains("holds 0.005 BTC confirmed, below the minimum of 0.01 BTC", State.Activity[0].Message);
+    }
+
+    [Fact]
     public async Task BelowTheExchangeMinimumDepositWaits()
     {
         Configure(balance: 0.02m);
@@ -221,6 +239,60 @@ public class SweepServiceTests
         Assert.Empty(State.Pending);
         Assert.Single(State.Awaiting);
         Assert.Equal(1m, State.Swept.On(_clock.GetUtcNow(), "BTC"));
+    }
+
+    [Fact]
+    public async Task PendingSweepOfARuleTurnedOffIsStillSettledButNeverRebroadcast()
+    {
+        Configure();
+        _repository.Settings[_storeId].Sweep.Rules.Add(new SweepRule { CryptoCode = "LTC", Enabled = true, MinimumBalance = 1m });
+        _wallets.Balances[$"{_storeId}:LTC"] = 0m;
+        _wallets.BroadcastResults.Enqueue(() => throw new HttpRequestException("timeout"));
+        var service = Service();
+        await service.RunAsync(_storeId, wait: false, Ct);
+        var pending = Assert.Single(State.Pending);
+
+        _repository.Settings[_storeId].Sweep.Rules[0].Enabled = false;
+        await service.RunAsync(_storeId, wait: false, Ct);
+        Assert.Single(_wallets.Broadcasts); // not on the network, and its rule is off: not sent again
+        Assert.Single(State.Pending);
+        Assert.Contains("its BTC rule", State.Activity[0].Message);
+
+        // It reached the network after all: settled and watched although the rule is off.
+        _wallets.Statuses[pending.Txid] = TransactionStatus.Unconfirmed;
+        await service.RunAsync(_storeId, wait: false, Ct);
+        Assert.Empty(State.Pending);
+        Assert.Equal(pending.Txid, Assert.Single(State.Awaiting).Txid);
+        Assert.Single(_wallets.Broadcasts);
+    }
+
+    [Fact]
+    public async Task PendingSweepIsNotRebroadcastOnceItsCoinIsStopped()
+    {
+        Configure();
+        var service = Service();
+        await service.RunAsync(_storeId, wait: false, Ct);
+        var first = State.Awaiting[0].Txid;
+        _wallets.Balances[$"{_storeId}:BTC"] = 1m;
+        _wallets.BroadcastResults.Enqueue(() => throw new HttpRequestException("timeout"));
+        await service.RunAsync(_storeId, wait: false, Ct);
+        var second = Assert.Single(State.Pending);
+
+        _exchange.Deposits[first] = new DepositStatus(DepositState.Failed, 0.9999m);
+        await service.WatchDepositsAsync(Ct);
+        Assert.True(State.Stopped.ContainsKey("BTC"));
+
+        await service.RunAsync(_storeId, wait: false, Ct);
+        Assert.Equal(2, _wallets.Broadcasts.Count); // the second sweep isn't sent while the coin is stopped
+        Assert.Single(State.Pending);
+        Assert.Contains("sweeping BTC is stopped", State.Activity[0].Message);
+
+        // Its status is still checked: once on the network it is settled and watched.
+        _wallets.Statuses[second.Txid] = TransactionStatus.Unconfirmed;
+        await service.RunAsync(_storeId, wait: false, Ct);
+        Assert.Empty(State.Pending);
+        Assert.Contains(State.Awaiting, a => a.Txid == second.Txid);
+        Assert.Equal(2, _wallets.Broadcasts.Count);
     }
 
     [Fact]
