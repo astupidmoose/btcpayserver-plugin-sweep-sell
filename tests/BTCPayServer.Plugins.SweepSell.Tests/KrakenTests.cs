@@ -117,6 +117,13 @@ public class KrakenTests
         http.Responses["/0/private/OpenOrders"] = """{"error":[],"result":{"open":{"ODDDDD-EEEEE-FFFFFF":{"status":"open","vol_exec":"0"}}}}""";
         Assert.True((await kraken.FindOrderAsync(Credentials, OrderId, ct))!.Open);
 
+        // Closed between the two requests: listed in both, counted once, and closed.
+        http.Responses["/0/private/OpenOrders"] = """{"error":[],"result":{"open":{"OAAAAA-BBBBB-CCCCCC":{"status":"open","vol_exec":"0.1"}}}}""";
+        var moved = await kraken.FindOrderAsync(Credentials, OrderId, ct);
+        Assert.Equal(["OAAAAA-BBBBB-CCCCCC"], moved!.OrderIds);
+        Assert.False(moved.Open);
+        Assert.Equal(0.25m, moved.ExecutedAmount);
+
         http.Responses["/0/private/OpenOrders"] = """{"error":[],"result":{}}""";
         await Assert.ThrowsAsync<ExchangeException>(() => kraken.FindOrderAsync(Credentials, OrderId, ct));
     }
@@ -133,6 +140,19 @@ public class KrakenTests
         await Assert.ThrowsAsync<ExchangeException>(() => kraken.GetAvailableBalancesAsync(Credentials, TestContext.Current.CancellationToken));
         var check = await kraken.TestCredentialsAsync(Credentials, TestContext.Current.CancellationToken);
         Assert.False(check.Checks.Single(c => c.Permission == "Query Funds").Ok);
+    }
+
+    [Theory]
+    [InlineData("""[123]""")]
+    [InlineData("""[""]""")]
+    [InlineData("""["OAAAAA-BBBBB-CCCCCC", null]""")]
+    [InlineData("\"OAAAAA-BBBBB-CCCCCC\"")] // a string, not a list
+    public async Task MalformedOrderIdsFail(string txid)
+    {
+        var http = new FakeHttp();
+        http.Responses["/0/private/AddOrder"] = """{"error":[],"result":{"descr":{"order":"sell"},"txid":""" + txid + "}}";
+        await Assert.ThrowsAsync<ExchangeException>(() => new KrakenConnector(http.Client())
+            .SellAtMarketAsync(Credentials, "BTC", "CAD", 0.1m, OrderId, validateOnly: false, TestContext.Current.CancellationToken));
     }
 
     [Fact]

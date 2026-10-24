@@ -168,7 +168,14 @@ public class KrakenConnector(HttpClient http) : IExchangeConnector
         if (validateOnly)
             parameters.Add(new("validate", "true"));
         var result = Expect<JObject>(await PrivateAsync(credentials, "AddOrder", parameters, cancellationToken), "AddOrder");
-        var ids = result["txid"] is JArray txids ? txids.Select(t => Text(t) ?? "").Where(t => t.Length > 0).ToList() : [];
+        var ids = result["txid"] switch
+        {
+            null => [],
+            // Kraken order IDs are strings; anything else in the list means the response can't be trusted.
+            JArray txids when txids.All(t => t is JValue { Type: JTokenType.String } v && !string.IsNullOrEmpty((string?)v)) =>
+                txids.Select(t => (string)t!).ToList(),
+            _ => throw new ExchangeException($"Kraken sent malformed order IDs for the {baseAsset}/{quoteAsset} sell (client order {clientOrderId:D}). Check the order in Kraken before retrying.")
+        };
         if (!validateOnly && ids.Count == 0)
             throw new ExchangeException($"Kraken accepted the {baseAsset}/{quoteAsset} sell (client order {clientOrderId:D}) but returned no order ID. Check the order in Kraken before retrying.");
         var description = (result["descr"] is JObject descr ? Text(descr["order"]) : null) ?? $"sell {amount} {baseAsset} for {quoteAsset} @ market";
@@ -181,9 +188,13 @@ public class KrakenConnector(HttpClient http) : IExchangeConnector
         var id = clientOrderId.ToString("D");
         var open = Expect<JObject>(await PrivateAsync(credentials, "OpenOrders", [new("cl_ord_id", id)], cancellationToken), "OpenOrders");
         var closed = Expect<JObject>(await PrivateAsync(credentials, "ClosedOrders", [new("cl_ord_id", id)], cancellationToken), "ClosedOrders");
-        var orders = Orders(open, "open", id).Select(o => (o.Id, o.Order, Open: true))
-            .Concat(Orders(closed, "closed", id).Select(o => (o.Id, o.Order, Open: false)))
-            .ToList();
+        // An order that closed between the two requests shows up in both; the later closed snapshot wins.
+        var byId = new Dictionary<string, (string Id, JObject Order, bool Open)>();
+        foreach (var (orderId, order) in Orders(open, "open", id))
+            byId[orderId] = (orderId, order, true);
+        foreach (var (orderId, order) in Orders(closed, "closed", id))
+            byId[orderId] = (orderId, order, false);
+        var orders = byId.Values.ToList();
         if (orders.Count == 0)
             return null;
         return new OrderLookup(orders.Select(o => o.Id).ToList(), orders.Any(o => o.Open),
