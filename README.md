@@ -80,5 +80,9 @@ dotnet test --project tests/BTCPayServer.Plugins.SweepSell.Tests
 ./plugin-register.sh   # load the plugin when debugging BTCPay Server
 ```
 
+To release, make sure `CHANGELOG.md` has a section for the `<Version>` in the plugin's csproj, then run
+the **Release** workflow on `main` from the Actions tab with the new tag (e.g. `v0.1.0-beta.1`), or push
+that tag on a commit on `main`. It tests, packages and publishes the GitHub release.
+
 See [AGENTS.md](AGENTS.md) for the rules every change follows, and [SECURITY.md](SECURITY.md) to
 report a vulnerability.
