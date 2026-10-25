@@ -21,7 +21,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: release
+  group: release-${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
   cancel-in-progress: false
 
 jobs:
@@ -50,8 +50,9 @@ jobs:
               echo "::error::Run the release from main"
               exit 1
             fi
-            if git rev-parse -q --verify "refs/tags/$TAG" > /dev/null; then
-              echo "::error::Tag $TAG already exists; push it instead, or pick a new one"
+            # A tag on this commit is a retry of this release; one anywhere else is someone else's.
+            if EXISTING="$(git rev-parse -q --verify "refs/tags/$TAG^{commit}")" && [[ "$EXISTING" != "$GITHUB_SHA" ]]; then
+              echo "::error::Tag $TAG already exists on another commit; pick a new one"
               exit 1
             fi
           fi
@@ -122,16 +123,19 @@ jobs:
           FLAGS=()
           if [[ "$PRERELEASE" == "true" ]]; then FLAGS+=(--prerelease); fi
           if [[ "$GITHUB_EVENT_NAME" == "workflow_dispatch" ]]; then
-            # Create the tag on the exact commit that was built and tested, and never reuse one made since.
-            if gh api "repos/$GH_REPO/git/ref/tags/$TAG" > /dev/null 2>&1; then
-              echo "::error::Tag $TAG was created while this release was building"
-              exit 1
+            # Create the tag on the commit that was built and tested. GitHub refuses a name that already
+            # exists, so a tag made by anyone else is never reused, while a retry of this run (after a failed
+            # upload, say) finds its own tag on the same commit and carries on.
+            if ! gh api "repos/$GH_REPO/git/refs" -f ref="refs/tags/$TAG" -f sha="$GITHUB_SHA" > /dev/null; then
+              read -r TYPE SHA < <(gh api "repos/$GH_REPO/git/ref/tags/$TAG" --jq '.object.type + " " + .object.sha') || true
+              if [[ "$TYPE" == "tag" ]]; then SHA="$(gh api "repos/$GH_REPO/git/tags/$SHA" --jq .object.sha)"; fi
+              if [[ "$SHA" != "$GITHUB_SHA" ]]; then
+                echo "::error::Tag $TAG already exists on another commit"
+                exit 1
+              fi
             fi
-            FLAGS+=(--target "$GITHUB_SHA")
-          else
-            FLAGS+=(--verify-tag)
           fi
-          gh release create "$TAG" --title "Sweep & Sell $TAG" --notes-file notes.md "${FLAGS[@]}" \
+          gh release create "$TAG" --verify-tag --title "Sweep & Sell $TAG" --notes-file notes.md "${FLAGS[@]}" \
             release/BTCPayServer.Plugins.SweepSell.btcpay \
             release/BTCPayServer.Plugins.SweepSell.btcpay.json \
             release/SHA256SUMS
