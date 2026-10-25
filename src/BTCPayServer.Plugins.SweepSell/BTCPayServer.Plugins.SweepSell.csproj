@@ -6,7 +6,7 @@
     <Nullable>enable</Nullable>
     <ImplicitUsings>disable</ImplicitUsings>
     <Product>Sweep &amp; Sell</Product>
-    <Description>Sweep store wallets to an exchange and sell what comes in, automatically: sweep rules, hedging on payment and conversion at the exchange, with exchange keys stored encrypted.</Description>
+    <Description>Sweep store wallets to an exchange and sell what comes in, automatically: sweep rules, conversion at the exchange, hedging on payment and payout to a destination already saved in your exchange account, with exchange keys stored encrypted.</Description>
     <Version>0.1.0</Version>
   </PropertyGroup>
 

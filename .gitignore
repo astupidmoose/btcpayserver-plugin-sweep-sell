@@ -454,3 +454,6 @@ $RECYCLE.BIN/
 !.vscode/extensions.json
 # Local build outputs
 out/
+
+# Plugin packages built by scripts/pack.sh
+dist/
