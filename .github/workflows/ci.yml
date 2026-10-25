@@ -23,3 +23,5 @@ jobs:
         run: dotnet build src/BTCPayServer.Plugins.SweepSell -c Release
       - name: Test
         run: dotnet test --project tests/BTCPayServer.Plugins.SweepSell.Tests -c Release
+      - name: Package
+        run: scripts/pack.sh dist

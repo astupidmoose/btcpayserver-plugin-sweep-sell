@@ -2,8 +2,8 @@
 
 Sweep your store's wallets to your exchange and sell what comes in, automatically.
 
-> Early development. In place: the per-store settings page, encrypted exchange keys, the Kraken
-> connector, sweeping, hedging on payment, conversion at the exchange and fiat payout.
+> Beta. Every feature is in place and starts in dry run; test it on your own server before letting it
+> move money. See [CHANGELOG.md](CHANGELOG.md) for what each release contains.
 
 ## Features
 
@@ -39,9 +39,23 @@ Sweep your store's wallets to your exchange and sell what comes in, automaticall
 
 | Exchange | Status |
 | --- | --- |
-| Kraken | In progress |
+| Kraken | Beta |
 
 Adding an exchange means implementing `IExchangeConnector` (see `src/.../Exchanges`). Contributions welcome.
+
+## Install
+
+Needs BTCPay Server 2.4.5 or later, and a server admin account.
+
+1. Download `BTCPayServer.Plugins.SweepSell.btcpay` and `SHA256SUMS` from the
+   [latest release](../../releases), and check the package with `sha256sum -c SHA256SUMS --ignore-missing`.
+2. In BTCPay Server, open **Plugins > Installed Plugins**, click **Upload Plugin**, choose the file
+   and click **Upload**.
+3. Click **Restart now** when BTCPay asks for a restart.
+4. Open a store and click **Sweep & Sell** in the left menu. Add an exchange key (below), then turn on the
+   features you want. Each one stays in dry run until you turn dry run off.
+
+To build the package yourself, run `scripts/pack.sh` (it writes to `dist/`).
 
 ## Your exchange key
 
