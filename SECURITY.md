@@ -16,6 +16,8 @@ the issues we treat as critical:
   unencrypted, in logs, in pages, in API responses or in error messages.
 - Any way to make the plugin send coins to an address the store owner did not configure, or to an
   exchange address not freshly fetched from the store's own exchange account.
+- Any way to make payout withdraw to a destination that isn't already saved in the store's exchange
+  account, to add one, or to withdraw with the trading key.
 - Any way to trigger a sweep or sale from outside (an unauthenticated request, a forged event) or to
   make one happen twice.
 - Access to one store's settings or keys from another store or a user without
@@ -25,7 +27,12 @@ See [docs/threat-model.md](docs/threat-model.md) for the full model.
 
 ## Guidance for users
 
-- Create exchange API keys **without withdrawal permission**. The plugin never withdraws.
+- Create the trading key **without withdrawal permission** and without permission to add or update
+  withdrawal addresses. Trading never withdraws, and payout won't run while the trading key can change
+  withdrawal addresses.
+- Payout is optional. If you use it, give it a separate key with only Query Funds and Withdraw Funds
+  (payout refuses a key with any other permission), and keep only your own accounts saved as withdrawal
+  destinations in your exchange.
 - Use a key only for this plugin, so it can be revoked without affecting anything else.
 - Keep daily caps and dry run on until you've watched the activity log for a while.
 - Back up BTCPay's data-protection keys with the rest of the server: without them, saved exchange keys

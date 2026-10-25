@@ -6,7 +6,8 @@
     var storeId = ScopeProvider.GetCurrentStoreId();
     ViewContext.RouteData.Values.TryGetValue("Controller", out var controller);
     var isActive = !string.IsNullOrEmpty(storeId) && controller?.ToString() is { Length: > 0 } name &&
-                   nameof(UISweepSellController).StartsWith(name, StringComparison.InvariantCultureIgnoreCase);
+                   (nameof(UISweepSellController).StartsWith(name, StringComparison.InvariantCultureIgnoreCase) ||
+                    nameof(UISweepSellPayoutController).StartsWith(name, StringComparison.InvariantCultureIgnoreCase));
 }
 @if (!string.IsNullOrEmpty(storeId))
 {

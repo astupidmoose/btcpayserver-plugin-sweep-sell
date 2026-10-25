@@ -3,7 +3,7 @@
 Sweep your store's wallets to your exchange and sell what comes in, automatically.
 
 > Early development. In place: the per-store settings page, encrypted exchange keys, the Kraken
-> connector, sweeping, hedging on payment and conversion at the exchange.
+> connector, sweeping, hedging on payment, conversion at the exchange and fiat payout.
 
 ## Features
 
@@ -20,13 +20,18 @@ Sweep your store's wallets to your exchange and sell what comes in, automaticall
   price floor (by default 2% below the 24-hour average) or better and cancel whatever can't fill, so a
   thin market can't take your coins cheaply. Optional daily cap. Starts in dry run, where each order
   is checked with the exchange but not placed. Every run is listed under Recent activity.
-
 - **Hedge on payment:** when an invoice reaches the status you pick (paid in full or settled), sell the
   BTC it brought in on your exchange straight away, to lock in its price. Each invoice is hedged once,
   into the market you choose per invoice currency (e.g. GBP invoices into CAD). Sells come from BTC
   already on the exchange and never borrow; amounts below the minimum order wait until they add up.
   Same price floor and optional daily cap as convert, and dry run by default. Invoices created before
   hedging was turned on are never hedged.
+- **Payout (optional):** on a schedule, withdraw one asset (e.g. the currency you convert to) to a
+  withdrawal destination you already saved and verified in your exchange, such as your bank account. It
+  uses its own withdraw-only key and can't add or change destinations: you enter the name of one that is
+  already there. Required daily cap, minimum, an amount to keep and a highest fee. Starts in dry run,
+  where the exchange quotes each withdrawal but nothing is sent. Lives on its own page, linked from the
+  settings page.
 - **Safety:** dry run for every feature, daily caps, a pause switch per store, and an activity log for
   each feature.
 
@@ -41,9 +46,16 @@ Adding an exchange means implementing `IExchangeConnector` (see `src/.../Exchang
 ## Your exchange key
 
 Create a key for this plugin only, with permission to query funds, deposit funds, query open and closed orders and create
-orders, and **without withdrawal permission**. The key is stored encrypted on your BTCPay server and
-never shown again after you save it. The settings page has a **Test the key** button, which checks
-each permission without trading.
+orders, and **without withdrawal permission** or permission to add or update withdrawal addresses. The key
+is stored encrypted on your BTCPay server and never shown again after you save it. The settings page has a
+**Test the key** button, which checks each permission without trading, and that the key can't withdraw or
+change withdrawal addresses. Payout won't run while the trading key can change withdrawal addresses.
+
+Payout needs a second key with only **query funds** and **withdraw funds**, and no query start or end
+date: payout refuses a key with any other permission, such as an order or withdrawal address permission. **Test the payout key**
+checks that it can withdraw, can't trade and has no other permission, and lists the withdrawal
+destinations your exchange shows for the asset. Payout needs an exchange account no other store on the server uses, for payout or trading: it withdraws
+the whole balance, and won't run while another store pays out from the same account.
 
 ## Development
 

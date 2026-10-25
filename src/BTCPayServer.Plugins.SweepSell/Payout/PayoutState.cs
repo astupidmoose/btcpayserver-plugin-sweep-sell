@@ -1,0 +1,159 @@
+#nullable enable
+using System;
+using System.Collections.Generic;
+using System.Linq;
+using System.Security.Cryptography;
+using System.Text;
+using BTCPayServer.Plugins.SweepSell.Exchanges;
+using BTCPayServer.Plugins.SweepSell.Conversion;
+
+namespace BTCPayServer.Plugins.SweepSell.Payout;
+
+/// <summary>What the payout job of one store has done and is waiting on, saved as a store setting.</summary>
+public class PayoutState
+{
+    public const int MaxActivity = 50;
+    public const int MaxKnown = 100;
+
+    public DateTimeOffset? LastRun { get; set; }
+
+    /// <summary>
+    /// Withdrawals sent that the exchange doesn't list yet: the response was lost, or it was accepted but isn't listed (an
+    /// account that needs withdrawals approved lists them only once approved). Each is saved before it is sent, and nothing
+    /// more is withdrawn until it is found in the exchange's withdrawals or the owner removes it.
+    /// </summary>
+    public List<PendingWithdrawal> Pending { get; set; } = [];
+
+    /// <summary>
+    /// The exchange references of withdrawals already accounted for (newest first), so a lost withdrawal is never matched
+    /// to one of them.
+    /// </summary>
+    public List<string> Known { get; set; } = [];
+
+    /// <summary>
+    /// Withdrawals the exchange listed as still in progress (on hold, awaiting cancellation, or not final yet). Kept until it
+    /// lists them as final, however long that takes, so their amount is never paid out again.
+    /// </summary>
+    public List<UnsettledWithdrawal> Unsettled { get; set; } = [];
+
+    /// <summary>The exchange account the payout key belonged to on the last run, so another store can tell it pays out the same one.</summary>
+    public PayoutAccount? Account { get; set; }
+
+    /// <summary>UTC day (yyyy-MM-dd) that <see cref="Withdrawn"/> counts, for the daily cap.</summary>
+    public string? WithdrawnDay { get; set; }
+
+    /// <summary>Amount withdrawn on <see cref="WithdrawnDay"/>, by asset, fees included.</summary>
+    public Dictionary<string, decimal> Withdrawn { get; set; } = new();
+
+    /// <summary>Newest first.</summary>
+    public List<ActivityEntry> Activity { get; set; } = [];
+
+    public decimal WithdrawnOn(DateTimeOffset now, string asset) => WithdrawnDay == Day(now) ? Withdrawn.GetValueOrDefault(asset) : 0;
+
+    /// <summary>Adds a withdrawal made at <paramref name="at"/>. One from a day before the one being counted is left out.</summary>
+    public void AddWithdrawn(DateTimeOffset at, string asset, decimal amount)
+    {
+        var day = Day(at);
+        if (WithdrawnDay is not null && string.CompareOrdinal(day, WithdrawnDay) < 0)
+            return;
+        if (WithdrawnDay != day)
+        {
+            WithdrawnDay = day;
+            Withdrawn.Clear();
+        }
+        Withdrawn[asset] = Withdrawn.GetValueOrDefault(asset) + amount;
+    }
+
+    public void Remember(string reference)
+    {
+        Known.Remove(reference);
+        Known.Insert(0, reference);
+        if (Known.Count > MaxKnown)
+            Known.RemoveRange(MaxKnown, Known.Count - MaxKnown);
+    }
+
+    /// <summary>Adds an entry. A repeat of the latest entry (same outcome and message) replaces it, so waiting run after run doesn't fill the list.</summary>
+    public void Add(ActivityEntry entry)
+    {
+        var latest = Activity.FirstOrDefault();
+        if (latest is not null && latest.Outcome == entry.Outcome && latest.Message == entry.Message)
+            Activity.Remove(latest);
+        Activity.Insert(0, entry);
+        if (Activity.Count > MaxActivity)
+            Activity.RemoveRange(MaxActivity, Activity.Count - MaxActivity);
+    }
+
+    static string Day(DateTimeOffset now) => now.UtcDateTime.ToString("yyyy-MM-dd", System.Globalization.CultureInfo.InvariantCulture);
+}
+
+public class PendingWithdrawal
+{
+    public Guid Id { get; set; }
+
+    /// <summary>The exchange and key it was sent with: only that account can show whether it went through.</summary>
+    public string? ExchangeId { get; set; }
+
+    public string? KeyFingerprint { get; set; }
+
+    /// <summary>The account it was sent from (<see cref="PayoutAccount.Hash"/>), so other stores know which account it holds up.</summary>
+    public string? AccountHash { get; set; }
+
+    public string Asset { get; set; } = "";
+    public string Destination { get; set; } = "";
+
+    /// <summary>What leaves the account, fees included.</summary>
+    public decimal Amount { get; set; }
+
+    /// <summary>What the quote said would arrive.</summary>
+    public decimal NetAmount { get; set; }
+
+    public decimal Fee { get; set; }
+
+    public DateTimeOffset SentAt { get; set; }
+
+    /// <summary>
+    /// The exchange's reference when it accepted the withdrawal. Set means it is already counted against the cap and is
+    /// looked up by this reference; null means the response was lost and it is matched by amount, destination and time.
+    /// </summary>
+    public string? Reference { get; set; }
+
+    /// <summary>
+    /// The exchange's withdrawals already listed just before this one was sent, which can never be it: an earlier withdrawal
+    /// of the same amount and destination must not be mistaken for it when the response is lost.
+    /// </summary>
+    public List<string> SeenBefore { get; set; } = [];
+}
+
+public class UnsettledWithdrawal
+{
+    /// <summary>The exchange, account (<see cref="PayoutAccount.Hash"/>) and asset whose withdrawal list showed it: only that list shows when it becomes final.</summary>
+    public string? ExchangeId { get; set; }
+
+    public string? AccountHash { get; set; }
+
+    public string Asset { get; set; } = "";
+
+    public string Reference { get; set; } = "";
+    public DateTimeOffset RequestedAt { get; set; }
+
+    /// <summary>What leaves the account, fees included.</summary>
+    public decimal Amount { get; set; }
+}
+
+/// <summary>
+/// An exchange account, as a hash of the exchange's identifier for it (the identifier itself isn't kept), and the
+/// fingerprint of the key it was read with.
+/// </summary>
+public sealed record PayoutAccount
+{
+    /// <summary>Null when the exchange doesn't say which account a key belongs to.</summary>
+    public string? Hash { get; init; }
+
+    public string KeyFingerprint { get; init; } = "";
+
+    public static PayoutAccount For(string exchangeId, string? accountId, ExchangeCredentials key) => new()
+    {
+        Hash = string.IsNullOrEmpty(accountId) ? null : Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes($"{exchangeId}:{accountId}"))),
+        KeyFingerprint = key.Fingerprint()
+    };
+}
