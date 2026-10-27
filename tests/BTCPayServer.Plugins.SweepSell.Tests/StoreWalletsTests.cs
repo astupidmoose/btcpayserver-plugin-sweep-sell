@@ -16,7 +16,7 @@ public class StoreWalletsTests
     }.SetDefaultElectrumMapping(ChainName.Regtest);
 
     static readonly BtcPayStoreWallets Wallets = new(null!, null!,
-        new BTCPayNetworkProvider([Btc], Explorers, new BTCPayServer.Logging.Logs()), null!, null!, null!);
+        new BTCPayNetworkProvider([Btc], Explorers, new BTCPayServer.Logging.Logs()), null!, null!, null!, null!);
 
     // An invented account key; nothing here holds funds.
     static readonly ExtPubKey Account = ExtKey.CreateFromSeed(new byte[32].Select((_, i) => (byte)(i + 1)).ToArray()).Derive(new KeyPath("84'/1'/0'")).Neuter();

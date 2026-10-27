@@ -101,6 +101,10 @@
                 <div>
                     <label asp-for="SweepDryRun" class="form-check-label"></label>
                     <div class="form-text mt-0">Each sweep is built and signed but not broadcast. Turn this off only when the dry runs look right.</div>
+                    @if (!Model.SweepEnabled)
+                    {
+                        <div class="form-text mt-0 text-warning">Dry runs only happen while Sweep to the exchange is on.</div>
+                    }
                 </div>
             </div>
             <div class="form-group">
@@ -192,6 +196,10 @@
                 <div>
                     <label asp-for="HedgeDryRun" class="form-check-label"></label>
                     <div class="form-text mt-0">Each order is checked with the exchange but not placed. Invoices taken in dry run are never sold later.</div>
+                    @if (!Model.HedgeEnabled)
+                    {
+                        <div class="form-text mt-0 text-warning">Dry runs only happen while Hedge on payment is on.</div>
+                    }
                 </div>
             </div>
             <div class="form-group">
@@ -249,6 +257,10 @@
                 <div>
                     <label asp-for="ConvertDryRun" class="form-check-label"></label>
                     <div class="form-text mt-0">Each order is checked with the exchange but not placed. Turn this off only when the dry runs look right.</div>
+                    @if (!Model.ConvertEnabled)
+                    {
+                        <div class="form-text mt-0 text-warning">Dry runs only happen while Convert at the exchange is on.</div>
+                    }
                 </div>
             </div>
             <div class="form-group">
@@ -344,6 +356,10 @@
         }
 
         <h4 class="mt-5 mb-2">Sweep activity</h4>
+        @if (Model.SweepNotRunning is { } sweepOff)
+        {
+            <div class="alert alert-warning" role="alert">@sweepOff</div>
+        }
         <p class="text-secondary">
             Last scheduled sweep run: @(Model.SweepLastRun?.ToString("u") ?? "never").
         </p>
@@ -463,6 +479,10 @@
         }
 
         <h4 class="mt-5 mb-2">Hedge activity</h4>
+        @if (Model.HedgeNotRunning is { } hedgeOff)
+        {
+            <div class="alert alert-warning" role="alert">@hedgeOff</div>
+        }
         <p class="text-secondary">
             Last hedge run: @(Model.HedgeLastRun?.ToString("u") ?? "never").
         </p>
@@ -519,7 +539,7 @@
         }
         @if (Model.HedgeActivity.Count == 0)
         {
-            <p class="text-secondary">Nothing yet.</p>
+            <p class="text-secondary">Nothing yet. Each invoice is listed here once it reaches the status you picked.</p>
         }
         else
         {
@@ -544,6 +564,10 @@
         }
 
         <h4 class="mt-5 mb-2">Convert activity</h4>
+        @if (Model.ConvertNotRunning is { } convertOff)
+        {
+            <div class="alert alert-warning" role="alert">@convertOff</div>
+        }
         <p class="text-secondary">
             Last convert run: @(Model.ConvertLastRun?.ToString("u") ?? "never").
         </p>

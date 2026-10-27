@@ -77,6 +77,30 @@ public class ConvertTests
     }
 
     [Fact]
+    public async Task ARunWithNothingToSellSaysSo()
+    {
+        Configure(dryRun: true);
+        _exchange.Balances["BTC"] = 1m; // the target doesn't count
+        Assert.Equal(ConvertRunResult.Ran, await Service().RunAsync(StoreId, Ct));
+        await Service().RunAsync(StoreId, Ct);
+
+        Assert.Empty(_exchange.Orders);
+        var entry = Assert.Single(State.Activity); // a repeat replaces the entry instead of filling the list
+        Assert.Equal((null, ActivityOutcome.Waiting), (entry.Asset, entry.Outcome));
+        Assert.Equal("No DOGE or LTC to sell on Fake Exchange. Waiting for a deposit.", entry.Message);
+    }
+
+    [Fact]
+    public async Task ACoinWithNothingToSellIsSkippedWhenAnotherHasSome()
+    {
+        Configure();
+        _exchange.Balances["DOGE"] = 300m;
+        await Service().RunAsync(StoreId, Ct);
+        var entry = Assert.Single(State.Activity);
+        Assert.Equal(("DOGE", ActivityOutcome.Sold), (entry.Asset, entry.Outcome));
+    }
+
+    [Fact]
     public async Task BidBelowTheFloorWaits()
     {
         Configure();

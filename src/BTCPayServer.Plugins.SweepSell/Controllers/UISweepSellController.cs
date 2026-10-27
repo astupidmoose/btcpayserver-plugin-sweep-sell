@@ -651,6 +651,7 @@ public class UISweepSellController(ISweepSellRepository repository, IPayoutRepos
             ConvertMaxSlippagePercent = posted?.ConvertMaxSlippagePercent ?? settings.Convert.MaxSlippagePercent,
             ConvertDailyCap = posted?.ConvertDailyCap ?? settings.Convert.DailyCap,
             ConvertLastRun = convertState.LastRun,
+            ConvertNotRunning = SweepSellSettingsViewModel.NotRunning(settings.Paused, settings.Convert.Enabled, "Convert at the exchange"),
             ConvertPending = convertState.Pending,
             ConvertActivity = convertState.Activity,
             SweepEnabled = posted?.SweepEnabled ?? settings.Sweep.Enabled,
@@ -659,6 +660,7 @@ public class UISweepSellController(ISweepSellRepository repository, IPayoutRepos
             SweepFeeTargetBlocks = posted?.SweepFeeTargetBlocks ?? settings.Sweep.FeeTargetBlocks,
             SweepRules = rules,
             SweepLastRun = sweepState.LastRun,
+            SweepNotRunning = SweepSellSettingsViewModel.NotRunning(settings.Paused, settings.Sweep.Enabled, "Sweep to the exchange"),
             SweepPending = sweepState.Pending,
             SweepAwaiting = sweepState.Awaiting,
             SweepStopped = sweepState.Stopped,
@@ -674,6 +676,7 @@ public class UISweepSellController(ISweepSellRepository repository, IPayoutRepos
             HedgeDailyCap = posted?.HedgeDailyCap ?? settings.Hedge.DailyCap,
             HedgeEnabledSince = settings.Hedge.EnabledSince,
             HedgeLastRun = hedgeState.LastRun,
+            HedgeNotRunning = SweepSellSettingsViewModel.NotRunning(settings.Paused, settings.Hedge.Enabled, "Hedge on payment"),
             HedgePending = hedgeState.Pending,
             HedgeQueued = hedgeState.Invoices.Where(i => i.Value.Remaining > 0).OrderBy(i => i.Value.CreatedAt)
                 .Select(i => new QueuedHedge(i.Key, i.Value.Remaining, i.Value.Amount, i.Value.Market, i.Value.DryRun)).ToList(),
@@ -704,6 +707,15 @@ public record QueuedHedge(string InvoiceId, decimal Remaining, decimal Amount, s
 
 public class SweepSellSettingsViewModel
 {
+    /// <summary>
+    /// Why a feature doesn't run with the saved settings, or null when it does. A dry run only happens while its feature
+    /// is on, which is easy to miss when the dry run switch is on and the feature's is off.
+    /// </summary>
+    public static string? NotRunning(bool paused, bool enabled, string feature) =>
+        paused ? "Pause everything is on, so this doesn't run, in dry run or live. Turn it off at the top and save."
+        : !enabled ? $"{feature} is off, so this doesn't run, in dry run or live. Turn it on above and save."
+        : null;
+
     [Display(Name = "Pause everything")]
     public bool Paused { get; set; }
 
@@ -742,6 +754,9 @@ public class SweepSellSettingsViewModel
 
     public DateTimeOffset? ConvertLastRun { get; set; }
 
+    /// <summary>See <see cref="NotRunning"/>. Not posted.</summary>
+    public string? ConvertNotRunning { get; set; }
+
     public List<PendingOrder> ConvertPending { get; set; } = [];
 
     public List<ActivityEntry> ConvertActivity { get; set; } = [];
@@ -761,6 +776,9 @@ public class SweepSellSettingsViewModel
     public List<SweepRuleViewModel> SweepRules { get; set; } = [];
 
     public DateTimeOffset? SweepLastRun { get; set; }
+
+    /// <summary>See <see cref="NotRunning"/>. Not posted.</summary>
+    public string? SweepNotRunning { get; set; }
 
     public List<PendingSweep> SweepPending { get; set; } = [];
 
@@ -800,6 +818,9 @@ public class SweepSellSettingsViewModel
     public DateTimeOffset? HedgeEnabledSince { get; set; }
 
     public DateTimeOffset? HedgeLastRun { get; set; }
+
+    /// <summary>See <see cref="NotRunning"/>. Not posted.</summary>
+    public string? HedgeNotRunning { get; set; }
 
     public List<PendingOrder> HedgePending { get; set; } = [];
 
