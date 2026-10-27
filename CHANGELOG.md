@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.1.1 (beta)
+
+Fixes from testing the first beta. Install it over 0.1.0; settings and activity are kept.
+
+- **Sweep:** a sweep at a fee below 1 sat/vB, which the node accepts, no longer fails with "Fee too low". The
+  plugin now uses the node's own minimum relay fee, and never pays less than it.
+- **Copy to other stores:** a new section on the settings page copies the sweep, hedge and convert settings
+  (and, if you tick it, the exchange key) to other stores you manage. Every copied feature lands in dry run,
+  each store keeps its own pause switch and payout settings, and sweep rules are copied only for coins that
+  store has a wallet for.
+- **Convert:** a run with nothing to sell now says so in the activity log, instead of leaving it empty.
+- **Settings page:** says above each feature's activity when it doesn't run because it is off or the store
+  is paused, and notes under each dry run switch that dry runs only happen while the feature is on.
+
 ## 0.1.0 (beta)
 
 First release, for testing. Every feature starts in dry run and stays there until you turn it off, so
