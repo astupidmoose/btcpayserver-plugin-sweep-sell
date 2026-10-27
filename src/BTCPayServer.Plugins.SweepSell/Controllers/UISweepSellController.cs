@@ -167,7 +167,7 @@ public class UISweepSellController(ISweepSellRepository repository, IPayoutRepos
             {
                 var current = await repository.GetAsync(targetId);
                 var (next, found) = SettingsCopy.CopyTo(source, current, copyKey, coins, IsExtendedKey, clock.GetUtcNow());
-                if (SettingsCopy.Problem(next, protector) is { } notRunnable)
+                if (SettingsCopy.Problem(next, protector, exchanges) is { } notRunnable)
                     return (current, next, found, notRunnable);
                 if (!canSpend && ChangesSweeps(current, next))
                     return (current, next, found, "sweeping there spends from its wallets, which needs permission to sign and broadcast wallet transactions in that store.");

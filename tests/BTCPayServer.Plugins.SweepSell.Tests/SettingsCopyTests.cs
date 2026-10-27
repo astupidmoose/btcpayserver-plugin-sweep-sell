@@ -1,3 +1,4 @@
+using BTCPayServer.Plugins.SweepSell.Exchanges;
 using BTCPayServer.Plugins.SweepSell.Settings;
 using Microsoft.AspNetCore.DataProtection;
 
@@ -8,6 +9,7 @@ public class SettingsCopyTests
     static readonly DateTimeOffset Now = new(2026, 3, 1, 12, 0, 0, TimeSpan.Zero);
     static readonly string[] BtcAndLtc = ["BTC", "LTC"];
     static readonly SecretProtector Protector = new(new EphemeralDataProtectionProvider());
+    static readonly ExchangeRegistry Exchanges = new([new FakeExchange()]);
 
     // Invented values: a fixed cold address, and an extended public key standing in for one.
     const string FixedCold = "bcrt1qexamplecoldaddress";
@@ -16,7 +18,7 @@ public class SettingsCopyTests
 
     static SweepSellSettings Source() => new()
     {
-        ExchangeId = "kraken",
+        ExchangeId = FakeExchange.ExchangeId,
         ProtectedApiKey = "protected-source-key",
         ProtectedApiSecret = "protected-source-secret",
         Convert = new ConvertSettings { Enabled = true, DryRun = false, Assets = ["DOGE", "LTC"], TargetAsset = "BTC", IntervalMinutes = 30, MaxSlippagePercent = 3, DailyCap = 0.5m },
@@ -40,7 +42,7 @@ public class SettingsCopyTests
     static SweepSellSettings Target() => new()
     {
         Paused = true,
-        ExchangeId = "kraken",
+        ExchangeId = FakeExchange.ExchangeId,
         ProtectedApiKey = "protected-target-key",
         ProtectedApiSecret = "protected-target-secret"
     };
@@ -76,7 +78,7 @@ public class SettingsCopyTests
 
         var (withKey, _) = SettingsCopy.CopyTo(Source(), Target(), true, BtcAndLtc, IsXpub, Now);
         Assert.True(withKey.Paused);
-        Assert.Equal(("kraken", "protected-source-key", "protected-source-secret"), (withKey.ExchangeId, withKey.ProtectedApiKey, withKey.ProtectedApiSecret));
+        Assert.Equal((FakeExchange.ExchangeId, "protected-source-key", "protected-source-secret"), (withKey.ExchangeId, withKey.ProtectedApiKey, withKey.ProtectedApiSecret));
     }
 
     [Fact]
@@ -136,19 +138,32 @@ public class SettingsCopyTests
         source.ProtectedApiSecret = Protector.Protect("source-secret");
         var keyless = new SweepSellSettings();
         var (copy, _) = SettingsCopy.CopyTo(source, keyless, false, BtcAndLtc, IsXpub, Now);
-        Assert.Contains("no exchange key", SettingsCopy.Problem(copy, Protector));
+        Assert.Contains("no exchange key", SettingsCopy.Problem(copy, Protector, Exchanges));
 
         var (withKey, _) = SettingsCopy.CopyTo(source, keyless, true, BtcAndLtc, IsXpub, Now);
-        Assert.Null(SettingsCopy.Problem(withKey, Protector));
+        Assert.Null(SettingsCopy.Problem(withKey, Protector, Exchanges));
     }
 
     [Fact]
     public void AKeyThatCantBeDecryptedCountsAsNoKey()
     {
         // Saved, but encrypted with keys this server no longer has.
-        var unreadable = new SweepSellSettings { ExchangeId = "kraken", ProtectedApiKey = "lost-key", ProtectedApiSecret = "lost-secret" };
+        var unreadable = new SweepSellSettings { ExchangeId = FakeExchange.ExchangeId, ProtectedApiKey = "lost-key", ProtectedApiSecret = "lost-secret" };
         var (copy, _) = SettingsCopy.CopyTo(Source(), unreadable, false, BtcAndLtc, IsXpub, Now);
         Assert.True(copy.HasCredentials);
-        Assert.Contains("no exchange key", SettingsCopy.Problem(copy, Protector));
+        Assert.Contains("no exchange key", SettingsCopy.Problem(copy, Protector, Exchanges));
+    }
+
+    [Fact]
+    public void AKeyForAnExchangeThisServerDoesntSupportCountsAsNoKey()
+    {
+        var target = new SweepSellSettings
+        {
+            ExchangeId = "retired-exchange",
+            ProtectedApiKey = Protector.Protect("old-key"),
+            ProtectedApiSecret = Protector.Protect("old-secret")
+        };
+        var (copy, _) = SettingsCopy.CopyTo(Source(), target, false, BtcAndLtc, IsXpub, Now);
+        Assert.Contains("no exchange key", SettingsCopy.Problem(copy, Protector, Exchanges));
     }
 }
