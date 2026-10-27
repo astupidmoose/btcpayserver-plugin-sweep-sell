@@ -4,6 +4,7 @@ using System.Collections.Generic;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
+using BTCPayServer.HostedServices;
 using BTCPayServer.Payments;
 using BTCPayServer.Services;
 using BTCPayServer.Services.Invoices;
@@ -21,7 +22,7 @@ namespace BTCPayServer.Plugins.SweepSell.Sweeping;
 /// spend from a hot wallet (unspent coins, the account key kept by NBXplorer, the fee provider, broadcast).
 /// </summary>
 public class BtcPayStoreWallets(StoreRepository stores, PaymentMethodHandlerDictionary handlers, BTCPayNetworkProvider networks,
-    ExplorerClientProvider explorers, BTCPayWalletProvider walletProvider, IFeeProviderFactory fees) : IStoreWallets
+    ExplorerClientProvider explorers, BTCPayWalletProvider walletProvider, IFeeProviderFactory fees, NBXplorerDashboard dashboard) : IStoreWallets
 {
     public async Task<IReadOnlyList<string>> GetCryptoCodesAsync(string storeId, CancellationToken cancellationToken)
     {
@@ -120,7 +121,9 @@ public class BtcPayStoreWallets(StoreRepository stores, PaymentMethodHandlerDict
             : (await explorer.GetUnusedAsync(derivation, DerivationFeature.Change, 0, false, cancellationToken))?.Address
               ?? throw new SweepException($"The {wallet.CryptoCode} wallet has no change address.");
         var feeRate = await fees.CreateFeeProvider(network).GetFeeRateAsync(request.FeeTargetBlocks);
-        return SweepBuilder.Build(network.NBitcoinNetwork, signing, request.Amount, exchange, cold, request.ColdPercent, feeRate, change);
+        // The node's minimum relay fee, as BTCPay's own wallet uses it; unknown leaves NBitcoin's 1 sat/vB default.
+        var minRelayFee = dashboard.Get(network.CryptoCode)?.Status?.BitcoinStatus?.MinRelayTxFee;
+        return SweepBuilder.Build(network.NBitcoinNetwork, signing, request.Amount, exchange, cold, request.ColdPercent, feeRate, change, minRelayFee);
     }
 
     public async Task<BroadcastOutcome> BroadcastAsync(string cryptoCode, string hex, CancellationToken cancellationToken)
