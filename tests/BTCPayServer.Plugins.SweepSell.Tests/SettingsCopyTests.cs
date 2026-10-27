@@ -1,4 +1,5 @@
 using BTCPayServer.Plugins.SweepSell.Settings;
+using Microsoft.AspNetCore.DataProtection;
 
 namespace BTCPayServer.Plugins.SweepSell.Tests;
 
@@ -6,6 +7,7 @@ public class SettingsCopyTests
 {
     static readonly DateTimeOffset Now = new(2026, 3, 1, 12, 0, 0, TimeSpan.Zero);
     static readonly string[] BtcAndLtc = ["BTC", "LTC"];
+    static readonly SecretProtector Protector = new(new EphemeralDataProtectionProvider());
 
     // Invented values: a fixed cold address, and an extended public key standing in for one.
     const string FixedCold = "bcrt1qexamplecoldaddress";
@@ -129,11 +131,24 @@ public class SettingsCopyTests
     [Fact]
     public void FeaturesCantBeCopiedToAStoreWithoutAKey()
     {
+        var source = Source();
+        source.ProtectedApiKey = Protector.Protect("source-key");
+        source.ProtectedApiSecret = Protector.Protect("source-secret");
         var keyless = new SweepSellSettings();
-        var (copy, _) = SettingsCopy.CopyTo(Source(), keyless, false, BtcAndLtc, IsXpub, Now);
-        Assert.Contains("no exchange key", SettingsCopy.Problem(copy));
+        var (copy, _) = SettingsCopy.CopyTo(source, keyless, false, BtcAndLtc, IsXpub, Now);
+        Assert.Contains("no exchange key", SettingsCopy.Problem(copy, Protector));
 
-        var (withKey, _) = SettingsCopy.CopyTo(Source(), keyless, true, BtcAndLtc, IsXpub, Now);
-        Assert.Null(SettingsCopy.Problem(withKey));
+        var (withKey, _) = SettingsCopy.CopyTo(source, keyless, true, BtcAndLtc, IsXpub, Now);
+        Assert.Null(SettingsCopy.Problem(withKey, Protector));
+    }
+
+    [Fact]
+    public void AKeyThatCantBeDecryptedCountsAsNoKey()
+    {
+        // Saved, but encrypted with keys this server no longer has.
+        var unreadable = new SweepSellSettings { ExchangeId = "kraken", ProtectedApiKey = "lost-key", ProtectedApiSecret = "lost-secret" };
+        var (copy, _) = SettingsCopy.CopyTo(Source(), unreadable, false, BtcAndLtc, IsXpub, Now);
+        Assert.True(copy.HasCredentials);
+        Assert.Contains("no exchange key", SettingsCopy.Problem(copy, Protector));
     }
 }

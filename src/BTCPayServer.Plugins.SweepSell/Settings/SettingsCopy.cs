@@ -101,11 +101,14 @@ public static class SettingsCopy
         return (settings, notes);
     }
 
-    /// <summary>Why the copied settings can't run in the target store, or null.</summary>
-    public static string? Problem(SweepSellSettings copied)
+    /// <summary>
+    /// Why the copied settings can't run in the target store, or null. A saved key that can't be decrypted (e.g. restored
+    /// without this server's data-protection keys) counts as no key, as on the settings page.
+    /// </summary>
+    public static string? Problem(SweepSellSettings copied, SecretProtector protector)
     {
         var anyOn = copied.Convert.Enabled || copied.Sweep.Enabled || copied.Hedge.Enabled;
-        if (anyOn && (copied.ExchangeId is null || !copied.HasCredentials))
+        if (anyOn && (copied.ExchangeId is null || protector.Credentials(copied) is null))
             return "it has no exchange key. Tick \"Also copy the exchange key\", or save a key in that store first.";
         return null;
     }
