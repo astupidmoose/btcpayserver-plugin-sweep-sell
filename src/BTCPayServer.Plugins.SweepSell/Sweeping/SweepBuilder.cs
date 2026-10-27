@@ -32,9 +32,10 @@ public static class SweepBuilder
     /// Sends <paramref name="amount"/> (everything when null or not less than the coins' total) from
     /// <paramref name="coins"/>: <paramref name="coldPercent"/>% of it to <paramref name="cold"/>, the rest to
     /// <paramref name="exchange"/>, which also pays the fee. A partial sweep returns its change to <paramref name="change"/>.
+    /// <paramref name="minRelayFee"/> is the node's minimum relay fee; without it, NBitcoin's default (1 sat/vB) applies.
     /// </summary>
     public static SignedSweep Build(Network network, IReadOnlyList<(ICoin Coin, Key Key)> coins, decimal? amount, IDestination exchange,
-        IDestination? cold, decimal coldPercent, FeeRate feeRate, IDestination? change)
+        IDestination? cold, decimal coldPercent, FeeRate feeRate, IDestination? change, FeeRate? minRelayFee = null)
     {
         if (coins.Count == 0)
             throw new SweepException("There are no coins to sweep.");
@@ -54,6 +55,15 @@ public static class SweepBuilder
         var toCold = cold is null || coldPercent == 0 ? Money.Zero : Money.Satoshis((long)Math.Floor(swept.Satoshi * coldPercent / 100m));
 
         var builder = network.CreateTransactionBuilder();
+        if (minRelayFee is not null)
+        {
+            // Nodes now relay below 1 sat/vB, and BTCPay's fee estimate follows the node's own minimum; the final check
+            // must use that minimum too, or a sweep the node would accept is refused here.
+            var policy = builder.StandardTransactionPolicy.Clone();
+            policy.MinRelayTxFee = minRelayFee;
+            builder.StandardTransactionPolicy = policy;
+            feeRate = FeeRate.Max(feeRate, minRelayFee);
+        }
         builder.AddCoins(coins.Select(c => c.Coin));
         builder.AddKeys(coins.Select(c => c.Key).ToArray());
         if (toCold > Money.Zero)

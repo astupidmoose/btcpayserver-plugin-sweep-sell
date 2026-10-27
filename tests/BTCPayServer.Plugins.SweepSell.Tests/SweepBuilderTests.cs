@@ -69,6 +69,33 @@ public class SweepBuilderTests
     }
 
     [Fact]
+    public void AFeeBelowOneSatPerVbyteIsBuiltWhenTheNodeRelaysIt()
+    {
+        var low = new FeeRate(Money.Satoshis(130), 1000); // 0.13 sat/vB
+        var nodeMinimum = new FeeRate(Money.Satoshis(100), 1000); // 0.1 sat/vB
+        var sweep = SweepBuilder.Build(Network, [CoinOf(0.01m, 0)], null, Address(), null, 0, low, null, nodeMinimum);
+        var tx = Transaction.Parse(sweep.Hex, Network);
+        Assert.InRange(sweep.Amounts.Fee, 0.00000001m, low.GetFee(tx.GetVirtualSize() + 1).ToDecimal(MoneyUnit.BTC));
+    }
+
+    [Fact]
+    public void WithoutTheNodesMinimumAFeeBelowOneSatPerVbyteIsRefused()
+    {
+        var low = new FeeRate(Money.Satoshis(130), 1000);
+        var e = Assert.Throws<SweepException>(() => SweepBuilder.Build(Network, [CoinOf(0.01m, 0)], null, Address(), null, 0, low, null));
+        Assert.Contains("didn't verify", e.Message);
+    }
+
+    [Fact]
+    public void AFeeBelowTheNodesMinimumIsRaisedToIt()
+    {
+        var nodeMinimum = new FeeRate(Money.Satoshis(1000), 1000); // 1 sat/vB
+        var sweep = SweepBuilder.Build(Network, [CoinOf(0.01m, 0)], null, Address(), null, 0, new FeeRate(Money.Satoshis(100), 1000), null, nodeMinimum);
+        var tx = Transaction.Parse(sweep.Hex, Network);
+        Assert.True(sweep.Amounts.Fee >= nodeMinimum.GetFee(tx.GetVirtualSize()).ToDecimal(MoneyUnit.BTC));
+    }
+
+    [Fact]
     public void SameAddressTwiceIsRefused()
     {
         var address = Address();
