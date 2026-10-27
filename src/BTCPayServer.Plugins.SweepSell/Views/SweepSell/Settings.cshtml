@@ -329,6 +329,32 @@
             </form>
         }
 
+        @if (Model.CopyTargets.Count > 0)
+        {
+            <h4 class="mt-5 mb-2">Copy to other stores</h4>
+            <form method="post" asp-action="Copy" asp-route-storeId="@storeId">
+                <p class="text-secondary">
+                    Copies the saved sweep, hedge and convert settings to the stores you pick, replacing theirs. Every copied
+                    feature starts in dry run there, and each store keeps its own pause switch, activity and payout settings.
+                    Sweep rules are copied for the coins that store has a wallet for. A cold wallet given as an extended public
+                    key isn't copied, since both stores would use the same addresses.
+                </p>
+                @foreach (var target in Model.CopyTargets)
+                {
+                    <div class="form-check">
+                        <input class="form-check-input" type="checkbox" name="copyTo" value="@target.Id" id="CopyTo-@target.Id" />
+                        <label class="form-check-label" for="CopyTo-@target.Id">@target.Name <span class="text-secondary">(@target.Id)</span></label>
+                    </div>
+                }
+                <div class="form-check mt-2">
+                    <input class="form-check-input" type="checkbox" name="copyKey" value="true" id="CopyKey" />
+                    <label class="form-check-label" for="CopyKey">Also copy the exchange key</label>
+                    <div class="form-text">Otherwise each store keeps its own key. The payout key is never copied.</div>
+                </div>
+                <button type="submit" class="btn btn-secondary mt-3" id="CopySettings">Copy settings</button>
+            </form>
+        }
+
         <h4 class="mt-5 mb-2">Sweep activity</h4>
         @if (Model.SweepNotRunning is { } sweepOff)
         {

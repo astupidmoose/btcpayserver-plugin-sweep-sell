@@ -17,6 +17,7 @@ using BTCPayServer.Plugins.SweepSell.Payout;
 using BTCPayServer.Plugins.SweepSell.Settings;
 using BTCPayServer.Plugins.SweepSell.Sweeping;
 using BTCPayServer.Plugins.Wallets;
+using BTCPayServer.Services.Stores;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.Extensions.Logging;
@@ -28,7 +29,7 @@ namespace BTCPayServer.Plugins.SweepSell.Controllers;
 [Authorize(Policy = Policies.CanModifyStoreSettings, AuthenticationSchemes = AuthenticationSchemes.Cookie)]
 public class UISweepSellController(ISweepSellRepository repository, IPayoutRepository payouts, SecretProtector protector, ExchangeRegistry exchanges,
     ConvertService convert, SweepService sweep, IStoreWallets wallets, HedgeService hedge, IAuthorizationService authorization, TimeProvider clock,
-    ILogger<UISweepSellController> logger)
+    StoreRepository stores, ILogger<UISweepSellController> logger)
     : Controller
 {
     public const string SettingsView = SweepSellPlugin.ViewsDirectory + "/Settings.cshtml";
@@ -124,6 +125,107 @@ public class UISweepSellController(ISweepSellRepository repository, IPayoutRepos
             Message = "Sweep & Sell settings saved."
         });
         return RedirectToAction(nameof(Settings), new { storeId });
+    }
+
+    /// <summary>
+    /// Copies this store's sweep, hedge and convert settings to the chosen stores (see <see cref="SettingsCopy"/>). Each
+    /// store is saved like the settings form saves it: with the same permission checks, under its settings lock, and with
+    /// its cold wallet changes recorded.
+    /// </summary>
+    [HttpPost("copy")]
+    public async Task<IActionResult> Copy(string storeId, [FromForm] List<string>? copyTo, [FromForm] bool copyKey, CancellationToken cancellationToken)
+    {
+        var source = await repository.GetAsync(storeId);
+        var targets = (copyTo ?? []).Where(id => !string.IsNullOrWhiteSpace(id) && id != storeId).Distinct().ToList();
+        string? error = null;
+        if (targets.Count == 0)
+            error = "Pick at least one store to copy to.";
+        else if (copyKey && protector.Credentials(source) is null)
+            error = "This store has no exchange key saved to copy.";
+        if (error is not null)
+        {
+            TempData.SetStatusMessageModel(new StatusMessageModel { Severity = StatusMessageModel.StatusSeverity.Error, Message = error });
+            return RedirectToAction(nameof(Settings), new { storeId });
+        }
+
+        var copied = new List<string>();
+        var failed = new List<string>();
+        var notes = new List<string>();
+        foreach (var targetId in targets)
+        {
+            // Only stores the user may change; one they can't see is reported like one that doesn't exist.
+            var store = await stores.FindStore(targetId);
+            if (store is null || !(await authorization.AuthorizeAsync(User, targetId, Policies.CanModifyStoreSettings)).Succeeded)
+            {
+                failed.Add($"A store you can't change ({targetId}) was skipped.");
+                continue;
+            }
+            var name = store.StoreName;
+            var coins = await wallets.GetCryptoCodesAsync(targetId, cancellationToken);
+            var canSpend = await CanSpendAsync(targetId);
+            var (saved, updated, storeNotes, problem) = await convert.WithSettingsLockAsync(targetId, async () =>
+            {
+                var current = await repository.GetAsync(targetId);
+                var (next, found) = SettingsCopy.CopyTo(source, current, copyKey, coins, IsExtendedKey, clock.GetUtcNow());
+                if (SettingsCopy.Problem(next, protector, exchanges) is { } notRunnable)
+                    return (current, next, found, notRunnable);
+                if (!canSpend && ChangesSweeps(current, next))
+                    return (current, next, found, "sweeping there spends from its wallets, which needs permission to sign and broadcast wallet transactions in that store.");
+                var pending = (await repository.GetConvertStateAsync(targetId)).Pending.Concat((await repository.GetHedgeStateAsync(targetId)).Pending).ToList();
+                if (KeyChanges(current, next) && (PayoutKeyConflict(next, await payouts.GetAsync(targetId), protector) ?? PendingConflict(next, pending, protector)) is { } keyError)
+                    return (current, next, found, keyError);
+                await repository.SaveAsync(targetId, next);
+                return (current, next, found, (string?)null);
+            }, cancellationToken);
+            if (problem is not null)
+            {
+                failed.Add($"Not copied to {name}: {problem}");
+                continue;
+            }
+            await sweep.RecordDestinationChangesAsync(targetId, saved.Sweep, updated.Sweep, CancellationToken.None);
+            logger.LogInformation("Sweep & Sell settings of store {StoreId} copied to store {TargetStoreId} (key {Key}), every feature in dry run",
+                storeId, targetId, copyKey ? "copied" : "kept");
+            copied.Add(name);
+            notes.AddRange(storeNotes.Select(n => $"{name}: {n}"));
+        }
+
+        var message = string.Join(" ", new[]
+        {
+            copied.Count > 0 ? $"Copied to {string.Join(", ", copied)}, with every feature in dry run." : null,
+            notes.Count > 0 ? string.Join(" ", notes) : null,
+            failed.Count > 0 ? string.Join(" ", failed) : null
+        }.Where(m => m is not null));
+        TempData.SetStatusMessageModel(new StatusMessageModel
+        {
+            Severity = failed.Count > 0 ? (copied.Count > 0 ? StatusMessageModel.StatusSeverity.Warning : StatusMessageModel.StatusSeverity.Error)
+                : notes.Count > 0 ? StatusMessageModel.StatusSeverity.Warning : StatusMessageModel.StatusSeverity.Success,
+            Message = message
+        });
+        return RedirectToAction(nameof(Settings), new { storeId });
+    }
+
+    bool IsExtendedKey(string cryptoCode, string destination)
+    {
+        try
+        {
+            return wallets.GetColdAddress(cryptoCode, destination, 0).Derived;
+        }
+        catch (SweepException)
+        {
+            return false; // saved but no longer understood; the copy's sweep reports it like the source's would
+        }
+    }
+
+    /// <summary>The other stores the user may copy settings to.</summary>
+    async Task<List<StoreOption>> CopyTargetsAsync(string storeId)
+    {
+        var options = new List<StoreOption>();
+        foreach (var store in await stores.GetStoresByUserId(User.GetId()))
+        {
+            if (store.Id != storeId && (await authorization.AuthorizeAsync(User, store.Id, Policies.CanModifyStoreSettings)).Succeeded)
+                options.Add(new StoreOption(store.Id, store.StoreName));
+        }
+        return options.OrderBy(o => o.Name, StringComparer.OrdinalIgnoreCase).ToList();
     }
 
     [HttpPost("test")]
@@ -582,7 +684,8 @@ public class UISweepSellController(ISweepSellRepository repository, IPayoutRepos
             // Saved but undecryptable (e.g. restored on a server with other data-protection keys) counts as not saved.
             HasCredentials = protector.Credentials(settings) is not null,
             CredentialsUnreadable = settings.HasCredentials && protector.Credentials(settings) is null,
-            Exchanges = exchanges.All.Select(e => new ExchangeOption(e.Id, e.Name, e.KeyPermissionsHelp)).ToList()
+            Exchanges = exchanges.All.Select(e => new ExchangeOption(e.Id, e.Name, e.KeyPermissionsHelp)).ToList(),
+            CopyTargets = await CopyTargetsAsync(storeId)
         };
     }
 
@@ -597,6 +700,8 @@ public class UISweepSellController(ISweepSellRepository repository, IPayoutRepos
 }
 
 public record ExchangeOption(string Id, string Name, string KeyPermissionsHelp);
+
+public record StoreOption(string Id, string Name);
 
 public record QueuedHedge(string InvoiceId, decimal Remaining, decimal Amount, string Market, bool DryRun);
 
@@ -728,6 +833,9 @@ public class SweepSellSettingsViewModel
     public bool CredentialsUnreadable { get; set; }
 
     public List<ExchangeOption> Exchanges { get; set; } = [];
+
+    /// <summary>Other stores the user may copy these settings to. Not posted.</summary>
+    public List<StoreOption> CopyTargets { get; set; } = [];
 }
 
 public class SweepRuleViewModel

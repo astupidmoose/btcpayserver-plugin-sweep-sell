@@ -68,8 +68,19 @@ change withdrawal addresses. Payout won't run while the trading key can change w
 Payout needs a second key with only **query funds** and **withdraw funds**, and no query start or end
 date: payout refuses a key with any other permission, such as an order or withdrawal address permission. **Test the payout key**
 checks that it can withdraw, can't trade and has no other permission, and lists the withdrawal
-destinations your exchange shows for the asset. Payout needs an exchange account no other store on the server uses, for payout or trading: it withdraws
-the whole balance, and won't run while another store pays out from the same account.
+destinations your exchange shows for the asset.
+
+## Several stores
+
+Each store has its own Sweep & Sell settings. To set up more stores the same way, use **Copy to other stores**
+on the settings page: it copies the sweep, hedge and convert settings (and, if you tick it, the exchange key)
+to the stores you pick, with every feature in dry run there.
+
+Stores may trade on the same exchange account. Payout withdraws from the whole account, so set it up in one
+store only: it won't run while another store pays out from the same account. No store sharing that account
+should sell the asset you pay out (for example convert it into something else), since that eats into the
+amount payout keeps; payout checks this for its own store but can't see other stores' settings. Selling into
+the payout asset, such as hedging BTC into the currency you withdraw, is fine.
 
 ## Development
 
