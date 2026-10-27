@@ -21,6 +21,20 @@ public class SettingsTests
         ProtectedApiSecret = Protector.Protect("old-secret")
     };
 
+    [Theory]
+    [InlineData(false, true, null)]
+    [InlineData(false, false, "Sweep to the exchange is off")]
+    [InlineData(true, true, "Pause everything is on")]
+    [InlineData(true, false, "Pause everything is on")]
+    public void TheSettingsPageSaysWhyAFeatureDoesntRun(bool paused, bool enabled, string? why)
+    {
+        var note = SweepSellSettingsViewModel.NotRunning(paused, enabled, "Sweep to the exchange");
+        if (why is null)
+            Assert.Null(note);
+        else
+            Assert.StartsWith(why, note);
+    }
+
     [Fact]
     public void SavedSettingsNeverContainThePlainKey()
     {

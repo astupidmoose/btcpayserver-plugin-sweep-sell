@@ -134,7 +134,15 @@ public class ConvertService(ISweepSellRepository repository, SecretProtector pro
         // By UTC day, like the live totals: a dry run that crosses midnight gets the new day's cap.
         var simulated = new DailyTotals();
         var slippage = Math.Clamp(convert.MaxSlippagePercent, ConvertSettings.MinSlippageLimit, ConvertSettings.MaxSlippageLimit) / 100m;
-        foreach (var asset in convert.Assets.Where(a => !string.Equals(a, target, StringComparison.OrdinalIgnoreCase)))
+        var assets = convert.Assets.Where(a => !string.Equals(a, target, StringComparison.OrdinalIgnoreCase)).ToList();
+        // A run that finds nothing at all still says so, so the owner can tell it ran.
+        if (assets.Count > 0 && assets.All(a => balances.GetValueOrDefault(a) <= 0))
+        {
+            Record(storeId, state, null, ActivityOutcome.Waiting,
+                $"No {string.Join(" or ", assets)} to sell on {exchange.Name}. Waiting for a deposit.");
+            return;
+        }
+        foreach (var asset in assets)
         {
             var available = balances.GetValueOrDefault(asset);
             if (available <= 0)
