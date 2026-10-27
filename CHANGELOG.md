@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.1.2 (beta)
+
+- **Payout:** stores can now pay out different assets of the same exchange account, for example USD from one
+  store and CAD from another, each to its own saved destination. Before, a payout from one store blocked every
+  other store's payout from that account. Two stores still can't pay out the same asset of one account.
+
 ## 0.1.1 (beta)
 
 Fixes from testing the first beta. Install it over 0.1.0; settings and activity are kept.

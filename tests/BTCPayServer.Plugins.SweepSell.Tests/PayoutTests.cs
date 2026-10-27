@@ -550,12 +550,56 @@ public class PayoutTests
         _payouts.Settings["test-store-2"] = Copy(_payouts.Settings[StoreId]);
         await Service().RunAsync(StoreId, Ct);
         Assert.Empty(_exchange.Withdrawals);
-        Assert.Contains("Another store on this server pays out live from the same Fake Exchange account", State.Activity[0].Message);
+        Assert.Contains("Another store on this server pays out USD live from the same Fake Exchange account", State.Activity[0].Message);
         Assert.DoesNotContain("test-store-2", State.Activity[0].Message);
 
         _payouts.Settings["test-store-2"].DryRun = true; // the other store only quotes, so this one may pay out
         await Service().RunAsync(StoreId, Ct);
         Assert.Single(_exchange.Withdrawals);
+    }
+
+    [Fact]
+    public async Task TwoStoresPayOutDifferentAssetsOfOneAccount()
+    {
+        // Each asset has its own balance and withdrawals, so a CAD payout from the account doesn't hold up a USD one.
+        Configure();
+        _exchange.Balance = 500m;
+        _main.Settings["test-store-2"] = Copy(_main.Settings[StoreId]);
+        _payouts.Settings["test-store-2"] = Copy(_payouts.Settings[StoreId]);
+        _payouts.Settings["test-store-2"].Asset = "CAD";
+        _payouts.Settings["test-store-2"].Destination = "test-bank-cad";
+        await Service().RunAsync(StoreId, Ct);
+        Assert.Equal(("USD", "test-bank", 500m), (_exchange.Withdrawals.Single().Asset, _exchange.Withdrawals.Single().Destination, _exchange.Withdrawals.Single().Amount));
+
+        _payouts.Settings["test-store-2"].Asset = "usd"; // the same asset, however it is written
+        _exchange.Balance = 500m;
+        _clock.Advance(TimeSpan.FromDays(1));
+        _exchange.Settle();
+        await Service().RunAsync(StoreId, Ct);
+        Assert.Single(_exchange.Withdrawals);
+        Assert.Contains("pays out USD live from the same Fake Exchange account", State.Activity[0].Message);
+    }
+
+    [Fact]
+    public async Task AnotherStoresUnresolvedWithdrawalOfAnotherAssetDoesntBlockPayout()
+    {
+        Configure();
+        _main.Settings["test-store-2"] = Copy(_main.Settings[StoreId]);
+        _payouts.Settings["test-store-2"] = Copy(_payouts.Settings[StoreId]);
+        _payouts.Settings["test-store-2"].Asset = "CAD";
+        _payouts.Settings["test-store-2"].Destination = "test-bank-cad";
+        _exchange.Balance = 500m;
+        _exchange.LoseResponse = true;
+        _exchange.OnWithdraw = () => _exchange.Unlisted.Add(_exchange.Records[^1].Reference);
+        await Service().RunAsync("test-store-2", Ct);
+        Assert.Equal("CAD", _payouts.States["test-store-2"].Pending.Single().Asset);
+        _exchange.LoseResponse = false;
+        _exchange.OnWithdraw = null;
+
+        _exchange.Balance = 500m;
+        await Service().RunAsync(StoreId, Ct);
+        Assert.Equal(2, _exchange.Withdrawals.Count);
+        Assert.Equal("USD", _exchange.Withdrawals[1].Asset);
     }
 
     [Fact]
@@ -570,7 +614,7 @@ public class PayoutTests
         _exchange.Balance = 500m;
         await Service().RunAsync(StoreId, Ct);
         Assert.Empty(_exchange.Withdrawals);
-        Assert.Contains("pays out live from the same Fake Exchange account", State.Activity[0].Message);
+        Assert.Contains("pays out USD live from the same Fake Exchange account", State.Activity[0].Message);
         Assert.DoesNotContain("test-account", _payouts.States[StoreId].Account!.Hash); // only a hash is kept
 
         // The other store's key is replaced with one for another account: what it saved for the old key no longer counts.
@@ -649,7 +693,7 @@ public class PayoutTests
         _exchange.Balance = 500m; // not taken from the balance yet
         await Service().RunAsync(StoreId, Ct);
         Assert.Single(_exchange.Withdrawals);
-        Assert.Contains("still has withdrawals it hasn't seen settle from", State.Activity[0].Message);
+        Assert.Contains("still has USD withdrawals it hasn't seen settle from", State.Activity[0].Message);
     }
 
     [Fact]
@@ -711,7 +755,7 @@ public class PayoutTests
         _clock.Advance(PayoutService.History + TimeSpan.FromDays(1)); // too old for this store's own read to see it
         await Service().RunAsync(StoreId, Ct);
         Assert.Single(_exchange.Withdrawals);
-        Assert.Contains("still has withdrawals it hasn't seen settle from", State.Activity[0].Message);
+        Assert.Contains("still has USD withdrawals it hasn't seen settle from", State.Activity[0].Message);
     }
 
     [Fact]

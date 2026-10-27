@@ -76,11 +76,12 @@ Each store has its own Sweep & Sell settings. To set up more stores the same way
 on the settings page: it copies the sweep, hedge and convert settings (and, if you tick it, the exchange key)
 to the stores you pick, with every feature in dry run there.
 
-Stores may trade on the same exchange account. Payout withdraws from the whole account, so set it up in one
-store only: it won't run while another store pays out from the same account. No store sharing that account
-should sell the asset you pay out (for example convert it into something else), since that eats into the
-amount payout keeps; payout checks this for its own store but can't see other stores' settings. Selling into
-the payout asset, such as hedging BTC into the currency you withdraw, is fine.
+Stores may trade on the same exchange account. Each asset of the account can be paid out by one store: for
+example one store pays out USD and another pays out CAD from the same account, each to its own saved
+destination. Payout won't run while another store pays out the same asset from the same account. No store
+sharing that account should sell an asset that is paid out (for example convert it into something else), since
+that eats into the amount payout keeps; payout checks this for its own store but can't see other stores'
+settings. Selling into the payout asset, such as hedging BTC into the currency you withdraw, is fine.
 
 ## Development
 
