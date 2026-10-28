@@ -23,6 +23,15 @@ public class KrakenWithdrawalsTests
     static string Body(FakeHttp http, string path) => http.Sent.Single(s => s.Request.RequestUri!.AbsolutePath == path).Body;
 
     [Fact]
+    public void AssetsAreComparedByKrakensOwnNames()
+    {
+        var (_, kraken) = Setup();
+        Assert.Equal(kraken.AssetKey("XBT"), kraken.AssetKey("btc"));
+        Assert.Equal(kraken.AssetKey("XDG"), kraken.AssetKey("DOGE"));
+        Assert.NotEqual(kraken.AssetKey("USD"), kraken.AssetKey("CAD"));
+    }
+
+    [Fact]
     public async Task QuoteRoundsDownAndReadsFeeLimitAndTheMethodsMinimum()
     {
         var (http, kraken) = Setup();
@@ -301,7 +310,7 @@ public class KrakenWithdrawalsTests
         // Payout only names destinations saved in the exchange account, and trading never withdraws at all.
         var withdrawalCalls = typeof(IWithdrawalConnector).GetMethods().Select(m => m.Name).Where(n => !n.StartsWith("get_")).Order();
         Assert.Equal(
-            ["GetAccountIdAsync", "GetAvailableBalanceAsync", "GetDestinationsAsync", "GetKeyProblemsAsync", "GetOtherKeyProblemsAsync", "GetRecentWithdrawalsAsync", "QuoteAsync", "TestCredentialsAsync", "WithdrawAsync"],
+            ["AssetKey", "GetAccountIdAsync", "GetAvailableBalanceAsync", "GetDestinationsAsync", "GetKeyProblemsAsync", "GetOtherKeyProblemsAsync", "GetRecentWithdrawalsAsync", "QuoteAsync", "TestCredentialsAsync", "WithdrawAsync"],
             withdrawalCalls);
         Assert.DoesNotContain(typeof(IWithdrawalConnector).GetMethods().SelectMany(m => m.GetParameters()), p => p.Name!.Contains("address", StringComparison.OrdinalIgnoreCase));
         Assert.DoesNotContain(typeof(IExchangeConnector).GetMethods(), m => m.Name.Contains("Withdraw", StringComparison.OrdinalIgnoreCase));

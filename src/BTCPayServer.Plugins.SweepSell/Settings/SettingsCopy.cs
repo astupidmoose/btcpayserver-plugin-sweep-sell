@@ -8,8 +8,8 @@ namespace BTCPayServer.Plugins.SweepSell.Settings;
 
 /// <summary>
 /// Copies one store's sweep, hedge and convert settings to another store. Every copied feature lands in dry run, the
-/// target keeps its pause switch and (unless asked) its own exchange key, and payout is never copied: it needs an exchange
-/// account no other store pays out from.
+/// target keeps its pause switch and (unless asked) its own exchange key, and payout is never copied: only one store may
+/// pay out each asset of an exchange account.
 /// </summary>
 public static class SettingsCopy
 {

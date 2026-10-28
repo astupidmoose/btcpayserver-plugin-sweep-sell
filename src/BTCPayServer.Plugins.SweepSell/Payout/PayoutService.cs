@@ -580,16 +580,18 @@ public class PayoutService(IPayoutRepository payouts, ISweepSellRepository repos
     }
 
     /// <summary>
-    /// Why the payout's exchange account is used elsewhere, when it is, or null. Another store's run wouldn't see this one's
-    /// unlisted withdrawals and could send them again, and sells could eat into what is kept. Counted:
+    /// Why the payout asset of the payout's exchange account is used elsewhere, when it is, or null. Another store's run
+    /// wouldn't see this one's unlisted withdrawals and could send them again, and sells could eat into what is kept. Each
+    /// asset has its own balance, withdrawals and fees, so stores paying out different assets of one account don't affect
+    /// each other. Counted, for the payout asset only:
     /// <list type="bullet">
-    /// <item>another store paying out live (enabled, not a dry run) with the same key, or a key whose account its last run saved as this one;</item>
-    /// <item>another store's pending or unsettled withdrawals from the account, whatever its settings now;</item>
-    /// <item>this store's convert or hedging selling the payout asset from the account.</item>
+    /// <item>another store paying it out live (enabled, not a dry run) with the same key, or a key whose account its last run saved as this one;</item>
+    /// <item>another store's pending or unsettled withdrawals of it from the account, whatever its settings now;</item>
+    /// <item>this store's convert or hedging selling it from the account.</item>
     /// </list>
     /// Each run saves its account before this check, so of two stores paying out together the later run always finds the
-    /// earlier one. When the exchange doesn't report accounts, any other store paying out on it counts. Only what other
-    /// stores' own runs saved is read; their keys are never used.
+    /// earlier one. When the exchange doesn't report accounts, any other store paying out the asset on it counts. Only what
+    /// other stores' own runs saved is read; their keys are never used.
     /// </summary>
     async Task<string?> SharedAccountAsync(string storeId, string asset, IWithdrawalConnector connector, ExchangeCredentials credentials,
         PayoutAccount account, CancellationToken cancellationToken)
@@ -597,32 +599,38 @@ public class PayoutService(IPayoutRepository payouts, ISweepSellRepository repos
         var name = connector.Name;
         var unknown = account.Hash is null ? $" ({name} doesn't say which account a key belongs to, so any other use of it counts)" : "";
         string Shared(string what) =>
-            $"Another store on this server {what} the same {name} account{unknown}. Payout needs an exchange account no other store uses, so give each store its own account.";
+            $"Another store on this server {what} the same {name} account{unknown}. Only one store may pay out each asset of an account: " +
+            $"pay out {asset} from one store, or use another account.";
+        // Assets are compared as the exchange names them, so two names for one balance (BTC and XBT) count as the same.
+        var key = connector.AssetKey(asset);
+        bool Same(string? other) => other is not null && connector.AssetKey(other) == key;
         // Each entry counts for the account it was recorded for; one recorded without an account counts for every account.
-        bool Here(string? exchangeId, string? accountHash) =>
-            exchangeId == connector.Id && (account.Hash is null || accountHash is null || accountHash == account.Hash);
+        bool Here(string? exchangeId, string? accountHash, string? entryAsset) =>
+            exchangeId == connector.Id && Same(entryAsset) && (account.Hash is null || accountHash is null || accountHash == account.Hash);
         foreach (var (otherId, other) in await payouts.GetAllAsync())
         {
             if (otherId == storeId)
                 continue;
             var otherState = await payouts.GetStateAsync(otherId);
-            if (otherState.Pending.Any(p => Here(p.ExchangeId, p.AccountHash)) || otherState.Unsettled.Any(u => Here(u.ExchangeId, u.AccountHash)))
-                return Shared("still has withdrawals it hasn't seen settle from");
-            if (other is not { Enabled: true, DryRun: false } || other.ExchangeId != connector.Id || protector.Credentials(other) is not { } otherKey)
+            if (otherState.Pending.Any(p => Here(p.ExchangeId, p.AccountHash, p.Asset)) ||
+                otherState.Unsettled.Any(u => Here(u.ExchangeId, u.AccountHash, u.Asset)))
+                return Shared($"still has {asset} withdrawals it hasn't seen settle from");
+            if (other is not { Enabled: true, DryRun: false } || other.ExchangeId != connector.Id ||
+                !Same(other.Asset) || protector.Credentials(other) is not { } otherKey)
                 continue;
             // A saved account counts for the key the other store still has; one saved for an older key is checked by its next run.
             var saved = otherState.Account;
             if (otherKey.ApiKey == credentials.ApiKey || account.Hash is null ||
                 saved is not null && saved.Hash == account.Hash && saved.KeyFingerprint == otherKey.Fingerprint())
-                return Shared("pays out live from");
+                return Shared($"pays out {asset} live from");
         }
         // This store's convert or hedging selling the payout asset from the same account would sell what payout keeps. Other
         // stores' keys are never used here: each store's credentials serve only its own runs, so another store trading from
-        // the payout account isn't detected (the setup guide says payout needs an account no other store uses).
+        // the payout account isn't detected (the setup guide says no other store should sell the payout asset from it).
         var own = await repository.GetAsync(storeId);
         var seller =
-            own.Convert is { Enabled: true, DryRun: false } && own.Convert.Assets.Contains(asset, StringComparer.OrdinalIgnoreCase) ? "convert" :
-            own.Hedge is { Enabled: true, DryRun: false } && string.Equals(asset, Hedging.HedgeService.Asset, StringComparison.OrdinalIgnoreCase) ? "hedging" : null;
+            own.Convert is { Enabled: true, DryRun: false } && own.Convert.Assets.Any(Same) ? "convert" :
+            own.Hedge is { Enabled: true, DryRun: false } && Same(Hedging.HedgeService.Asset) ? "hedging" : null;
         if (seller is not null && own.ExchangeId == connector.Id && protector.Credentials(own) is { } trading &&
             (account.Hash is null || PayoutAccount.For(connector.Id, await connector.GetAccountIdAsync(trading, cancellationToken), trading).Hash == account.Hash))
             return $"This store's {seller} sells {asset} from the same {name} account{unknown}, so it would sell what payout keeps. " +
