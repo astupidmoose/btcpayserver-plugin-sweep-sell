@@ -571,13 +571,37 @@ public class PayoutTests
         await Service().RunAsync(StoreId, Ct);
         Assert.Equal(("USD", "test-bank", 500m), (_exchange.Withdrawals.Single().Asset, _exchange.Withdrawals.Single().Destination, _exchange.Withdrawals.Single().Amount));
 
-        _payouts.Settings["test-store-2"].Asset = "usd"; // the same asset, however it is written
+        _payouts.Settings["test-store-2"].Asset = "zusd"; // the same balance under the exchange's other name for it
         _exchange.Balance = 500m;
         _clock.Advance(TimeSpan.FromDays(1));
         _exchange.Settle();
         await Service().RunAsync(StoreId, Ct);
         Assert.Single(_exchange.Withdrawals);
         Assert.Contains("pays out USD live from the same Fake Exchange account", State.Activity[0].Message);
+    }
+
+    [Fact]
+    public async Task AnotherStoresUnresolvedWithdrawalUnderAnotherNameForTheAssetBlocksPayout()
+    {
+        Configure();
+        _main.Settings["test-store-2"] = Copy(_main.Settings[StoreId]);
+        _payouts.Settings["test-store-2"] = Copy(_payouts.Settings[StoreId]);
+        _payouts.Settings["test-store-2"].Asset = "ZUSD";
+        _payouts.Settings[StoreId].Enabled = false; // so the other store may pay out first
+        _exchange.Balance = 500m;
+        _exchange.LoseResponse = true;
+        _exchange.OnWithdraw = () => _exchange.Unlisted.Add(_exchange.Records[^1].Reference);
+        await Service().RunAsync("test-store-2", Ct);
+        Assert.Single(_payouts.States["test-store-2"].Pending);
+        _exchange.LoseResponse = false;
+        _exchange.OnWithdraw = null;
+        _payouts.Settings["test-store-2"].Enabled = false;
+        _payouts.Settings[StoreId].Enabled = true;
+
+        _exchange.Balance = 500m;
+        await Service().RunAsync(StoreId, Ct);
+        Assert.Single(_exchange.Withdrawals);
+        Assert.Contains("still has USD withdrawals it hasn't seen settle from", State.Activity[0].Message);
     }
 
     [Fact]
@@ -958,6 +982,9 @@ public class PayoutTests
         public string Id => ExchangeId;
         public string Name => "Fake Exchange";
         public string KeyPermissionsHelp => "";
+
+        // Like an exchange with two names for one asset.
+        public string AssetKey(string asset) => asset.ToUpperInvariant() is "ZUSD" ? "USD" : asset.ToUpperInvariant();
 
         public decimal Balance { get; set; }
         public decimal Fee { get; set; } = 1m;

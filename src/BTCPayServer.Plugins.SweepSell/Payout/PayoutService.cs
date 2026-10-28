@@ -601,10 +601,12 @@ public class PayoutService(IPayoutRepository payouts, ISweepSellRepository repos
         string Shared(string what) =>
             $"Another store on this server {what} the same {name} account{unknown}. Only one store may pay out each asset of an account: " +
             $"pay out {asset} from one store, or use another account.";
+        // Assets are compared as the exchange names them, so two names for one balance (BTC and XBT) count as the same.
+        var key = connector.AssetKey(asset);
+        bool Same(string? other) => other is not null && connector.AssetKey(other) == key;
         // Each entry counts for the account it was recorded for; one recorded without an account counts for every account.
         bool Here(string? exchangeId, string? accountHash, string? entryAsset) =>
-            exchangeId == connector.Id && string.Equals(entryAsset, asset, StringComparison.OrdinalIgnoreCase) &&
-            (account.Hash is null || accountHash is null || accountHash == account.Hash);
+            exchangeId == connector.Id && Same(entryAsset) && (account.Hash is null || accountHash is null || accountHash == account.Hash);
         foreach (var (otherId, other) in await payouts.GetAllAsync())
         {
             if (otherId == storeId)
@@ -614,7 +616,7 @@ public class PayoutService(IPayoutRepository payouts, ISweepSellRepository repos
                 otherState.Unsettled.Any(u => Here(u.ExchangeId, u.AccountHash, u.Asset)))
                 return Shared($"still has {asset} withdrawals it hasn't seen settle from");
             if (other is not { Enabled: true, DryRun: false } || other.ExchangeId != connector.Id ||
-                !string.Equals(other.Asset, asset, StringComparison.OrdinalIgnoreCase) || protector.Credentials(other) is not { } otherKey)
+                !Same(other.Asset) || protector.Credentials(other) is not { } otherKey)
                 continue;
             // A saved account counts for the key the other store still has; one saved for an older key is checked by its next run.
             var saved = otherState.Account;
@@ -627,8 +629,8 @@ public class PayoutService(IPayoutRepository payouts, ISweepSellRepository repos
         // the payout account isn't detected (the setup guide says no other store should sell the payout asset from it).
         var own = await repository.GetAsync(storeId);
         var seller =
-            own.Convert is { Enabled: true, DryRun: false } && own.Convert.Assets.Contains(asset, StringComparer.OrdinalIgnoreCase) ? "convert" :
-            own.Hedge is { Enabled: true, DryRun: false } && string.Equals(asset, Hedging.HedgeService.Asset, StringComparison.OrdinalIgnoreCase) ? "hedging" : null;
+            own.Convert is { Enabled: true, DryRun: false } && own.Convert.Assets.Any(Same) ? "convert" :
+            own.Hedge is { Enabled: true, DryRun: false } && Same(Hedging.HedgeService.Asset) ? "hedging" : null;
         if (seller is not null && own.ExchangeId == connector.Id && protector.Credentials(own) is { } trading &&
             (account.Hash is null || PayoutAccount.For(connector.Id, await connector.GetAccountIdAsync(trading, cancellationToken), trading).Hash == account.Hash))
             return $"This store's {seller} sells {asset} from the same {name} account{unknown}, so it would sell what payout keeps. " +

@@ -19,6 +19,8 @@ public class KrakenWithdrawals(KrakenConnector kraken) : IWithdrawalConnector
     public string Id => kraken.Id;
     public string Name => kraken.Name;
 
+    public string AssetKey(string asset) => ToKraken(asset);
+
     public string KeyPermissionsHelp =>
         "In Kraken: Settings > API > Create key. Use a separate key from the trading key, and tick only Query Funds and Withdraw Funds. " +
         "Tick nothing else: payout refuses a key with any other permission, such as an order permission or Add or Update Withdrawal Addresses. Payouts only go to a withdrawal destination you already saved and verified in Kraken; " +

@@ -23,6 +23,12 @@ public interface IWithdrawalConnector
     /// <summary>What the withdraw-only key needs, shown on the payout page.</summary>
     string KeyPermissionsHelp { get; }
 
+    /// <summary>
+    /// The asset as the exchange identifies it, so two names for one asset (e.g. BTC and XBT) compare equal. Used to tell
+    /// when two stores pay out the same balance.
+    /// </summary>
+    string AssetKey(string asset) => asset.ToUpperInvariant();
+
     /// <summary>Spendable balance of <paramref name="asset"/>: the total minus anything held by open orders.</summary>
     Task<decimal> GetAvailableBalanceAsync(ExchangeCredentials credentials, string asset, CancellationToken cancellationToken);
 
