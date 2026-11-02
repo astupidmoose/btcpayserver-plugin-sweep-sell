@@ -137,9 +137,19 @@ public class KrakenConnector(HttpClient http, TimeProvider? clock = null) : IExc
     {
         if (string.IsNullOrWhiteSpace(txid))
             throw new ArgumentException("A transaction ID is needed.", nameof(txid));
+        return (await FindDepositsAsync(credentials, asset, [txid], since, cancellationToken)).GetValueOrDefault(txid);
+    }
+
+    public async Task<IReadOnlyDictionary<string, DepositStatus>> FindDepositsAsync(ExchangeCredentials credentials, string asset,
+        IReadOnlyCollection<string> txids, DateTimeOffset since, CancellationToken cancellationToken)
+    {
+        if (txids.Count == 0 || txids.Any(string.IsNullOrWhiteSpace))
+            throw new ArgumentException("Transaction IDs are needed.", nameof(txids));
+        var wanted = new HashSet<string>(txids, StringComparer.OrdinalIgnoreCase);
+        var found = new Dictionary<string, DepositStatus>(StringComparer.OrdinalIgnoreCase);
         var method = Text((await DepositMethodAsync(credentials, asset, cancellationToken))["method"])!;
-        // Kraken lists deposits newest first, a page at a time: follow the pages back to when the sweep was sent.
-        // An hour of slack covers a difference between our clock and Kraken's.
+        // Kraken lists deposits newest first, a page at a time: follow the pages back to when the earliest sweep was sent,
+        // reading each page once for every deposit looked for. An hour of slack covers a difference between our clock and Kraken's.
         var start = since.AddHours(-1).ToUnixTimeSeconds().ToString(CultureInfo.InvariantCulture);
         var cursor = "true";
         for (var page = 0; page < MaxDepositPages; page++)
@@ -152,17 +162,20 @@ public class KrakenConnector(HttpClient http, TimeProvider? clock = null) : IExc
                 JObject paged when paged["deposit"] is JArray list => (list, Text(paged["next_cursor"])),
                 _ => throw new ExchangeException("Kraken sent an unexpected DepositStatus response.")
             };
-            // Every entry is checked: one that can't be read could be the deposit, so it is never taken as "not there".
+            // Every entry is checked: one that can't be read could be a deposit looked for, so it is never taken as "not there".
             if (deposits.Any(d => d is not JObject o || o["txid"]?.Type != JTokenType.String || string.IsNullOrWhiteSpace(Text(o["txid"]))))
                 throw new ExchangeException("Kraken sent a deposit without a usable transaction ID.");
-            var entry = deposits.Cast<JObject>().FirstOrDefault(d => string.Equals(Text(d["txid"]), txid, StringComparison.OrdinalIgnoreCase));
-            if (entry is not null)
-                return Deposit(entry, asset);
-            if (deposits.Count == 0 || string.IsNullOrEmpty(next) || next == cursor)
-                return null;
+            foreach (var entry in deposits.Cast<JObject>())
+            {
+                var txid = Text(entry["txid"])!;
+                if (wanted.Contains(txid) && !found.ContainsKey(txid))
+                    found[txid] = Deposit(entry, asset);
+            }
+            if (found.Count == wanted.Count || deposits.Count == 0 || string.IsNullOrEmpty(next) || next == cursor)
+                break;
             cursor = next;
         }
-        return null;
+        return found;
     }
 
     static DepositStatus Deposit(JObject entry, string asset)
@@ -186,7 +199,8 @@ public class KrakenConnector(HttpClient http, TimeProvider? clock = null) : IExc
 
     public async Task<decimal> GetMinimumDepositAsync(ExchangeCredentials credentials, string asset, CancellationToken cancellationToken)
     {
-        var method = await DepositMethodAsync(credentials, asset, cancellationToken);
+        // Always asked for: a sweep is only sent above the minimum Kraken credits now, never one it had half an hour ago.
+        var method = await DepositMethodAsync(credentials, asset, fresh: true, cancellationToken);
         return RequiredDecimal(method["minimum"], $"{asset} minimum deposit");
     }
 
@@ -236,24 +250,29 @@ public class KrakenConnector(HttpClient http, TimeProvider? clock = null) : IExc
             throw new ArgumentOutOfRangeException(nameof(amount), "The amount to sell must be positive.");
         if (limitPrice <= 0)
             throw new ArgumentOutOfRangeException(nameof(limitPrice), "The limit price must be positive.");
-        var parameters = new List<KeyValuePair<string, string>>
+        List<KeyValuePair<string, string>> Parameters()
         {
-            // Immediate-or-cancel limit: fills now at the limit or better, and cancels the rest instead of selling lower.
-            new("ordertype", "limit"),
-            new("type", "sell"),
-            new("pair", Pair(baseAsset, quoteAsset)),
-            new("volume", amount.ToString(CultureInfo.InvariantCulture)),
-            new("price", limitPrice.ToString(CultureInfo.InvariantCulture)),
-            new("timeinforce", "IOC"),
-            // Kraken's client order ID (UUID form): the order can be looked up by it if the response is lost.
-            new("cl_ord_id", clientOrderId.ToString("D")),
-            // A request delayed in transit or a queue is rejected after this instead of executing later, so an order that
-            // isn't listed after a caller's grace period can never still go through.
-            new("deadline", (clock ?? TimeProvider.System).GetUtcNow().Add(OrderDeadline).UtcDateTime.ToString("yyyy-MM-dd'T'HH:mm:ss'Z'", CultureInfo.InvariantCulture))
-        };
-        if (validateOnly)
-            parameters.Add(new("validate", "true"));
-        var result = Expect<JObject>(await PrivateAsync(credentials, "AddOrder", parameters, cancellationToken), "AddOrder");
+            var parameters = new List<KeyValuePair<string, string>>
+            {
+                // Immediate-or-cancel limit: fills now at the limit or better, and cancels the rest instead of selling lower.
+                new("ordertype", "limit"),
+                new("type", "sell"),
+                new("pair", Pair(baseAsset, quoteAsset)),
+                new("volume", amount.ToString(CultureInfo.InvariantCulture)),
+                new("price", limitPrice.ToString(CultureInfo.InvariantCulture)),
+                new("timeinforce", "IOC"),
+                // Kraken's client order ID (UUID form): the order can be looked up by it if the response is lost.
+                new("cl_ord_id", clientOrderId.ToString("D")),
+                // A request delayed in transit or a queue is rejected after this instead of executing later, so an order that
+                // isn't listed after a caller's grace period can never still go through. Set when the request is sent, after
+                // any wait for the key or Kraken's call counter, so waiting can't use it up.
+                new("deadline", Clock.GetUtcNow().Add(OrderDeadline).UtcDateTime.ToString("yyyy-MM-dd'T'HH:mm:ss'Z'", CultureInfo.InvariantCulture))
+            };
+            if (validateOnly)
+                parameters.Add(new("validate", "true"));
+            return parameters;
+        }
+        var result = Expect<JObject>(await PrivateAsync(credentials, "AddOrder", Parameters, cancellationToken), "AddOrder");
         var ids = result["txid"] switch
         {
             null => [],
@@ -452,7 +471,46 @@ public class KrakenConnector(HttpClient http, TimeProvider? clock = null) : IExc
         }
     }
 
-    async Task<JObject> DepositMethodAsync(ExchangeCredentials credentials, string asset, CancellationToken cancellationToken)
+    /// <summary>How long a coin's deposit method is reused before Kraken is asked again; it rarely changes.</summary>
+    public static readonly TimeSpan DepositMethodLifetime = TimeSpan.FromMinutes(30);
+
+    readonly ConcurrentDictionary<string, (JObject Method, DateTimeOffset At, long Request)> _depositMethods = new();
+    long _depositMethodRequests;
+    readonly ConcurrentDictionary<string, SemaphoreSlim> _depositMethodLocks = new();
+
+    /// <summary>
+    /// The coin's deposit method. Every deposit lookup and address needs it, so it is kept a while instead of costing a request
+    /// each time; <paramref name="fresh"/> asks Kraken again. Stores asking at once share one request.
+    /// </summary>
+    async Task<JObject> DepositMethodAsync(ExchangeCredentials credentials, string asset, bool fresh, CancellationToken cancellationToken)
+    {
+        var key = $"{KeyFingerprint(credentials.ApiKey)}:{asset.ToUpperInvariant()}";
+        var asked = Interlocked.Read(ref _depositMethodRequests);
+        var gate = _depositMethodLocks.GetOrAdd(key, _ => new SemaphoreSlim(1, 1));
+        await gate.WaitAsync(cancellationToken);
+        try
+        {
+            // Read after the lock: a request that finished while this one waited counts, even for a fresh one, if it was sent
+            // after this was asked for.
+            if (_depositMethods.TryGetValue(key, out var cached) &&
+                (fresh ? cached.Request > asked : Clock.GetUtcNow() - cached.At < DepositMethodLifetime))
+                return cached.Method;
+            var request = Interlocked.Increment(ref _depositMethodRequests);
+            var sent = Clock.GetUtcNow();
+            var method = await FetchDepositMethodAsync(credentials, asset, cancellationToken);
+            _depositMethods[key] = (method, sent, request);
+            return method;
+        }
+        finally
+        {
+            gate.Release();
+        }
+    }
+
+    Task<JObject> DepositMethodAsync(ExchangeCredentials credentials, string asset, CancellationToken cancellationToken) =>
+        DepositMethodAsync(credentials, asset, fresh: false, cancellationToken);
+
+    async Task<JObject> FetchDepositMethodAsync(ExchangeCredentials credentials, string asset, CancellationToken cancellationToken)
     {
         var methods = Expect<JArray>(await PrivateAsync(credentials, "DepositMethods", [new("asset", ToKraken(asset))], cancellationToken), "DepositMethods")
             .OfType<JObject>().ToList();
@@ -477,20 +535,78 @@ public class KrakenConnector(HttpClient http, TimeProvider? clock = null) : IExc
         return await SendAsync(request, cancellationToken);
     }
 
-    internal async Task<JToken> PrivateAsync(ExchangeCredentials credentials, string method, IEnumerable<KeyValuePair<string, string>> parameters,
+    internal Task<JToken> PrivateAsync(ExchangeCredentials credentials, string method, IEnumerable<KeyValuePair<string, string>> parameters,
+        CancellationToken cancellationToken) =>
+        PrivateAsync(credentials, method, () => parameters, cancellationToken);
+
+    /// <summary>A private call whose parameters are made when it is sent, after waiting for the key and Kraken's call counter.</summary>
+    internal async Task<JToken> PrivateAsync(ExchangeCredentials credentials, string method, Func<IEnumerable<KeyValuePair<string, string>>> parameters,
         CancellationToken cancellationToken)
     {
-        var keyLock = KeyLocks.GetOrAdd(KeyFingerprint(credentials.ApiKey), _ => new SemaphoreSlim(1, 1));
+        var fingerprint = KeyFingerprint(credentials.ApiKey);
+        var keyLock = KeyLocks.GetOrAdd(fingerprint, _ => new SemaphoreSlim(1, 1));
         await keyLock.WaitAsync(cancellationToken);
         try
         {
-            return await PrivateLockedAsync(credentials, method, parameters, cancellationToken);
+            var counter = RateLimit is null ? null : _counters.GetOrAdd(fingerprint, _ => new CallCounter());
+            if (counter is not null)
+                await WaitForRoomAsync(counter, RateLimit!, CallCost(method), cancellationToken);
+            try
+            {
+                return await PrivateLockedAsync(credentials, method, parameters(), cancellationToken);
+            }
+            catch (ExchangeException e) when (e.RateLimited && counter is not null)
+            {
+                // Something else is using the key too, or Kraken counts differently: taken as full, so the next call waits.
+                counter.Value = RateLimit!.Maximum;
+                counter.At = Clock.GetUtcNow();
+                throw;
+            }
         }
         finally
         {
             keyLock.Release();
         }
     }
+
+    /// <summary>
+    /// Kraken's REST call counter for a key (https://docs.kraken.com/api/docs/guides/spot-rest-ratelimits): each call adds to it,
+    /// it goes down at a steady rate, and calls past its maximum are refused with "EAPI:Rate limit exceeded". Calls wait here
+    /// while the counter is above <see cref="KrakenRateLimit.Ceiling"/> instead of being refused. Null sends calls without waiting.
+    /// </summary>
+    public KrakenRateLimit? RateLimit { get; init; } = KrakenRateLimit.Starter;
+
+    sealed class CallCounter
+    {
+        public double Value;
+        public DateTimeOffset At;
+    }
+
+    readonly ConcurrentDictionary<string, CallCounter> _counters = new();
+
+    TimeProvider Clock => clock ?? TimeProvider.System;
+
+    // Called under the key's lock, so one counter is never changed by two calls at once.
+    async Task WaitForRoomAsync(CallCounter counter, KrakenRateLimit limit, double cost, CancellationToken cancellationToken)
+    {
+        double Current() => Math.Max(0, counter.Value - (Clock.GetUtcNow() - counter.At).TotalSeconds * limit.DecayPerSecond);
+        var value = Current();
+        if (value + cost > limit.Ceiling)
+        {
+            await Task.Delay(TimeSpan.FromSeconds((value + cost - limit.Ceiling) / limit.DecayPerSecond), Clock, cancellationToken);
+            value = Current();
+        }
+        counter.Value = value + cost;
+        counter.At = Clock.GetUtcNow();
+    }
+
+    // Placing and cancelling orders have their own limit; history and ledger queries cost two.
+    static double CallCost(string method) => method switch
+    {
+        "AddOrder" or "AddOrderBatch" or "CancelOrder" or "EditOrder" => 0,
+        "Ledgers" or "QueryLedgers" or "TradesHistory" or "QueryTrades" => 2,
+        _ => 1
+    };
 
     async Task<JToken> PrivateLockedAsync(ExchangeCredentials credentials, string method, IEnumerable<KeyValuePair<string, string>> parameters,
         CancellationToken cancellationToken)
@@ -534,7 +650,11 @@ public class KrakenConnector(HttpClient http, TimeProvider? clock = null) : IExc
         if (errors.Count > 0)
         {
             var texts = errors.Select(e => e.ToString()).ToList();
-            throw new ExchangeException("Kraken: " + string.Join("; ", texts), rejected: response.IsSuccessStatusCode && texts.All(IsRejection));
+            // A rate-limit refusal was turned away before Kraken acted on the request, also when it comes with HTTP 429.
+            var rateLimited = texts.Any(IsRateLimit) && (response.IsSuccessStatusCode || response.StatusCode == System.Net.HttpStatusCode.TooManyRequests) &&
+                              texts.All(t => IsRateLimit(t) || IsRejection(t));
+            throw new ExchangeException("Kraken: " + string.Join("; ", texts),
+                rejected: rateLimited || (response.IsSuccessStatusCode && texts.All(IsRejection)), rateLimited: rateLimited);
         }
         return json["result"] ?? throw new ExchangeException($"Kraken answered HTTP {(int)response.StatusCode} without a result.");
     }
@@ -543,6 +663,11 @@ public class KrakenConnector(HttpClient http, TimeProvider? clock = null) : IExc
     // can come after an order was accepted, and anything unlisted is unknown, so those never count as refusals.
     // EFunding errors refuse a withdrawal request (unknown destination, fee above max_fee, too little balance).
     static readonly string[] RejectionPrefixes = ["EOrder:", "EAPI:", "EQuery:", "EFunding:", "EGeneral:Invalid arguments", "EGeneral:Permission denied"];
+
+    static bool IsRateLimit(string error) =>
+        error.StartsWith("EAPI:Rate limit exceeded", StringComparison.Ordinal) ||
+        error.StartsWith("EService:Throttled", StringComparison.Ordinal) ||
+        error.StartsWith("EGeneral:Too many requests", StringComparison.Ordinal);
 
     static bool IsRejection(string error) =>
         RejectionPrefixes.Any(p => error.StartsWith(p, StringComparison.Ordinal)) &&
@@ -590,4 +715,14 @@ public class KrakenConnector(HttpClient http, TimeProvider? clock = null) : IExc
     /// <summary>A number Kraken may leave out when it is zero.</summary>
     internal static decimal OptionalDecimal(JToken? token) =>
         token is null || token.Type == JTokenType.Null ? 0 : RequiredDecimal(token, "amount");
+}
+
+/// <summary>
+/// Kraken's REST call counter for one tier: its <see cref="Maximum"/>, how fast it goes down, and the <see cref="Ceiling"/>
+/// Sweep &amp; Sell keeps it under, below the maximum so other software using the same key still has room.
+/// </summary>
+public sealed record KrakenRateLimit(double Maximum, double DecayPerSecond, double Ceiling)
+{
+    /// <summary>Kraken's lowest tier (a maximum of 15, down 0.33 a second): safe for every account.</summary>
+    public static readonly KrakenRateLimit Starter = new(15, 0.33, 10);
 }

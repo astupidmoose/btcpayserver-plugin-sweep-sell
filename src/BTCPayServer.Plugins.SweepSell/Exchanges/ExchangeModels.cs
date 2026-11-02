@@ -117,8 +117,11 @@ public sealed record CredentialsCheck(IReadOnlyList<PermissionCheck> Checks)
 /// An error the exchange returned, with its own message (never containing credentials). <see cref="Rejected"/> means the
 /// exchange answered and refused the request without acting on it, e.g. an order refused for insufficient funds. It is
 /// false whenever the outcome is unknown: a timeout, a server error, or an answer that can't be read.
+/// <see cref="RateLimited"/> means the exchange refused it for too many requests; trying again right away won't help.
 /// </summary>
-public class ExchangeException(string message, bool rejected = false) : Exception(message)
+public class ExchangeException(string message, bool rejected = false, bool rateLimited = false) : Exception(message)
 {
     public bool Rejected { get; } = rejected;
+
+    public bool RateLimited { get; } = rateLimited;
 }

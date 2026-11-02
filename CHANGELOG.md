@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.1.4 (beta)
+
+- **Kraken rate limits:** waiting sweep deposits are looked up together, one request per coin each minute instead
+  of one or more per deposit, and each coin's deposit method is reused for 30 minutes (the minimum deposit is still
+  read fresh before each sweep). Calls with the same Kraken key
+  now wait their turn under Kraken's lowest rate limit instead of being refused with "EAPI:Rate limit exceeded", which
+  also left convert and hedge unable to read balances.
+- **Sweep activity:** a deposit check refused for too many requests is one entry instead of one per deposit, and
+  stops that minute's checks; a failed check of several deposits of a coin is one entry for the coin.
+
 ## 0.1.3 (beta)
 
 - **Sweep fees:** a new store's sweeps aim for confirmation within 3 blocks (about half an hour for Bitcoin, a

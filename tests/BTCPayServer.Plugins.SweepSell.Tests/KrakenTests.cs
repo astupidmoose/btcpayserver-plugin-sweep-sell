@@ -621,6 +621,8 @@ public class KrakenTests
         Assert.Contains("cursor=true", query);
     }
 
+    const string OtherTxid = "ff00000000000000000000000000000000000000000000000000000000000000";
+
     static readonly DateTimeOffset SweptAt = new(2030, 1, 1, 12, 0, 0, TimeSpan.Zero);
 
     [Fact]
@@ -660,7 +662,7 @@ public class KrakenTests
                 var cursor = body.Split('&').Single(p => p.StartsWith("cursor="));
                 Cursors.Add(cursor);
                 Responses["/0/private/DepositStatus"] = cursor == "cursor=true"
-                    ? """{"error":[],"result":{"deposit":[{"txid":"ff00000000000000000000000000000000000000000000000000000000000000","amount":"9","status":"Success"}],"next_cursor":"page-2"}}"""
+                    ? $$$"""{"error":[],"result":{"deposit":[{"txid":"{{{OtherTxid}}}","amount":"9","status":"Success"}],"next_cursor":"page-2"}}"""
                     : $$$"""{"error":[],"result":{"deposit":[{"txid":"{{{DepositTxid}}}","amount":"0.25","status":"Success"}]}}""";
             }
             return await base.SendAsync(request, cancellationToken);
@@ -689,6 +691,206 @@ public class KrakenTests
         http.Responses["/0/private/DepositStatus"] = response;
         await Assert.ThrowsAsync<ExchangeException>(() =>
             new KrakenConnector(http.Client()).FindDepositAsync(Credentials, "BTC", DepositTxid, SweptAt, TestContext.Current.CancellationToken));
+    }
+
+    [Fact]
+    public async Task SeveralDepositsAreFoundInOneLookup()
+    {
+        var http = new PagedDeposits();
+        var found = await new KrakenConnector(http.Client()).FindDepositsAsync(Credentials, "BTC",
+            [DepositTxid, OtherTxid, "ee00000000000000000000000000000000000000000000000000000000000000"], SweptAt, TestContext.Current.CancellationToken);
+        Assert.Equal(new DepositStatus(DepositState.Credited, 0.25m), found[DepositTxid.ToUpperInvariant()]);
+        Assert.Equal(new DepositStatus(DepositState.Credited, 9m), found[OtherTxid]);
+        Assert.Equal(2, found.Count); // one Kraken hasn't seen is left out
+        Assert.Equal(["cursor=true", "cursor=page-2"], http.Cursors); // each page read once for all three
+        Assert.Single(http.Sent, s => s.Request.RequestUri!.AbsolutePath == "/0/private/DepositMethods");
+    }
+
+    [Fact]
+    public async Task LookupStopsOnceEveryDepositIsFound()
+    {
+        var http = new PagedDeposits();
+        var found = await new KrakenConnector(http.Client()).FindDepositsAsync(Credentials, "BTC", [OtherTxid], SweptAt, TestContext.Current.CancellationToken);
+        Assert.Single(found);
+        Assert.Equal(["cursor=true"], http.Cursors);
+    }
+
+    [Fact]
+    public async Task DepositMethodIsReusedForAWhile()
+    {
+        var http = new FakeHttp();
+        http.Responses["/0/private/DepositMethods"] = """{"error":[],"result":[{"method":"Litecoin","gen-address":true,"minimum":"0.02"}]}""";
+        http.Responses["/0/private/DepositStatus"] = """{"error":[],"result":[]}""";
+        var clock = new ManualClock(SweptAt);
+        var kraken = new KrakenConnector(http.Client(), clock);
+        var ct = TestContext.Current.CancellationToken;
+        int MethodCalls() => http.Sent.Count(s => s.Request.RequestUri!.AbsolutePath == "/0/private/DepositMethods");
+        Assert.Null(await kraken.FindDepositAsync(Credentials, "LTC", DepositTxid, SweptAt, ct));
+        Assert.Null(await kraken.FindDepositAsync(Credentials, "LTC", DepositTxid, SweptAt, ct));
+        Assert.Equal(1, MethodCalls());
+        // Another coin, or another key, is asked for on its own.
+        await kraken.FindDepositAsync(Credentials, "ADA", DepositTxid, SweptAt, ct); // a coin Kraken offers one way to deposit
+        await kraken.FindDepositAsync(Credentials with { ApiKey = "other-test-key" }, "LTC", DepositTxid, SweptAt, ct);
+        Assert.Equal(3, MethodCalls());
+
+        clock.Advance(KrakenConnector.DepositMethodLifetime);
+        await kraken.FindDepositAsync(Credentials, "LTC", DepositTxid, SweptAt, ct);
+        Assert.Equal(4, MethodCalls());
+    }
+
+    [Fact]
+    public async Task MinimumDepositIsAlwaysAskedFor()
+    {
+        var http = new FakeHttp();
+        http.Responses["/0/private/DepositMethods"] = """{"error":[],"result":[{"method":"Litecoin","gen-address":true,"minimum":"0.02"}]}""";
+        http.Responses["/0/private/DepositStatus"] = """{"error":[],"result":[]}""";
+        var kraken = new KrakenConnector(http.Client(), new ManualClock(SweptAt));
+        var ct = TestContext.Current.CancellationToken;
+        await kraken.FindDepositAsync(Credentials, "LTC", DepositTxid, SweptAt, ct);
+        // Kraken raised it since: a sweep must never go out below the minimum it credits now.
+        http.Responses["/0/private/DepositMethods"] = """{"error":[],"result":[{"method":"Litecoin","gen-address":true,"minimum":"0.05"}]}""";
+        Assert.Equal(0.05m, await kraken.GetMinimumDepositAsync(Credentials, "LTC", ct));
+        Assert.Equal(0.05m, await kraken.GetMinimumDepositAsync(Credentials, "LTC", ct));
+        Assert.Equal(3, http.Sent.Count(s => s.Request.RequestUri!.AbsolutePath == "/0/private/DepositMethods"));
+    }
+
+    [Fact]
+    public async Task FailedDepositMethodIsNotReused()
+    {
+        var http = new FakeHttp();
+        http.Responses["/0/private/DepositMethods"] = """{"error":["EService:Unavailable"]}""";
+        http.Responses["/0/private/DepositStatus"] = """{"error":[],"result":[]}""";
+        var kraken = new KrakenConnector(http.Client());
+        var ct = TestContext.Current.CancellationToken;
+        await Assert.ThrowsAsync<ExchangeException>(() => kraken.FindDepositAsync(Credentials, "LTC", DepositTxid, SweptAt, ct));
+        http.Responses["/0/private/DepositMethods"] = """{"error":[],"result":[{"method":"Litecoin","gen-address":true,"minimum":"0.02"}]}""";
+        Assert.Null(await kraken.FindDepositAsync(Credentials, "LTC", DepositTxid, SweptAt, ct));
+    }
+
+    [Fact]
+    public async Task StoresAskingForADepositMethodAtOnceShareOneRequest()
+    {
+        var http = new HeldDepositMethods();
+        var kraken = new KrakenConnector(http.Client());
+        var ct = TestContext.Current.CancellationToken;
+        var lookups = Enumerable.Range(0, 3).Select(_ => kraken.FindDepositAsync(Credentials, "LTC", DepositTxid, SweptAt, ct)).ToList();
+        await http.Asked.Task.WaitAsync(TimeSpan.FromSeconds(10), ct);
+        http.Release.SetResult();
+        await Task.WhenAll(lookups);
+        Assert.Single(http.Sent, s => s.Request.RequestUri!.AbsolutePath == "/0/private/DepositMethods");
+    }
+
+    /// <summary>Holds the first DepositMethods answer until released, so other lookups arrive while it is in flight.</summary>
+    class HeldDepositMethods : FakeHttp
+    {
+        public TaskCompletionSource Asked { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public TaskCompletionSource Release { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        public HeldDepositMethods()
+        {
+            Responses["/0/private/DepositMethods"] = """{"error":[],"result":[{"method":"Litecoin","gen-address":true,"minimum":"0.02"}]}""";
+            Responses["/0/private/DepositStatus"] = """{"error":[],"result":[]}""";
+        }
+
+        protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
+        {
+            if (request.RequestUri!.AbsolutePath == "/0/private/DepositMethods")
+            {
+                Asked.TrySetResult();
+                await Release.Task.WaitAsync(cancellationToken);
+            }
+            return await base.SendAsync(request, cancellationToken);
+        }
+    }
+
+    [Fact]
+    public async Task OrderDeadlineIsSetWhenTheOrderIsSent()
+    {
+        var http = new HeldBalances();
+        http.Responses["/0/private/AddOrder"] = """{"error":[],"result":{"txid":["OEXAMP-LE000-ORDER1"]}}""";
+        var clock = new ManualClock(new DateTimeOffset(2030, 1, 1, 0, 0, 0, TimeSpan.Zero));
+        var kraken = new KrakenConnector(http.Client(), clock) { RateLimit = null };
+        var ct = TestContext.Current.CancellationToken;
+        var balances = kraken.GetAvailableBalancesAsync(Credentials, ct); // holds the key
+        await http.Asked.Task.WaitAsync(TimeSpan.FromSeconds(10), ct);
+        var sell = kraken.SellAsync(Credentials, "DOGE", "BTC", 300m, 0.0000015m, OrderId, validateOnly: false, ct);
+        clock.Advance(TimeSpan.FromMinutes(2)); // the sell waits its turn meanwhile
+        http.Release.SetResult();
+        await balances;
+        await sell;
+        Assert.Contains("deadline=2030-01-01T00%3A02%3A30Z", http.Sent.Single(s => s.Request.RequestUri!.AbsolutePath == "/0/private/AddOrder").Body);
+    }
+
+    /// <summary>Holds the BalanceEx answer until released.</summary>
+    class HeldBalances : FakeHttp
+    {
+        public TaskCompletionSource Asked { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public TaskCompletionSource Release { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        public HeldBalances() => Responses["/0/private/BalanceEx"] = """{"error":[],"result":{}}""";
+
+        protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
+        {
+            if (request.RequestUri!.AbsolutePath == "/0/private/BalanceEx")
+            {
+                Asked.TrySetResult();
+                await Release.Task.WaitAsync(cancellationToken);
+            }
+            return await base.SendAsync(request, cancellationToken);
+        }
+    }
+
+    [Fact]
+    public async Task CallsWaitForRoomUnderKrakensCounter()
+    {
+        var http = new FakeHttp();
+        http.Responses["/0/private/BalanceEx"] = """{"error":[],"result":{}}""";
+        // Invented, fast numbers: room for two calls, then one more every 0.1 seconds.
+        var kraken = new KrakenConnector(http.Client()) { RateLimit = new KrakenRateLimit(15, 10, 2) };
+        var ct = TestContext.Current.CancellationToken;
+        for (var i = 0; i < 2; i++)
+            await kraken.GetAvailableBalancesAsync(Credentials, ct);
+        var watch = System.Diagnostics.Stopwatch.StartNew();
+        for (var i = 0; i < 4; i++)
+            await kraken.GetAvailableBalancesAsync(Credentials, ct);
+        Assert.True(watch.Elapsed >= TimeSpan.FromSeconds(0.3), $"took {watch.Elapsed}");
+        Assert.Equal(6, http.Sent.Count);
+    }
+
+    [Fact]
+    public async Task RateLimitIsFlaggedAndTheNextCallWaits()
+    {
+        var http = new FakeHttp();
+        http.Responses["/0/private/BalanceEx"] = """{"error":["EAPI:Rate limit exceeded"]}""";
+        var kraken = new KrakenConnector(http.Client()) { RateLimit = new KrakenRateLimit(15, 10, 10) };
+        var ct = TestContext.Current.CancellationToken;
+        var e = await Assert.ThrowsAsync<ExchangeException>(() => kraken.GetAvailableBalancesAsync(Credentials, ct));
+        Assert.True(e.RateLimited);
+        Assert.True(e.Rejected);
+
+        // Taken as full (15), so the next call waits until it is back under 10: half a second at these invented numbers.
+        http.Responses["/0/private/BalanceEx"] = """{"error":[],"result":{}}""";
+        var watch = System.Diagnostics.Stopwatch.StartNew();
+        await kraken.GetAvailableBalancesAsync(Credentials, ct);
+        Assert.True(watch.Elapsed >= TimeSpan.FromSeconds(0.45), $"took {watch.Elapsed}");
+    }
+
+    [Theory]
+    [InlineData("EService:Throttled: 1700000000", 200, true)]
+    [InlineData("EGeneral:Too many requests", 200, true)]
+    [InlineData("EAPI:Rate limit exceeded", 429, true)]
+    [InlineData("EAPI:Rate limit exceeded", 502, false)] // an HTTP error says nothing for sure
+    [InlineData("EOrder:Insufficient funds", 200, false)]
+    public async Task OnlyRateLimitErrorsAreFlaggedAsSuch(string error, int status, bool rateLimited)
+    {
+        var http = new FakeHttp { Status = (System.Net.HttpStatusCode)status };
+        http.Responses["/0/private/AddOrder"] = $$"""{"error":["{{error}}"]}""";
+        var e = await Assert.ThrowsAsync<ExchangeException>(() => new KrakenConnector(http.Client()) { RateLimit = null }
+            .SellAsync(Credentials, "DOGE", "BTC", 300m, 0.0000015m, OrderId, validateOnly: false, TestContext.Current.CancellationToken));
+        Assert.Equal(rateLimited, e.RateLimited);
+        // Turned away before Kraken acted on it, so no order was placed.
+        if (rateLimited)
+            Assert.True(e.Rejected);
     }
 
     [Fact]

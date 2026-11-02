@@ -577,23 +577,60 @@ public class SweepService(ISweepSellRepository repository, SecretProtector prote
                 var exchange = exchanges.Find(settings.ExchangeId);
                 var credentials = protector.Credentials(settings);
                 var now = clock.GetUtcNow();
-                foreach (var awaiting in state.Awaiting.ToList())
+                // Each coin's deposits are looked up together, in one go, so a long list doesn't cost a request each.
+                var statuses = new Dictionary<AwaitingDeposit, DepositStatus?>();
+                var skipped = new HashSet<AwaitingDeposit>();
+                var groups = exchange is null || credentials is null
+                    ? []
+                    : state.Awaiting.Where(a => a.ExchangeId == exchange.Id)
+                        .GroupBy(a => a.Asset.ToUpperInvariant()).ToList();
+                string? limited = null;
+                foreach (var group in groups)
                 {
-                    DepositStatus? status = null;
-                    if (exchange is not null && credentials is not null && awaiting.ExchangeId == exchange.Id)
+                    var deposits = group.ToList();
+                    if (limited is not null)
                     {
-                        try
+                        skipped.UnionWith(deposits);
+                        continue;
+                    }
+                    try
+                    {
+                        var found = await exchange!.FindDepositsAsync(credentials!, deposits[0].Asset, deposits.Select(d => d.Txid).Distinct(StringComparer.OrdinalIgnoreCase).ToList(),
+                            deposits.Min(d => d.SignedAt ?? d.SentAt), cancellationToken);
+                        foreach (var deposit in deposits)
+                            statuses[deposit] = found.TryGetValue(deposit.Txid, out var status) ? status : null;
+                    }
+                    catch (Exception e) when (IsRecordedFailure(e, cancellationToken))
+                    {
+                        // Never expired on a failed check: a deposit may be credited, and is converted once the check works.
+                        skipped.UnionWith(deposits);
+                        var what = deposits.Count == 1
+                            ? $"the {Amount(deposits[0].Amount)} {deposits[0].Asset} deposit ({deposits[0].Txid})"
+                            : $"the {deposits.Count} {deposits[0].Asset} deposits waiting";
+                        if (e is ExchangeException { RateLimited: true })
                         {
-                            status = await exchange.FindDepositAsync(credentials, awaiting.Asset, awaiting.Txid, awaiting.SignedAt ?? awaiting.SentAt, cancellationToken);
+                            // The other coins would only be refused too, and each refusal can keep the limit full for longer.
+                            limited = e.Message;
                         }
-                        catch (Exception e) when (IsRecordedFailure(e, cancellationToken))
+                        else
                         {
-                            // Never expired on a failed check: the deposit may be credited, and is converted once the check works.
-                            Record(storeId, state, awaiting.Asset, ActivityOutcome.Failed,
-                                $"Could not check the {Amount(awaiting.Amount)} {awaiting.Asset} deposit ({awaiting.Txid}) on {exchange.Name}: {e.Message}. Trying again in a minute.");
-                            continue;
+                            Record(storeId, state, deposits[0].Asset, ActivityOutcome.Failed,
+                                $"Could not check {what} on {exchange!.Name}: {e.Message}. Trying again in a minute.");
                         }
                     }
+                }
+                if (limited is not null)
+                {
+                    // One entry for the lot: one per deposit, every minute, would bury the rest of the activity.
+                    var notChecked = skipped.Count == 1 ? "the deposit waiting wasn't checked" : $"{skipped.Count} deposits waiting weren't checked";
+                    Record(storeId, state, null, ActivityOutcome.Failed,
+                        $"{exchange!.Name} is limiting requests ({limited}), so {notChecked}. Trying again in a minute.");
+                }
+                foreach (var awaiting in state.Awaiting.ToList())
+                {
+                    if (skipped.Contains(awaiting))
+                        continue;
+                    var status = statuses.GetValueOrDefault(awaiting);
                     switch (status?.State)
                     {
                         case DepositState.Credited:

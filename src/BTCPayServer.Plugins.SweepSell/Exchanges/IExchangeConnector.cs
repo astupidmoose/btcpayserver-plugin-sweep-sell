@@ -70,6 +70,21 @@ public interface IExchangeConnector
     Task<DepositStatus?> FindDepositAsync(ExchangeCredentials credentials, string asset, string txid, DateTimeOffset since,
         CancellationToken cancellationToken);
 
+    /// <summary>
+    /// <see cref="FindDepositAsync"/> for several deposits of one asset, all sent at <paramref name="since"/> or later. Only the
+    /// deposits the exchange has a record of are in the result, by transaction ID (any case). A connector should look them all
+    /// up together, so a long list of deposits doesn't cost one request each.
+    /// </summary>
+    async Task<IReadOnlyDictionary<string, DepositStatus>> FindDepositsAsync(ExchangeCredentials credentials, string asset,
+        IReadOnlyCollection<string> txids, DateTimeOffset since, CancellationToken cancellationToken)
+    {
+        var found = new Dictionary<string, DepositStatus>(StringComparer.OrdinalIgnoreCase);
+        foreach (var txid in txids)
+            if (await FindDepositAsync(credentials, asset, txid, since, cancellationToken) is { } status)
+                found[txid] = status;
+        return found;
+    }
+
     /// <summary>Tries each permission Sweep &amp; Sell uses, without moving funds.</summary>
     Task<CredentialsCheck> TestCredentialsAsync(ExchangeCredentials credentials, CancellationToken cancellationToken);
 }

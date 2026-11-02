@@ -879,6 +879,81 @@ public class SweepServiceTests
         Assert.True(State.Stopped.ContainsKey("BTC"));
     }
 
+    void Awaiting(string asset, string txid, TimeSpan ago) => _repository.SweepStates.GetOrAdd(_storeId, _ => new SweepState()).Awaiting.Add(new AwaitingDeposit
+    {
+        Asset = asset, Txid = txid, Amount = 0.5m, ExchangeId = FakeExchange.ExchangeId,
+        SentAt = _clock.GetUtcNow() - ago, SignedAt = _clock.GetUtcNow() - ago
+    });
+
+    [Fact]
+    public async Task EachCoinsDepositsAreLookedUpTogether()
+    {
+        Configure();
+        Awaiting("BTC", "btc-deposit-1", TimeSpan.FromHours(2));
+        Awaiting("BTC", "btc-deposit-2", TimeSpan.FromHours(5));
+        Awaiting("LTC", "ltc-deposit-1", TimeSpan.FromHours(1));
+        _exchange.Deposits["btc-deposit-2"] = new DepositStatus(DepositState.Credited, 0.5m);
+        await Service().WatchDepositsAsync(Ct);
+        Assert.Equal(["BTC: btc-deposit-1, btc-deposit-2", "LTC: ltc-deposit-1"],
+            _exchange.DepositLookups.Select(l => $"{l.Asset}: {string.Join(", ", l.Txids)}"));
+        // From the earliest of the coin's sweeps, so none is missed.
+        Assert.Equal([_clock.GetUtcNow() - TimeSpan.FromHours(5), _clock.GetUtcNow() - TimeSpan.FromHours(1)], _exchange.DepositSearchesSince.Distinct());
+        Assert.Equal(["btc-deposit-1", "ltc-deposit-1"], State.Awaiting.Select(a => a.Txid));
+        Assert.Contains("credited 0.5 BTC from the sweep (btc-deposit-2)", Assert.Single(State.Activity, a => a.Outcome == ActivityOutcome.Sent).Message);
+    }
+
+    [Fact]
+    public async Task RateLimitedDepositCheckIsOneEntryAndStopsTheRun()
+    {
+        Configure();
+        Awaiting("BTC", "btc-deposit-1", TimeSpan.FromHours(2));
+        Awaiting("BTC", "btc-deposit-2", TimeSpan.FromHours(30));
+        Awaiting("LTC", "ltc-deposit-1", TimeSpan.FromHours(30));
+        _exchange.DepositError = new ExchangeException("Kraken: EAPI:Rate limit exceeded", rateLimited: true);
+        await Service().WatchDepositsAsync(Ct);
+        Assert.Single(_exchange.DepositLookups); // the other coin isn't asked for, to be refused too
+        var entry = Assert.Single(State.Activity);
+        Assert.Equal(ActivityOutcome.Failed, entry.Outcome);
+        Assert.Contains("Fake Exchange is limiting requests (Kraken: EAPI:Rate limit exceeded), so 3 deposits waiting weren't checked", entry.Message);
+        // Not checked, so none counts as uncredited, however old.
+        Assert.Equal(3, State.Awaiting.Count);
+        Assert.Empty(State.Stopped);
+    }
+
+    [Fact]
+    public async Task RateLimitAfterACoinWasCheckedCountsOnlyTheRest()
+    {
+        Configure();
+        Awaiting("BTC", "btc-deposit-1", TimeSpan.FromHours(2));
+        Awaiting("LTC", "ltc-deposit-1", TimeSpan.FromHours(1));
+        _exchange.Deposits["btc-deposit-1"] = new DepositStatus(DepositState.Credited, 0.5m);
+        _exchange.OnFindDeposit = () =>
+        {
+            if (_exchange.DepositLookups.Count == 2)
+                _exchange.DepositError = new ExchangeException("Kraken: EAPI:Rate limit exceeded", rateLimited: true);
+        };
+        await Service().WatchDepositsAsync(Ct);
+        Assert.Equal("ltc-deposit-1", Assert.Single(State.Awaiting).Txid);
+        Assert.Contains(State.Activity, a => a.Message.EndsWith("so the deposit waiting wasn't checked. Trying again in a minute."));
+        Assert.Contains(State.Activity, a => a.Outcome == ActivityOutcome.Sent && a.Message.Contains("btc-deposit-1"));
+    }
+
+    [Fact]
+    public async Task FailedCheckOfSeveralDepositsIsOneEntryPerCoin()
+    {
+        Configure();
+        Awaiting("BTC", "btc-deposit-1", TimeSpan.FromHours(2));
+        Awaiting("BTC", "btc-deposit-2", TimeSpan.FromHours(3));
+        Awaiting("LTC", "ltc-deposit-1", TimeSpan.FromHours(1));
+        _exchange.DepositError = new ExchangeException("EService:Unavailable");
+        await Service().WatchDepositsAsync(Ct);
+        Assert.Equal(2, _exchange.DepositLookups.Count); // not a rate limit: the next coin is still tried
+        Assert.Equal(["Could not check the 0.5 LTC deposit (ltc-deposit-1) on Fake Exchange: EService:Unavailable. Trying again in a minute.",
+                "Could not check the 2 BTC deposits waiting on Fake Exchange: EService:Unavailable. Trying again in a minute."],
+            State.Activity.Select(a => a.Message));
+        Assert.Equal(3, State.Awaiting.Count);
+    }
+
     [Fact]
     public async Task ColdWalletChangesAreWrittenToTheActivity()
     {
