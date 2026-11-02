@@ -15,9 +15,10 @@ public sealed record SweepAmounts(decimal ToExchange, decimal ToCold, decimal Fe
 
 /// <summary>
 /// A signed sweep, ready to broadcast. Broadcasting the same transaction again can never pay twice. <paramref name="Balance"/>
-/// is what the wallet's coins added up to when it was built.
+/// is what the wallet's coins added up to when it was built; <paramref name="FeeRate"/> is the fee it pays, in satoshis per
+/// virtual byte, when known.
 /// </summary>
-public sealed record SignedSweep(string Txid, string Hex, SweepAmounts Amounts, decimal Balance);
+public sealed record SignedSweep(string Txid, string Hex, SweepAmounts Amounts, decimal Balance, decimal? FeeRate = null);
 
 /// <summary>A sweep that can't be built, with a message for the store owner.</summary>
 public class SweepException(string message) : Exception(message);
@@ -100,8 +101,9 @@ public static class SweepBuilder
         decimal Sum(IDestination? destination) => destination is null
             ? 0m
             : tx.Outputs.Where(o => o.ScriptPubKey == destination.ScriptPubKey).Select(o => o.Value).Sum().ToDecimal(MoneyUnit.BTC);
+        var fee = tx.GetFee(coins.Select(c => c.Coin).ToArray());
         return new SignedSweep(tx.GetHash().ToString(), tx.ToHex(),
-            new SweepAmounts(Sum(exchange), Sum(cold), tx.GetFee(coins.Select(c => c.Coin).ToArray()).ToDecimal(MoneyUnit.BTC), Sum(change)),
-            total.ToDecimal(MoneyUnit.BTC));
+            new SweepAmounts(Sum(exchange), Sum(cold), fee.ToDecimal(MoneyUnit.BTC), Sum(change)),
+            total.ToDecimal(MoneyUnit.BTC), Math.Round((decimal)fee.Satoshi / tx.GetVirtualSize(), 2));
     }
 }

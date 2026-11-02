@@ -771,7 +771,7 @@ public class SweepSellSettingsViewModel
     public int SweepIntervalMinutes { get; set; } = 60;
 
     [Display(Name = "Network fee: confirm within (blocks)")]
-    public int SweepFeeTargetBlocks { get; set; } = 6;
+    public int SweepFeeTargetBlocks { get; set; } = 3;
 
     public List<SweepRuleViewModel> SweepRules { get; set; } = [];
 

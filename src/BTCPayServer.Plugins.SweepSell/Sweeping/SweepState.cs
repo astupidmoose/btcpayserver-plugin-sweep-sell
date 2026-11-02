@@ -68,6 +68,11 @@ public class PendingSweep
     public decimal ToCold { get; set; }
     public decimal Fee { get; set; }
 
+    /// <summary>The fee rate it pays in the coin's smallest unit per vB (sat/vB for Bitcoin) and the confirmation target it aimed for, shown once it is sent.</summary>
+    public decimal? FeeRate { get; set; }
+
+    public int? FeeTargetBlocks { get; set; }
+
     /// <summary>The cold wallet key and index the cold address came from, to move past it once the sweep is sent.</summary>
     public string? ColdDestination { get; set; }
 
