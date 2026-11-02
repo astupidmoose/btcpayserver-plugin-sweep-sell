@@ -761,8 +761,12 @@ public class SweepService(ISweepSellRepository repository, SecretProtector prote
         $", fee {Amount(fee)} {code}" +
         // The rate and target are shown so the fee can be compared with the network's estimates.
         (feeRate is { } rate && feeTarget is { } target
-            ? $" ({Amount(rate)} sat/vB, aiming for {(target == 1 ? "the next block" : $"confirmation within {target} blocks")})"
+            ? $" ({Amount(rate)} {RateUnit(code)}, aiming for {(target == 1 ? "the next block" : $"confirmation within {target} blocks")})"
             : "");
+
+    /// <summary>Satoshis are Bitcoin's; other coins name their smallest unit differently, so they get a plain description.</summary>
+    static string RateUnit(string code) =>
+        string.Equals(code, "BTC", StringComparison.OrdinalIgnoreCase) ? "sat/vB" : $"of the smallest {code} unit per vB";
 
     void Record(string storeId, SweepState state, string? asset, ActivityOutcome outcome, string message)
     {

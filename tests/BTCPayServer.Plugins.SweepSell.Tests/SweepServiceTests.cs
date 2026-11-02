@@ -71,6 +71,18 @@ public class SweepServiceTests
     }
 
     [Fact]
+    public async Task AnotherCoinsFeeRateIsNotCalledSatoshis()
+    {
+        Configure(dryRun: true, rule: r => r.CryptoCode = "LTC");
+        _wallets.Balances[$"{_storeId}:LTC"] = 1m;
+        await Service().RunAsync(_storeId, wait: false, Ct);
+        Assert.Single(_wallets.Built);
+        var message = State.Activity[0].Message;
+        Assert.Contains("(2.5 of the smallest LTC unit per vB, aiming for confirmation within 3 blocks)", message);
+        Assert.DoesNotContain("sat/vB", message);
+    }
+
+    [Fact]
     public async Task LiveSweepBroadcastsAndWaitsForTheDeposit()
     {
         Configure();
