@@ -292,9 +292,9 @@ public class SweepService(ISweepSellRepository repository, SecretProtector prote
                 coldAddress = address;
                 coldIndex = derived ? index : null;
             }
+            var feeTarget = Math.Clamp(settings.Sweep.FeeTargetBlocks, SweepSettings.MinFeeTargetBlocks, SweepSettings.MaxFeeTargetBlocks);
             var sweep = await wallets.BuildAsync(wallet,
-                new SweepRequest(rule.IncludeUnconfirmed, amount, deposit.Address, coldAddress, coldAddress is null ? 0 : rule.ColdPercent,
-                    Math.Clamp(settings.Sweep.FeeTargetBlocks, SweepSettings.MinFeeTargetBlocks, SweepSettings.MaxFeeTargetBlocks)),
+                new SweepRequest(rule.IncludeUnconfirmed, amount, deposit.Address, coldAddress, coldAddress is null ? 0 : rule.ColdPercent, feeTarget),
                 cancellationToken);
             // The wallet is read again to build the sweep, and something else on the server may have spent from it meanwhile.
             if (sweep.Balance < rule.MinimumBalance)
@@ -309,7 +309,11 @@ public class SweepService(ISweepSellRepository repository, SecretProtector prote
                     $"Sweeping now would send {Amount(sweep.Amounts.ToExchange)} {code} to {exchange.Name}, below its minimum deposit of {Amount(minimumDeposit)} {code}. Waiting for more.");
                 return;
             }
-            var what = Describe(code, sweep.Amounts.ToExchange, exchange.Name, deposit.Address, sweep.Amounts.ToCold, coldAddress, sweep.Amounts.Fee);
+            // The rate and target are shown so the fee can be compared with the network's estimates.
+            var what = Describe(code, sweep.Amounts.ToExchange, exchange.Name, deposit.Address, sweep.Amounts.ToCold, coldAddress, sweep.Amounts.Fee) +
+                       (sweep.FeeRate is { } rate
+                           ? $" ({Amount(rate)} sat/vB, aiming for {(feeTarget == 1 ? "the next block" : $"confirmation within {feeTarget} blocks")})"
+                           : "");
             if (settings.Sweep.DryRun)
             {
                 Record(storeId, state, code, ActivityOutcome.DryRun, $"Dry run: would send {what}. The transaction was signed but not broadcast.");

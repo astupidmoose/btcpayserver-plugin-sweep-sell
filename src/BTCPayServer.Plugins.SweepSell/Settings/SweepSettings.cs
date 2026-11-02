@@ -25,8 +25,11 @@ public class SweepSettings
     /// </summary>
     public int IntervalMinutes { get; set; } = 60;
 
-    /// <summary>Confirmation target for the network fee, in blocks.</summary>
-    public int FeeTargetBlocks { get; set; } = 6;
+    /// <summary>
+    /// Confirmation target for the network fee, in blocks. About half an hour by default (a medium priority fee): a sweep is
+    /// sold as soon as the exchange credits it.
+    /// </summary>
+    public int FeeTargetBlocks { get; set; } = 3;
 
     /// <summary>One rule per coin; a coin without an enabled rule is never swept.</summary>
     public List<SweepRule> Rules { get; set; } = [];

@@ -56,6 +56,18 @@ public class SweepServiceTests
         Assert.Empty(State.Awaiting);
         Assert.Equal(ActivityOutcome.DryRun, State.Activity[0].Outcome);
         Assert.Contains("0.9999 BTC to Fake Exchange (exchange-deposit-address)", State.Activity[0].Message);
+        Assert.Contains("fee 0.0001 BTC (2.5 sat/vB, aiming for confirmation within 3 blocks)", State.Activity[0].Message);
+        Assert.Equal(3, Assert.Single(_wallets.Built).FeeTargetBlocks); // about half an hour unless the owner picks otherwise
+    }
+
+    [Fact]
+    public async Task TheChosenFeeTargetIsAskedForAndShown()
+    {
+        Configure(dryRun: true);
+        _repository.Settings[_storeId].Sweep.FeeTargetBlocks = 1;
+        await Service().RunAsync(_storeId, wait: false, Ct);
+        Assert.Equal(1, Assert.Single(_wallets.Built).FeeTargetBlocks);
+        Assert.Contains("(2.5 sat/vB, aiming for the next block)", State.Activity[0].Message);
     }
 
     [Fact]
@@ -64,7 +76,7 @@ public class SweepServiceTests
         Configure();
         await Service().RunAsync(_storeId, wait: false, Ct);
         var request = Assert.Single(_wallets.Built);
-        Assert.Equal(new SweepRequest(false, null, "exchange-deposit-address", null, 0, 6), request);
+        Assert.Equal(new SweepRequest(false, null, "exchange-deposit-address", null, 0, 3), request);
         Assert.Single(_wallets.Broadcasts);
         Assert.Empty(State.Pending);
         var awaiting = Assert.Single(State.Awaiting);

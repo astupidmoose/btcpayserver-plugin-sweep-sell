@@ -79,6 +79,16 @@ public class SweepBuilderTests
     }
 
     [Fact]
+    public void TheFeeRatePaidIsReported()
+    {
+        var rate = new FeeRate(Money.Satoshis(12_000), 1000); // 12 sat/vB
+        var sweep = SweepBuilder.Build(Network, [CoinOf(0.01m, 0)], null, Address(), null, 0, rate, null);
+        var tx = Transaction.Parse(sweep.Hex, Network);
+        Assert.Equal(Math.Round(sweep.Amounts.Fee * 100_000_000m / tx.GetVirtualSize(), 2), sweep.FeeRate);
+        Assert.InRange(sweep.FeeRate!.Value, 11.9m, 12.5m);
+    }
+
+    [Fact]
     public void WithoutTheNodesMinimumAFeeBelowOneSatPerVbyteIsRefused()
     {
         var low = new FeeRate(Money.Satoshis(130), 1000);

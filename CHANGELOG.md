@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.1.3 (beta)
+
+- **Sweep fees:** a new store's sweeps aim for confirmation within 3 blocks (about half an hour, a medium priority
+  fee) instead of 6. Stores already set up keep their setting; change "Network fee: confirm within (blocks)" on the
+  settings page to use the new target.
+- **Sweep activity:** each sweep now shows the fee rate it pays in sat/vB and the confirmation target it aimed for,
+  so it can be compared with the network's fee estimates.
+
 ## 0.1.2 (beta)
 
 - **Payout:** stores can now pay out different assets of the same exchange account, for example USD from one

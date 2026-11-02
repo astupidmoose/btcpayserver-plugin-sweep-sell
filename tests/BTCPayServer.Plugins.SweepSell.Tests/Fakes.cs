@@ -157,6 +157,7 @@ sealed class FakeExchange : IExchangeConnector
 sealed class FakeWallets : IStoreWallets
 {
     public const decimal Fee = 0.0001m;
+    public const decimal FeeRate = 2.5m;
 
     /// <summary>Balances by "{storeId}:{code}"; a store with no entry for a coin has no wallet for it.</summary>
     public System.Collections.Concurrent.ConcurrentDictionary<string, decimal> Balances { get; } = new();
@@ -211,7 +212,7 @@ sealed class FakeWallets : IStoreWallets
         var txid = Interlocked.Increment(ref _txids).ToString("x64");
         lock (_signed)
             _signed["signed-" + txid] = (id, swept);
-        return new SignedSweep(txid, "signed-" + txid, new SweepAmounts(toExchange, toCold, Fee, Balances[id] - swept), Balances[id]);
+        return new SignedSweep(txid, "signed-" + txid, new SweepAmounts(toExchange, toCold, Fee, Balances[id] - swept), Balances[id], FeeRate);
     }
 
     public Task<BroadcastOutcome> BroadcastAsync(string cryptoCode, string hex, CancellationToken cancellationToken)
