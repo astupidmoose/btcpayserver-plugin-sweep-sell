@@ -65,6 +65,10 @@ is stored encrypted on your BTCPay server and never shown again after you save i
 **Test the key** button, which checks each permission without trading, and that the key can't withdraw or
 change withdrawal addresses. Payout won't run while the trading key can change withdrawal addresses.
 
+Exchanges limit how many requests a key may make. Sweep & Sell paces its own requests to stay under Kraken's
+lowest limit, with room to spare, but it can't see other software using the same key. If the activity shows the
+exchange limiting requests, give Sweep & Sell a key of its own.
+
 Payout needs a second key with only **query funds** and **withdraw funds**, and no query start or end
 date: payout refuses a key with any other permission, such as an order or withdrawal address permission. **Test the payout key**
 checks that it can withdraw, can't trade and has no other permission, and lists the withdrawal

@@ -179,13 +179,14 @@ public class KrakenWithdrawalsTests
     public async Task RecentWithdrawalsFollowEveryPage()
     {
         var http = new PagedWithdrawals(endless: false);
-        var kraken = new KrakenWithdrawals(new KrakenConnector(http.Client()));
+        // Without Kraken's call pacing, which would make the many pages below take a while.
+        var kraken = new KrakenWithdrawals(new KrakenConnector(http.Client()) { RateLimit = null });
         var records = await kraken.GetRecentWithdrawalsAsync(Credentials, "USD", DateTimeOffset.UnixEpoch, Ct);
         Assert.Equal(["R1", "R2", "R3"], records.Select(r => r.Reference)); // an older withdrawal in progress is never missed
 
         var endless = new PagedWithdrawals(endless: true);
         var e = await Assert.ThrowsAsync<ExchangeException>(() =>
-            new KrakenWithdrawals(new KrakenConnector(endless.Client())).GetRecentWithdrawalsAsync(Credentials, "USD", DateTimeOffset.UnixEpoch, Ct));
+            new KrakenWithdrawals(new KrakenConnector(endless.Client()) { RateLimit = null }).GetRecentWithdrawalsAsync(Credentials, "USD", DateTimeOffset.UnixEpoch, Ct));
         Assert.Contains("can be accounted for", e.Message);
         Assert.Equal(KrakenWithdrawals.MaxWithdrawalPages, endless.Sent.Count(s => s.Request.RequestUri!.AbsolutePath == "/0/private/WithdrawStatus"));
     }

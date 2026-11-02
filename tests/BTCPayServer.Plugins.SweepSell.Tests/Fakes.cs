@@ -145,8 +145,37 @@ sealed class FakeExchange : IExchangeConnector
         return Task.FromResult(Deposits.GetValueOrDefault(txid));
     }
 
+    public List<(string Asset, string[] Txids)> DepositLookups { get; } = [];
+
+    // Recorded once per lookup, then answered one deposit at a time as the interface's default does.
+    public Task<IReadOnlyDictionary<string, DepositStatus>> FindDepositsAsync(ExchangeCredentials credentials, string asset,
+        IReadOnlyCollection<string> txids, DateTimeOffset since, CancellationToken cancellationToken)
+    {
+        DepositLookups.Add((asset, txids.Order(StringComparer.Ordinal).ToArray()));
+        return ((IExchangeConnector)new DefaultLookups(this)).FindDepositsAsync(credentials, asset, txids, since, cancellationToken);
+    }
+
     public Task<CredentialsCheck> TestCredentialsAsync(ExchangeCredentials credentials, CancellationToken cancellationToken) =>
         throw new NotSupportedException();
+
+    /// <summary>Only the interface's own <see cref="IExchangeConnector.FindDepositsAsync"/>, over the fake's single lookups.</summary>
+    sealed class DefaultLookups(FakeExchange fake) : IExchangeConnector
+    {
+        public string Id => fake.Id;
+        public string Name => fake.Name;
+        public string KeyPermissionsHelp => "";
+        public Task<IReadOnlyDictionary<string, decimal>> GetAvailableBalancesAsync(ExchangeCredentials c, CancellationToken t) => throw new NotSupportedException();
+        public Task<DepositDestination> GetDepositAddressAsync(ExchangeCredentials c, string a, bool f, CancellationToken t) => throw new NotSupportedException();
+        public Task<decimal> GetMinimumDepositAsync(ExchangeCredentials c, string a, CancellationToken t) => throw new NotSupportedException();
+        public Task<MarketPrice> GetPriceAsync(string b, string q, CancellationToken t) => throw new NotSupportedException();
+        public Task<MarketRules> GetMarketRulesAsync(string b, string q, CancellationToken t) => throw new NotSupportedException();
+        public Task<OrderResult> SellAsync(ExchangeCredentials c, string b, string q, decimal a, decimal l, Guid id, bool v, CancellationToken t) =>
+            throw new NotSupportedException();
+        public Task<OrderLookup?> FindOrderAsync(ExchangeCredentials c, Guid id, CancellationToken t) => throw new NotSupportedException();
+        public Task<DepositStatus?> FindDepositAsync(ExchangeCredentials c, string asset, string txid, DateTimeOffset since, CancellationToken t) =>
+            fake.FindDepositAsync(c, asset, txid, since, t);
+        public Task<CredentialsCheck> TestCredentialsAsync(ExchangeCredentials c, CancellationToken t) => throw new NotSupportedException();
+    }
 }
 
 /// <summary>
