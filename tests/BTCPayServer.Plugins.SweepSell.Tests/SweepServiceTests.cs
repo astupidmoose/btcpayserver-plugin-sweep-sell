@@ -939,6 +939,37 @@ public class SweepServiceTests
     }
 
     [Fact]
+    public async Task BumpedSweepIsFollowedToItsReplacement()
+    {
+        Configure();
+        Awaiting("BTC", "sweep-tx", TimeSpan.FromHours(23));
+        _wallets.Replacements["sweep-tx"] = "bumped-tx";
+        var service = Service();
+        await service.WatchDepositsAsync(Ct);
+        Assert.Equal("bumped-tx", Assert.Single(State.Awaiting).Txid);
+        Assert.Equal(ActivityOutcome.Changed, State.Activity[0].Outcome);
+        Assert.Contains("(sweep-tx) was replaced by bumped-tx", State.Activity[0].Message);
+
+        _exchange.Deposits["bumped-tx"] = new DepositStatus(DepositState.Credited, 0.4999m);
+        _clock.Advance(TimeSpan.FromMinutes(1));
+        await service.WatchDepositsAsync(Ct);
+        Assert.Empty(State.Awaiting);
+        Assert.Contains("credited 0.4999 BTC from the sweep (bumped-tx)", State.Activity[0].Message);
+        Assert.Empty(State.Stopped);
+    }
+
+    [Fact]
+    public async Task SweepTheExchangeHasSeenIsNotFollowedToAReplacement()
+    {
+        Configure();
+        Awaiting("BTC", "sweep-tx", TimeSpan.FromHours(1));
+        _wallets.Replacements["sweep-tx"] = "bumped-tx";
+        _exchange.Deposits["sweep-tx"] = new DepositStatus(DepositState.Pending, 0.5m);
+        await Service().WatchDepositsAsync(Ct);
+        Assert.Equal("sweep-tx", Assert.Single(State.Awaiting).Txid);
+    }
+
+    [Fact]
     public async Task FailedCheckOfSeveralDepositsIsOneEntryPerCoin()
     {
         Configure();

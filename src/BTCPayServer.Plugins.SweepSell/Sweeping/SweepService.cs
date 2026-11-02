@@ -631,6 +631,15 @@ public class SweepService(ISweepSellRepository repository, SecretProtector prote
                     if (skipped.Contains(awaiting))
                         continue;
                     var status = statuses.GetValueOrDefault(awaiting);
+                    // Sweeps signal replace-by-fee: one bumped from the wallet reaches the exchange as another transaction.
+                    if (status is null && await ReplacementAsync(awaiting, cancellationToken) is { } replacement)
+                    {
+                        Record(storeId, state, awaiting.Asset, ActivityOutcome.Changed,
+                            $"The {Amount(awaiting.Amount)} {awaiting.Asset} sweep ({awaiting.Txid}) was replaced by {replacement}, for example by a fee bump. " +
+                            "Its deposit is now looked for by the new transaction.");
+                        awaiting.Txid = replacement;
+                        continue;
+                    }
                     switch (status?.State)
                     {
                         case DepositState.Credited:
@@ -683,6 +692,19 @@ public class SweepService(ISweepSellRepository repository, SecretProtector prote
         finally
         {
             storeLock.Release();
+        }
+    }
+
+    /// <summary>The transaction that replaced a sent sweep, if the wallet knows of one; a failed lookup counts as none.</summary>
+    async Task<string?> ReplacementAsync(AwaitingDeposit awaiting, CancellationToken cancellationToken)
+    {
+        try
+        {
+            return await wallets.GetReplacementAsync(awaiting.Asset, awaiting.Txid, cancellationToken);
+        }
+        catch (Exception e) when (IsRecordedFailure(e, cancellationToken))
+        {
+            return null;
         }
     }
 

@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.1.5 (beta)
+
+- **Sweeps signal replace-by-fee** (BIP 125), so a sweep stuck below the going fee can be bumped from the wallet.
+- **Bumped sweeps are followed:** when a sent sweep the exchange hasn't seen was replaced (e.g. by a fee bump), its
+  deposit is looked for by the new transaction instead, so it isn't reported as uncredited after 24 hours.
+
 ## 0.1.4 (beta)
 
 - **Kraken rate limits:** waiting sweep deposits are looked up together, one request per coin each minute instead
