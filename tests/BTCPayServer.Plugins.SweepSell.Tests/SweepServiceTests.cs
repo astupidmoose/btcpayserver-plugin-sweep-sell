@@ -959,6 +959,28 @@ public class SweepServiceTests
     }
 
     [Fact]
+    public async Task FailedReplacementCheckNeverTimesTheDepositOut()
+    {
+        Configure();
+        Awaiting("BTC", "sweep-tx", TimeSpan.FromHours(1));
+        _wallets.ReplacementError = new HttpRequestException("explorer unreachable");
+        var service = Service();
+        await service.WatchDepositsAsync(Ct);
+        Assert.Empty(State.Activity); // before the limit, it is only tried again
+
+        _clock.Advance(SweepService.DepositWatchLimit);
+        await service.WatchDepositsAsync(Ct);
+        Assert.Single(State.Awaiting); // not known whether it was replaced: still watched
+        Assert.Empty(State.Stopped);
+        Assert.Contains("Could not check whether the 0.5 BTC sweep (sweep-tx) was replaced: explorer unreachable", State.Activity[0].Message);
+
+        _wallets.ReplacementError = null;
+        await service.WatchDepositsAsync(Ct);
+        Assert.Empty(State.Awaiting);
+        Assert.Contains("wasn't credited within 24 hours", State.Activity[0].Message);
+    }
+
+    [Fact]
     public async Task SweepTheExchangeHasSeenIsNotFollowedToAReplacement()
     {
         Configure();

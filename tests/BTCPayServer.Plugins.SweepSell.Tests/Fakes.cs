@@ -267,8 +267,10 @@ sealed class FakeWallets : IStoreWallets
     /// <summary>Replaced transaction to the one that replaced it, as the wallet would report it after following every bump.</summary>
     public Dictionary<string, string> Replacements { get; } = new();
 
+    public Exception? ReplacementError { get; set; }
+
     public Task<string?> GetReplacementAsync(string cryptoCode, string txid, CancellationToken cancellationToken) =>
-        Task.FromResult(Replacements.GetValueOrDefault(txid));
+        ReplacementError is not null ? throw ReplacementError : Task.FromResult(Replacements.GetValueOrDefault(txid));
 }
 
 /// <summary>Invoices kept in memory, by ID.</summary>
