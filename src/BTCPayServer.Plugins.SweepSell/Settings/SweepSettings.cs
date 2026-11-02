@@ -26,7 +26,7 @@ public class SweepSettings
     public int IntervalMinutes { get; set; } = 60;
 
     /// <summary>
-    /// Confirmation target for the network fee, in blocks. About half an hour by default (a medium priority fee): a sweep is
+    /// Confirmation target for the network fee, in the coin's own blocks. 3 by default: about half an hour for Bitcoin (a medium priority fee). A sweep is
     /// sold as soon as the exchange credits it.
     /// </summary>
     public int FeeTargetBlocks { get; set; } = 3;

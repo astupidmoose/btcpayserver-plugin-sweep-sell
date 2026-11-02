@@ -309,11 +309,8 @@ public class SweepService(ISweepSellRepository repository, SecretProtector prote
                     $"Sweeping now would send {Amount(sweep.Amounts.ToExchange)} {code} to {exchange.Name}, below its minimum deposit of {Amount(minimumDeposit)} {code}. Waiting for more.");
                 return;
             }
-            // The rate and target are shown so the fee can be compared with the network's estimates.
-            var what = Describe(code, sweep.Amounts.ToExchange, exchange.Name, deposit.Address, sweep.Amounts.ToCold, coldAddress, sweep.Amounts.Fee) +
-                       (sweep.FeeRate is { } rate
-                           ? $" ({Amount(rate)} sat/vB, aiming for {(feeTarget == 1 ? "the next block" : $"confirmation within {feeTarget} blocks")})"
-                           : "");
+            var what = Describe(code, sweep.Amounts.ToExchange, exchange.Name, deposit.Address, sweep.Amounts.ToCold, coldAddress, sweep.Amounts.Fee,
+                sweep.FeeRate, feeTarget);
             if (settings.Sweep.DryRun)
             {
                 Record(storeId, state, code, ActivityOutcome.DryRun, $"Dry run: would send {what}. The transaction was signed but not broadcast.");
@@ -352,6 +349,8 @@ public class SweepService(ISweepSellRepository repository, SecretProtector prote
                     ColdAddress = coldAddress,
                     ToCold = sweep.Amounts.ToCold,
                     Fee = sweep.Amounts.Fee,
+                    FeeRate = sweep.FeeRate,
+                    FeeTargetBlocks = feeTarget,
                     ColdDestination = coldIndex is null ? null : ColdKey(rule.ColdDestination!),
                     ColdIndex = coldIndex,
                     CreatedAt = now
@@ -398,7 +397,8 @@ public class SweepService(ISweepSellRepository repository, SecretProtector prote
     async Task<bool> SettlePendingAsync(string storeId, SweepState state, PendingSweep pending, CancellationToken cancellationToken)
     {
         var code = pending.CryptoCode;
-        var what = Describe(code, pending.ToExchange, pending.ExchangeId ?? "the exchange", pending.ExchangeAddress, pending.ToCold, pending.ColdAddress, pending.Fee);
+        var what = Describe(code, pending.ToExchange, pending.ExchangeId ?? "the exchange", pending.ExchangeAddress, pending.ToCold, pending.ColdAddress, pending.Fee,
+            pending.FeeRate, pending.FeeTargetBlocks);
         var status = await wallets.GetStatusAsync(code, pending.Txid, cancellationToken);
         if (status == TransactionStatus.Replaced)
         {
@@ -754,10 +754,15 @@ public class SweepService(ISweepSellRepository repository, SecretProtector prote
 
     static string ColdKey(string destination) => destination.Trim();
 
-    static string Describe(string code, decimal toExchange, string exchangeName, string exchangeAddress, decimal toCold, string? coldAddress, decimal fee) =>
+    static string Describe(string code, decimal toExchange, string exchangeName, string exchangeAddress, decimal toCold, string? coldAddress, decimal fee,
+        decimal? feeRate, int? feeTarget) =>
         $"{Amount(toExchange)} {code} to {exchangeName} ({exchangeAddress})" +
         (toCold > 0 ? $" and {Amount(toCold)} {code} to the cold wallet ({coldAddress})" : "") +
-        $", fee {Amount(fee)} {code}";
+        $", fee {Amount(fee)} {code}" +
+        // The rate and target are shown so the fee can be compared with the network's estimates.
+        (feeRate is { } rate && feeTarget is { } target
+            ? $" ({Amount(rate)} sat/vB, aiming for {(target == 1 ? "the next block" : $"confirmation within {target} blocks")})"
+            : "");
 
     void Record(string storeId, SweepState state, string? asset, ActivityOutcome outcome, string message)
     {

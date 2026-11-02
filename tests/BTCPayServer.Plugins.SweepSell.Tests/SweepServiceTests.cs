@@ -233,6 +233,8 @@ public class SweepServiceTests
         Assert.Equal([pending.Hex, pending.Hex], _wallets.Broadcasts);
         Assert.Empty(State.Pending);
         Assert.Equal(pending.Txid, Assert.Single(State.Awaiting).Txid);
+        // Sent by the rebroadcast, it still shows the rate and target it was signed with.
+        Assert.Contains("(2.5 sat/vB, aiming for confirmation within 3 blocks)", Assert.Single(State.Activity, a => a.Outcome == ActivityOutcome.Sent).Message);
     }
 
     [Fact]
@@ -251,6 +253,27 @@ public class SweepServiceTests
         Assert.Empty(State.Pending);
         Assert.Single(State.Awaiting);
         Assert.Equal(1m, State.Swept.On(_clock.GetUtcNow(), "BTC"));
+        Assert.Contains("(2.5 sat/vB, aiming for confirmation within 3 blocks)", Assert.Single(State.Activity, a => a.Outcome == ActivityOutcome.Sent).Message);
+    }
+
+    [Fact]
+    public async Task PendingSweepSavedBeforeFeeDetailsIsShownWithoutThem()
+    {
+        Configure();
+        _wallets.BroadcastResults.Enqueue(() => throw new HttpRequestException("timeout"));
+        var service = Service();
+        await service.RunAsync(_storeId, wait: false, Ct);
+        var pending = Assert.Single(State.Pending);
+        // Saved by an earlier version, which kept neither.
+        (pending.FeeRate, pending.FeeTargetBlocks) = (null, null);
+        _wallets.Statuses[pending.Txid] = TransactionStatus.Unconfirmed;
+        _wallets.Balances[$"{_storeId}:BTC"] = 0;
+
+        await service.RunAsync(_storeId, wait: false, Ct);
+        Assert.Empty(State.Pending);
+        var sent = Assert.Single(State.Activity, a => a.Outcome == ActivityOutcome.Sent).Message;
+        Assert.Contains("fee 0.0001 BTC", sent);
+        Assert.DoesNotContain("sat/vB", sent);
     }
 
     [Fact]

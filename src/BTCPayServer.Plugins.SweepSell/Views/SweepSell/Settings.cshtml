@@ -117,7 +117,8 @@
                 <label asp-for="SweepFeeTargetBlocks" class="form-label"></label>
                 <input asp-for="SweepFeeTargetBlocks" type="number" min="@SweepSettings.MinFeeTargetBlocks" max="@SweepSettings.MaxFeeTargetBlocks" class="form-control" />
                 <div class="form-text">
-                    1 is the next block (high priority), 3 about half an hour (medium), 6 about an hour (low). The rate comes from BTCPay's own fee
+                    Counted in each coin's own blocks. For Bitcoin, 1 is the next block (high priority), 3 about half an hour (medium) and
+                    6 about an hour (low); coins with faster blocks confirm sooner for the same number. The rate comes from BTCPay's own fee
                     estimate, the one its wallet uses, and each sweep's rate is shown in the activity below.
                 </div>
                 <span asp-validation-for="SweepFeeTargetBlocks" class="text-danger"></span>
