@@ -661,7 +661,18 @@ public class SweepService(ISweepSellRepository repository, SecretProtector prote
                         {
                             // Not known either way: never taken as "not replaced", so the deposit isn't given up on because of it.
                             // Shown when it starts failing, not every minute while it keeps failing.
-                            if (!awaiting.ReplacementCheckFailing)
+                            if (status?.State == DepositState.Failed && !state.Stopped.ContainsKey(awaiting.Asset.ToUpperInvariant()))
+                            {
+                                // The exchange may be returning it: sweeping stops at once, so returned funds aren't sent
+                                // straight back while it is unknown whether a replacement is on its way.
+                                awaiting.ReplacementCheckFailing = true;
+                                Stop(state, awaiting, now);
+                                Record(storeId, state, awaiting.Asset, ActivityOutcome.Failed,
+                                    $"{exchange!.Name} reports the {Amount(awaiting.Amount)} {awaiting.Asset} deposit ({awaiting.Txid}) as failed or being returned, " +
+                                    $"and the wallet couldn't say whether the sweep was replaced: {e.Message}. Sweeping {awaiting.Asset} is stopped so returned funds " +
+                                    $"aren't sent straight back; the deposit is still watched. Check it on {exchange.Name}, then resume {awaiting.Asset} under Stopped coins.");
+                            }
+                            else if (!awaiting.ReplacementCheckFailing)
                             {
                                 awaiting.ReplacementCheckFailing = true;
                                 Record(storeId, state, awaiting.Asset, ActivityOutcome.Failed,

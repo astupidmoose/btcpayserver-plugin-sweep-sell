@@ -1118,6 +1118,31 @@ public class SweepServiceTests
     }
 
     [Fact]
+    public async Task FailedDepositStopsTheCoinWhileTheReplacementCheckFails()
+    {
+        Configure();
+        Awaiting("BTC", "sweep-tx", TimeSpan.FromHours(1));
+        _exchange.Deposits["sweep-tx"] = new DepositStatus(DepositState.Failed, 0.5m);
+        _wallets.ReplacementError = new HttpRequestException("explorer unreachable");
+        var service = Service();
+        await service.WatchDepositsAsync(Ct);
+        Assert.True(State.Stopped.ContainsKey("BTC")); // no sweeping back what the exchange may be returning
+        Assert.Single(State.Awaiting); // still watched: it may have been replaced
+        Assert.Contains("couldn't say whether the sweep was replaced: explorer unreachable", Assert.Single(State.Activity).Message);
+
+        _clock.Advance(TimeSpan.FromMinutes(1));
+        await service.WatchDepositsAsync(Ct);
+        Assert.Single(State.Activity); // not again every minute
+
+        _wallets.ReplacementError = null;
+        _wallets.Replacements["sweep-tx"] = "bumped-tx";
+        _clock.Advance(TimeSpan.FromMinutes(1));
+        await service.WatchDepositsAsync(Ct);
+        Assert.Equal("bumped-tx", Assert.Single(State.Awaiting).Txid);
+        Assert.True(State.Stopped.ContainsKey("BTC")); // only the owner resumes it
+    }
+
+    [Fact]
     public async Task SweepTheExchangeCreditedIsNotFollowedToAReplacement()
     {
         Configure();
