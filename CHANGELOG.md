@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.1.5 (beta)
+
+- **Sweeps signal replace-by-fee** (BIP 125), so a sweep stuck below the going fee can be bumped from the wallet.
+- **Bumped sweeps are followed:** when a sent sweep the exchange hasn't credited (pending, failed or not seen) was replaced (e.g. by a fee bump), its
+  deposit is looked for by the new transaction instead, with a fresh 24-hour watch; a credit for any transaction it
+  replaced still counts, in case a miner confirms one anyway, and one the exchange reports failed stops sweeping the coin. The wallet is asked about replacements every 10 minutes per deposit, and
+  straight away when the exchange reports a deposit failed or its watch is ending. If the wallet can't say whether a
+  sweep was replaced, the activity shows it once and the deposit is never given up on while that check fails.
+
 ## 0.1.4 (beta)
 
 - **Kraken rate limits:** waiting sweep deposits are looked up together, one request per coin each minute instead

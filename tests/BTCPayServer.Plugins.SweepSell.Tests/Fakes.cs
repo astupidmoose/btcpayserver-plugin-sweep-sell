@@ -263,6 +263,24 @@ sealed class FakeWallets : IStoreWallets
 
     public Task<TransactionStatus> GetStatusAsync(string cryptoCode, string txid, CancellationToken cancellationToken) =>
         Task.FromResult(Statuses.GetValueOrDefault(txid, TransactionStatus.Unknown));
+
+    /// <summary>Replaced transaction to the one that replaced it, as the wallet would report it after following every bump.</summary>
+    public Dictionary<string, string> Replacements { get; } = new();
+
+    public Exception? ReplacementError { get; set; }
+
+    public int ReplacementChecks { get; private set; }
+
+    public Task<IReadOnlyList<string>> GetReplacementsAsync(string cryptoCode, string txid, CancellationToken cancellationToken)
+    {
+        ReplacementChecks++;
+        if (ReplacementError is not null)
+            throw ReplacementError;
+        var chain = new List<string>();
+        while (Replacements.TryGetValue(chain.LastOrDefault() ?? txid, out var next))
+            chain.Add(next);
+        return Task.FromResult<IReadOnlyList<string>>(chain);
+    }
 }
 
 /// <summary>Invoices kept in memory, by ID.</summary>

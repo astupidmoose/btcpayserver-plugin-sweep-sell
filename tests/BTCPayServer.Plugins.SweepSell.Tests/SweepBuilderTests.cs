@@ -33,6 +33,17 @@ public class SweepBuilderTests
         Assert.Equal(tx.GetHash().ToString(), sweep.Txid);
     }
 
+    [Theory]
+    [InlineData(null)]
+    [InlineData(0.3)]
+    public void EverySweepSignalsReplaceByFee(double? amount)
+    {
+        var sweep = SweepBuilder.Build(Network, [CoinOf(0.5m, 0), CoinOf(0.25m, 1)], (decimal?)amount, Address(), Address(), 10, Fee, Address());
+        var tx = Transaction.Parse(sweep.Hex, Network);
+        Assert.All(tx.Inputs, input => Assert.True(input.Sequence.IsRBF));
+        Assert.True(tx.RBF);
+    }
+
     [Fact]
     public void SplitsTheColdShareBeforeTheFee()
     {

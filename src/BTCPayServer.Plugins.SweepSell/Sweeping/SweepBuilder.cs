@@ -56,6 +56,8 @@ public static class SweepBuilder
         var toCold = cold is null || coldPercent == 0 ? Money.Zero : Money.Satoshis((long)Math.Floor(swept.Satoshi * coldPercent / 100m));
 
         var builder = network.CreateTransactionBuilder();
+        // Signals replace-by-fee (BIP 125), so a sweep stuck below the going fee can be bumped from the wallet.
+        builder.OptInRBF = true;
         if (minRelayFee is not null)
         {
             // Nodes now relay below 1 sat/vB, and BTCPay's fee estimate follows the node's own minimum; the final check
