@@ -1030,6 +1030,29 @@ public class SweepServiceTests
     }
 
     [Fact]
+    public async Task SweepTheExchangeShowsFailedIsFollowedToAReplacementInsteadOfStopping()
+    {
+        Configure();
+        Awaiting("BTC", "sweep-tx", TimeSpan.FromHours(1));
+        _wallets.Replacements["sweep-tx"] = "bumped-tx";
+        _exchange.Deposits["sweep-tx"] = new DepositStatus(DepositState.Failed, 0.5m);
+        await Service().WatchDepositsAsync(Ct);
+        Assert.Equal("bumped-tx", Assert.Single(State.Awaiting).Txid);
+        Assert.Empty(State.Stopped);
+    }
+
+    [Fact]
+    public async Task FailedDepositThatWasNotReplacedStopsTheCoin()
+    {
+        Configure();
+        Awaiting("BTC", "sweep-tx", TimeSpan.FromHours(1));
+        _exchange.Deposits["sweep-tx"] = new DepositStatus(DepositState.Failed, 0.5m);
+        await Service().WatchDepositsAsync(Ct);
+        Assert.Empty(State.Awaiting);
+        Assert.True(State.Stopped.ContainsKey("BTC"));
+    }
+
+    [Fact]
     public async Task SweepTheExchangeCreditedIsNotFollowedToAReplacement()
     {
         Configure();

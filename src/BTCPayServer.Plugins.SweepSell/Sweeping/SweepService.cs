@@ -632,8 +632,8 @@ public class SweepService(ISweepSellRepository repository, SecretProtector prote
                         continue;
                     var status = statuses.GetValueOrDefault(awaiting);
                     // Sweeps signal replace-by-fee: one bumped from the wallet reaches the exchange as another transaction. A deposit
-                    // the exchange only shows as pending may still be the replaced one, which will never confirm; only a credit settles it.
-                    if (status?.State is null or DepositState.Pending)
+                    // the exchange shows as pending or failed may be the replaced one while the new one is on its way; only a credit settles it.
+                    if (status?.State is not DepositState.Credited)
                     {
                         string? replacement;
                         try

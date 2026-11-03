@@ -3,7 +3,7 @@
 ## 0.1.5 (beta)
 
 - **Sweeps signal replace-by-fee** (BIP 125), so a sweep stuck below the going fee can be bumped from the wallet.
-- **Bumped sweeps are followed:** when a sent sweep the exchange hasn't credited was replaced (e.g. by a fee bump), its
+- **Bumped sweeps are followed:** when a sent sweep the exchange hasn't credited (pending, failed or not seen) was replaced (e.g. by a fee bump), its
   deposit is looked for by the new transaction instead, with a fresh 24-hour watch. If the wallet can't say whether a
   sweep was replaced, the activity shows it once and the deposit is never given up on while that check fails.
 
