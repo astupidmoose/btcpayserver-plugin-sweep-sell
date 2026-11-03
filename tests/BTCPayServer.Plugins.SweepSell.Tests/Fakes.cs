@@ -271,10 +271,15 @@ sealed class FakeWallets : IStoreWallets
 
     public int ReplacementChecks { get; private set; }
 
-    public Task<string?> GetReplacementAsync(string cryptoCode, string txid, CancellationToken cancellationToken)
+    public Task<IReadOnlyList<string>> GetReplacementsAsync(string cryptoCode, string txid, CancellationToken cancellationToken)
     {
         ReplacementChecks++;
-        return ReplacementError is not null ? throw ReplacementError : Task.FromResult(Replacements.GetValueOrDefault(txid));
+        if (ReplacementError is not null)
+            throw ReplacementError;
+        var chain = new List<string>();
+        while (Replacements.TryGetValue(chain.LastOrDefault() ?? txid, out var next))
+            chain.Add(next);
+        return Task.FromResult<IReadOnlyList<string>>(chain);
     }
 }
 

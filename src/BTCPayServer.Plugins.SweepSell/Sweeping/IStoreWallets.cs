@@ -63,8 +63,8 @@ public interface IStoreWallets
     Task<TransactionStatus> GetStatusAsync(string cryptoCode, string txid, CancellationToken cancellationToken);
 
     /// <summary>
-    /// The transaction that replaced <paramref name="txid"/> (e.g. a fee bump), following any later replacements to the
-    /// latest, or null when it wasn't replaced or the wallet doesn't know it.
+    /// The transactions that replaced <paramref name="txid"/> (e.g. fee bumps), in order, the latest last; empty when it
+    /// wasn't replaced or the wallet doesn't know it.
     /// </summary>
-    Task<string?> GetReplacementAsync(string cryptoCode, string txid, CancellationToken cancellationToken);
+    Task<IReadOnlyList<string>> GetReplacementsAsync(string cryptoCode, string txid, CancellationToken cancellationToken);
 }

@@ -151,18 +151,20 @@ public class BtcPayStoreWallets(StoreRepository stores, PaymentMethodHandlerDict
     /// <summary>Most replacements followed, so a chain of bumps can't make a lookup run forever.</summary>
     const int MaxReplacements = 25;
 
-    public async Task<string?> GetReplacementAsync(string cryptoCode, string txid, CancellationToken cancellationToken)
+    public async Task<IReadOnlyList<string>> GetReplacementsAsync(string cryptoCode, string txid, CancellationToken cancellationToken)
     {
         var explorer = explorers.GetExplorerClient(Network(cryptoCode));
         var current = uint256.Parse(txid);
+        var chain = new List<string>();
         for (var i = 0; i < MaxReplacements; i++)
         {
             var tx = await explorer.GetTransactionAsync(current, cancellationToken);
-            if (tx?.ReplacedBy is not { } next)
+            if (tx?.ReplacedBy is not { } next || chain.Contains(next.ToString()) || next.ToString() == txid)
                 break;
             current = next;
+            chain.Add(next.ToString());
         }
-        return current.ToString() == txid ? null : current.ToString();
+        return chain;
     }
 
     BTCPayNetwork Network(string cryptoCode) =>

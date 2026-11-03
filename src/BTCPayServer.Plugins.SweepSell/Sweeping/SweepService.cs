@@ -584,7 +584,7 @@ public class SweepService(ISweepSellRepository repository, SecretProtector prote
                 var credentials = protector.Credentials(settings);
                 var now = clock.GetUtcNow();
                 // Each coin's deposits are looked up together, in one go, so a long list doesn't cost a request each.
-                var statuses = new Dictionary<AwaitingDeposit, (DepositStatus? Status, string Txid)>();
+                var statuses = new Dictionary<AwaitingDeposit, (DepositStatus? Status, string Txid, string? FailedReplaced)>();
                 var skipped = new HashSet<AwaitingDeposit>();
                 var groups = exchange is null || credentials is null
                     ? []
@@ -609,9 +609,11 @@ public class SweepService(ISweepSellRepository repository, SecretProtector prote
                             // A replaced transaction a miner confirmed anyway is credited like the latest one.
                             var credited = deposit.ReplacedTxids.Prepend(deposit.Txid)
                                 .FirstOrDefault(t => found.GetValueOrDefault(t)?.State == DepositState.Credited);
+                            // One a miner confirmed and the exchange is returning stops the coin like the latest would.
+                            var failedReplaced = deposit.ReplacedTxids.FirstOrDefault(t => found.GetValueOrDefault(t)?.State == DepositState.Failed);
                             statuses[deposit] = credited is not null
-                                ? (found[credited], credited)
-                                : (found.GetValueOrDefault(deposit.Txid), deposit.Txid);
+                                ? (found[credited], credited, null)
+                                : (found.GetValueOrDefault(deposit.Txid), deposit.Txid, failedReplaced);
                         }
                     }
                     catch (Exception e) when (IsRecordedFailure(e, cancellationToken))
@@ -640,11 +642,26 @@ public class SweepService(ISweepSellRepository repository, SecretProtector prote
                     Record(storeId, state, null, ActivityOutcome.Failed,
                         $"{exchange!.Name} is limiting requests ({limited}), so {notChecked}. Trying again in a minute.");
                 }
+                // A replaced transaction the exchange reports failed may be one a miner confirmed anyway and the exchange is
+                // returning: sweeping stops so it isn't sent straight back, and the latest transaction is still watched.
+                void StopForReplaced(AwaitingDeposit awaiting, string txid)
+                {
+                    var code = awaiting.Asset.ToUpperInvariant();
+                    if (state.Stopped.ContainsKey(code))
+                        return;
+                    state.Stopped[code] = new StoppedSweep { Txid = txid, At = now };
+                    Record(storeId, state, awaiting.Asset, ActivityOutcome.Failed,
+                        $"{exchange!.Name} reports {txid}, replaced by a later transaction of the {Amount(awaiting.Amount)} {awaiting.Asset} sweep, as failed or being returned. " +
+                        $"Sweeping {awaiting.Asset} is stopped so returned funds aren't sent straight back; the sweep's deposit is still watched. " +
+                        $"Check it on {exchange.Name}, then resume {awaiting.Asset} under Stopped coins.");
+                }
                 foreach (var awaiting in state.Awaiting.ToList())
                 {
                     if (skipped.Contains(awaiting))
                         continue;
-                    var (status, statusTxid) = statuses.GetValueOrDefault(awaiting);
+                    var (status, statusTxid, failedReplaced) = statuses.GetValueOrDefault(awaiting);
+                    if (failedReplaced is not null)
+                        StopForReplaced(awaiting, failedReplaced);
                     // Sweeps signal replace-by-fee: one bumped from the wallet reaches the exchange as another transaction. A deposit
                     // the exchange shows as pending or failed may be the replaced one while the new one is on its way; only a credit settles it.
                     // Checked every few minutes, not every minute for every deposit; always before a failure stops the coin or the watch ends.
@@ -652,10 +669,10 @@ public class SweepService(ISweepSellRepository repository, SecretProtector prote
                         (status?.State == DepositState.Failed || now - awaiting.SentAt >= DepositWatchLimit ||
                          awaiting.ReplacementCheckedAt is not { } checkedAt || now - checkedAt >= ReplacementCheckInterval))
                     {
-                        string? replacement;
+                        IReadOnlyList<string> replacements;
                         try
                         {
-                            replacement = await wallets.GetReplacementAsync(awaiting.Asset, awaiting.Txid, cancellationToken);
+                            replacements = await wallets.GetReplacementsAsync(awaiting.Asset, awaiting.Txid, cancellationToken);
                         }
                         catch (Exception e) when (IsRecordedFailure(e, cancellationToken))
                         {
@@ -683,15 +700,19 @@ public class SweepService(ISweepSellRepository repository, SecretProtector prote
                         }
                         awaiting.ReplacementCheckFailing = false;
                         awaiting.ReplacementCheckedAt = now;
-                        if (replacement is not null)
+                        if (replacements.Count > 0)
                         {
+                            var replacement = replacements[^1];
                             Record(storeId, state, awaiting.Asset, ActivityOutcome.Changed,
                                 $"The {Amount(awaiting.Amount)} {awaiting.Asset} sweep ({awaiting.Txid}) was replaced by {replacement}, for example by a fee bump. " +
                                 $"Its deposit is now looked for by the new transaction, for another {DepositWatchLimit.TotalHours:0} hours.");
-                            // The replaced one is still looked for too, in case a miner confirms it anyway.
+                            if (status?.State == DepositState.Failed)
+                                StopForReplaced(awaiting, awaiting.Txid);
+                            // Every replaced one is still looked for too, in case a miner confirms it anyway.
                             awaiting.ReplacedTxids.Add(awaiting.Txid);
+                            awaiting.ReplacedTxids.AddRange(replacements.Take(replacements.Count - 1));
                             if (awaiting.ReplacedTxids.Count > MaxReplacedTxids)
-                                awaiting.ReplacedTxids.RemoveAt(0);
+                                awaiting.ReplacedTxids.RemoveRange(0, awaiting.ReplacedTxids.Count - MaxReplacedTxids);
                             awaiting.Txid = replacement;
                             // The new transaction gets a full watch; the exchange is still searched from when the first was signed.
                             awaiting.SignedAt ??= awaiting.SentAt;
