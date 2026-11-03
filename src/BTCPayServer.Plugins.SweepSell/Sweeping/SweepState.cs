@@ -97,6 +97,9 @@ public class AwaitingDeposit
 
     /// <summary>When the sweep was signed, before it was broadcast: the exchange's deposits are searched from then.</summary>
     public DateTimeOffset? SignedAt { get; set; }
+
+    /// <summary>The wallet couldn't say whether the sweep was replaced; recorded once when it starts failing.</summary>
+    public bool ReplacementCheckFailing { get; set; }
 }
 
 public class StoppedSweep

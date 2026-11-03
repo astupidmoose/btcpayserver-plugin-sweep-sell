@@ -943,12 +943,23 @@ public class SweepServiceTests
     {
         Configure();
         Awaiting("BTC", "sweep-tx", TimeSpan.FromHours(23));
+        var signedAt = State.Awaiting[0].SignedAt;
         _wallets.Replacements["sweep-tx"] = "bumped-tx";
         var service = Service();
         await service.WatchDepositsAsync(Ct);
-        Assert.Equal("bumped-tx", Assert.Single(State.Awaiting).Txid);
+        var awaiting = Assert.Single(State.Awaiting);
+        Assert.Equal("bumped-tx", awaiting.Txid);
         Assert.Equal(ActivityOutcome.Changed, State.Activity[0].Outcome);
         Assert.Contains("(sweep-tx) was replaced by bumped-tx", State.Activity[0].Message);
+        // The new transaction gets a full watch, searched for from when the first was signed.
+        Assert.Equal(_clock.GetUtcNow(), awaiting.SentAt);
+        Assert.Equal(signedAt, awaiting.SignedAt);
+
+        _clock.Advance(TimeSpan.FromHours(23));
+        await service.WatchDepositsAsync(Ct);
+        Assert.Single(State.Awaiting); // past 24 hours since the first was sent, but not since it was replaced
+        Assert.Empty(State.Stopped);
+        Assert.Equal(signedAt, _exchange.DepositSearchesSince[^1]);
 
         _exchange.Deposits["bumped-tx"] = new DepositStatus(DepositState.Credited, 0.4999m);
         _clock.Advance(TimeSpan.FromMinutes(1));
@@ -959,20 +970,27 @@ public class SweepServiceTests
     }
 
     [Fact]
-    public async Task FailedReplacementCheckNeverTimesTheDepositOut()
+    public async Task FailedReplacementCheckIsShownOnceAndNeverTimesTheDepositOut()
     {
         Configure();
         Awaiting("BTC", "sweep-tx", TimeSpan.FromHours(1));
         _wallets.ReplacementError = new HttpRequestException("explorer unreachable");
         var service = Service();
         await service.WatchDepositsAsync(Ct);
-        Assert.Empty(State.Activity); // before the limit, it is only tried again
+        var entry = Assert.Single(State.Activity); // shown as soon as it fails
+        Assert.Equal(ActivityOutcome.Failed, entry.Outcome);
+        Assert.Contains("Could not check whether the 0.5 BTC sweep (sweep-tx) was replaced: explorer unreachable", entry.Message);
+
+        var firstAt = entry.At;
+        _clock.Advance(TimeSpan.FromMinutes(1));
+        await service.WatchDepositsAsync(Ct);
+        Assert.Equal(firstAt, Assert.Single(State.Activity).At); // not again every minute while it keeps failing
 
         _clock.Advance(SweepService.DepositWatchLimit);
         await service.WatchDepositsAsync(Ct);
         Assert.Single(State.Awaiting); // not known whether it was replaced: still watched
         Assert.Empty(State.Stopped);
-        Assert.Contains("Could not check whether the 0.5 BTC sweep (sweep-tx) was replaced: explorer unreachable", State.Activity[0].Message);
+        Assert.Single(State.Activity);
 
         _wallets.ReplacementError = null;
         await service.WatchDepositsAsync(Ct);
@@ -981,14 +999,46 @@ public class SweepServiceTests
     }
 
     [Fact]
-    public async Task SweepTheExchangeHasSeenIsNotFollowedToAReplacement()
+    public async Task ReplacementCheckFailingAgainIsShownAgain()
+    {
+        Configure();
+        Awaiting("BTC", "sweep-tx", TimeSpan.FromHours(1));
+        _wallets.ReplacementError = new HttpRequestException("explorer unreachable");
+        var service = Service();
+        await service.WatchDepositsAsync(Ct);
+        _wallets.ReplacementError = null;
+        _clock.Advance(TimeSpan.FromMinutes(1));
+        await service.WatchDepositsAsync(Ct);
+        Assert.False(Assert.Single(State.Awaiting).ReplacementCheckFailing);
+        _wallets.ReplacementError = new HttpRequestException("explorer unreachable");
+        _clock.Advance(TimeSpan.FromMinutes(1));
+        await service.WatchDepositsAsync(Ct);
+        // Shown again (a repeat of the latest entry replaces it with the new time).
+        Assert.StartsWith("Could not check whether", State.Activity[0].Message);
+        Assert.Equal(_clock.GetUtcNow(), State.Activity[0].At);
+    }
+
+    [Fact]
+    public async Task SweepTheExchangeShowsPendingIsFollowedToAReplacement()
     {
         Configure();
         Awaiting("BTC", "sweep-tx", TimeSpan.FromHours(1));
         _wallets.Replacements["sweep-tx"] = "bumped-tx";
         _exchange.Deposits["sweep-tx"] = new DepositStatus(DepositState.Pending, 0.5m);
         await Service().WatchDepositsAsync(Ct);
-        Assert.Equal("sweep-tx", Assert.Single(State.Awaiting).Txid);
+        Assert.Equal("bumped-tx", Assert.Single(State.Awaiting).Txid); // the replaced one will never confirm
+    }
+
+    [Fact]
+    public async Task SweepTheExchangeCreditedIsNotFollowedToAReplacement()
+    {
+        Configure();
+        Awaiting("BTC", "sweep-tx", TimeSpan.FromHours(1));
+        _wallets.Replacements["sweep-tx"] = "bumped-tx";
+        _exchange.Deposits["sweep-tx"] = new DepositStatus(DepositState.Credited, 0.5m);
+        await Service().WatchDepositsAsync(Ct);
+        Assert.Empty(State.Awaiting);
+        Assert.Contains("credited 0.5 BTC from the sweep (sweep-tx)", State.Activity[0].Message);
     }
 
     [Fact]

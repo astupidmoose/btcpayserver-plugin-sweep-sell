@@ -631,8 +631,9 @@ public class SweepService(ISweepSellRepository repository, SecretProtector prote
                     if (skipped.Contains(awaiting))
                         continue;
                     var status = statuses.GetValueOrDefault(awaiting);
-                    // Sweeps signal replace-by-fee: one bumped from the wallet reaches the exchange as another transaction.
-                    if (status is null)
+                    // Sweeps signal replace-by-fee: one bumped from the wallet reaches the exchange as another transaction. A deposit
+                    // the exchange only shows as pending may still be the replaced one, which will never confirm; only a credit settles it.
+                    if (status?.State is null or DepositState.Pending)
                     {
                         string? replacement;
                         try
@@ -642,17 +643,26 @@ public class SweepService(ISweepSellRepository repository, SecretProtector prote
                         catch (Exception e) when (IsRecordedFailure(e, cancellationToken))
                         {
                             // Not known either way: never taken as "not replaced", so the deposit isn't given up on because of it.
-                            if (now - awaiting.SentAt >= DepositWatchLimit)
+                            // Shown when it starts failing, not every minute while it keeps failing.
+                            if (!awaiting.ReplacementCheckFailing)
+                            {
+                                awaiting.ReplacementCheckFailing = true;
                                 Record(storeId, state, awaiting.Asset, ActivityOutcome.Failed,
-                                    $"Could not check whether the {Amount(awaiting.Amount)} {awaiting.Asset} sweep ({awaiting.Txid}) was replaced: {e.Message}. Trying again in a minute.");
+                                    $"Could not check whether the {Amount(awaiting.Amount)} {awaiting.Asset} sweep ({awaiting.Txid}) was replaced: {e.Message}. " +
+                                    "Its deposit is still watched, and isn't given up on while this check fails. Trying again every minute.");
+                            }
                             continue;
                         }
+                        awaiting.ReplacementCheckFailing = false;
                         if (replacement is not null)
                         {
                             Record(storeId, state, awaiting.Asset, ActivityOutcome.Changed,
                                 $"The {Amount(awaiting.Amount)} {awaiting.Asset} sweep ({awaiting.Txid}) was replaced by {replacement}, for example by a fee bump. " +
-                                "Its deposit is now looked for by the new transaction.");
+                                $"Its deposit is now looked for by the new transaction, for another {DepositWatchLimit.TotalHours:0} hours.");
                             awaiting.Txid = replacement;
+                            // The new transaction gets a full watch; the exchange is still searched from when the first was signed.
+                            awaiting.SignedAt ??= awaiting.SentAt;
+                            awaiting.SentAt = now;
                             continue;
                         }
                     }
