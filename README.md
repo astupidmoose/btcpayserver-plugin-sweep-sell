@@ -13,7 +13,7 @@ Sweep your store's wallets to your exchange and sell what comes in, automaticall
   your cold wallet: a fixed address, or an extended public key that gives a new address for every sweep.
   Confirmed coins only unless you opt in, an optional daily cap per coin, and the exchange's minimum
   deposit is respected. Sweeps signal replace-by-fee, so one stuck below the going fee can be bumped from
-  the wallet; the bumped transaction's deposit is then followed instead. Once the exchange credits the
+  the wallet; the bumped transaction's deposit is then followed too. Once the exchange credits the
   deposit, conversion runs straight away. Starts in
   dry run, where each sweep is signed but not broadcast. Only hot wallets (key on the server) can be swept, and changing sweeps needs permission to sign and
   broadcast wallet transactions in the store.

@@ -98,6 +98,15 @@ public class AwaitingDeposit
     /// <summary>When the sweep was signed, before it was broadcast: the exchange's deposits are searched from then.</summary>
     public DateTimeOffset? SignedAt { get; set; }
 
+    /// <summary>
+    /// Transactions this sweep replaced (oldest first), e.g. before a fee bump. Replacing is only mempool policy, so a
+    /// miner may still confirm one of them: a credit for any of them settles the deposit.
+    /// </summary>
+    public List<string> ReplacedTxids { get; set; } = [];
+
+    /// <summary>When the wallet last said whether <see cref="Txid"/> was replaced.</summary>
+    public DateTimeOffset? ReplacementCheckedAt { get; set; }
+
     /// <summary>The wallet couldn't say whether the sweep was replaced; recorded once when it starts failing.</summary>
     public bool ReplacementCheckFailing { get; set; }
 }

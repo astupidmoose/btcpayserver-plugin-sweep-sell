@@ -269,8 +269,13 @@ sealed class FakeWallets : IStoreWallets
 
     public Exception? ReplacementError { get; set; }
 
-    public Task<string?> GetReplacementAsync(string cryptoCode, string txid, CancellationToken cancellationToken) =>
-        ReplacementError is not null ? throw ReplacementError : Task.FromResult(Replacements.GetValueOrDefault(txid));
+    public int ReplacementChecks { get; private set; }
+
+    public Task<string?> GetReplacementAsync(string cryptoCode, string txid, CancellationToken cancellationToken)
+    {
+        ReplacementChecks++;
+        return ReplacementError is not null ? throw ReplacementError : Task.FromResult(Replacements.GetValueOrDefault(txid));
+    }
 }
 
 /// <summary>Invoices kept in memory, by ID.</summary>
