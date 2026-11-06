@@ -328,6 +328,18 @@ public class PayoutService(IPayoutRepository payouts, ISweepSellRepository repos
                     "another account, or clear the reserve here. Nothing was withdrawn.");
                 return;
             }
+            // Another store's convert or hedging selling the reserve takes its own store's lock, not this one, so a sale
+            // could land between the reserve read below and the withdrawal. Which account its key is for isn't known (one
+            // store's run never uses another's keys), so any such store on the exchange counts.
+            if (payout.HasReserve && await OtherStoreSellsAsync(storeId, payout.ReserveAsset, connector) is { } seller)
+            {
+                Record(storeId, state, asset, ActivityOutcome.Failed,
+                    $"Another store on this server sells {payout.ReserveAsset} on {connector.Name} ({seller}), and {payout.ReserveAsset} is the reserve this " +
+                    $"payout waits on: a sale could take the reserve below {Amount(payout.ReserveMinimum)} while this withdrawal is sent. Which account " +
+                    $"that store's key is for isn't checked, since one store never uses another's keys. Stop selling {payout.ReserveAsset} in that store, " +
+                    "or clear the reserve here. Nothing was withdrawn.");
+                return;
+            }
             // The reserve too: it may have been moved or spent since it was read.
             if (!await ReserveHeldAsync(storeId, state, asset, payout, connector, credentials, account, " Nothing was withdrawn.", cancellationToken))
                 return;
@@ -667,6 +679,23 @@ public class PayoutService(IPayoutRepository payouts, ISweepSellRepository repos
                 continue;
             if (SameAccount(otherState, otherKey, credentials, account))
                 return $"pays out {asset} live from";
+        }
+        return null;
+    }
+
+    /// <summary>What of another store sells <paramref name="asset"/> live on the exchange ("convert" or "hedging"), or null when none does.</summary>
+    async Task<string?> OtherStoreSellsAsync(string storeId, string asset, IWithdrawalConnector connector)
+    {
+        var key = connector.AssetKey(asset);
+        bool Same(string? other) => other is not null && connector.AssetKey(other) == key;
+        foreach (var (otherId, other) in await repository.GetAllAsync())
+        {
+            if (otherId == storeId || other.ExchangeId != connector.Id)
+                continue;
+            if (other.Convert is { Enabled: true, DryRun: false } && other.Convert.Assets.Any(Same))
+                return "convert";
+            if (other.Hedge is { Enabled: true, DryRun: false } && Same(Hedging.HedgeService.Asset))
+                return "hedging";
         }
         return null;
     }
