@@ -247,6 +247,19 @@ sealed class FakeWallets : IStoreWallets
             raised ? request.MinimumFeeRate : FeeRate, raised ? FeeRate : null);
     }
 
+    public List<(string Txid, decimal ToExchange, decimal FeeRate)> Replacing { get; } = [];
+    public Exception? ReplaceError { get; set; }
+
+    public Task<SignedSweep> BuildReplacementAsync(StoreWallet wallet, string txid, decimal toExchange, decimal feeRate, CancellationToken cancellationToken)
+    {
+        Replacing.Add((txid, toExchange, feeRate));
+        if (ReplaceError is not null)
+            throw ReplaceError;
+        const decimal extra = 0.0002m;
+        var newTxid = "bumped-" + txid;
+        return Task.FromResult(new SignedSweep(newTxid, "signed-" + newTxid, new SweepAmounts(toExchange - extra, 0, Fee + extra, 0), 0, feeRate));
+    }
+
     public Task<BroadcastOutcome> BroadcastAsync(string cryptoCode, string hex, CancellationToken cancellationToken)
     {
         Func<BroadcastOutcome>? next;

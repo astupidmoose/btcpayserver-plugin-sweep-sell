@@ -819,6 +819,71 @@ public class SweepService(ISweepSellRepository repository, SecretProtector prote
         }
     }
 
+    /// <summary>
+    /// The owner raises the fee of a sent sweep that is stuck unconfirmed: it is replaced (BIP 125) by the same transaction at
+    /// <paramref name="feeRate"/> (smallest unit per vB), the extra fee coming out of what the exchange gets, and its deposit is
+    /// then watched by the new transaction. Returns what happened, for the page.
+    /// </summary>
+    public async Task<(bool Done, string Message)> BumpFeeAsync(string storeId, string txid, decimal feeRate, CancellationToken cancellationToken)
+    {
+        if (feeRate is <= 0 or > SweepSettings.MaxMinimumFeeRate)
+            return (false, $"Enter a fee rate above 0 and up to {Amount(SweepSettings.MaxMinimumFeeRate)} per vB.");
+        var storeLock = StoreLock(storeId);
+        await storeLock.WaitAsync(cancellationToken);
+        try
+        {
+            var state = await repository.GetSweepStateAsync(storeId);
+            var awaiting = state.Awaiting.FirstOrDefault(a => string.Equals(a.Txid, txid, StringComparison.OrdinalIgnoreCase));
+            if (awaiting is null)
+                return (false, "That sweep isn't waiting for the exchange any more.");
+            var code = awaiting.Asset.ToUpperInvariant();
+            var wallet = await wallets.GetWalletAsync(storeId, code, cancellationToken);
+            if (wallet is null)
+                return (false, $"The store has no {code} wallet any more.");
+            SignedSweep replacement;
+            try
+            {
+                replacement = await wallets.BuildReplacementAsync(wallet, awaiting.Txid, awaiting.Amount, feeRate, cancellationToken);
+            }
+            catch (SweepException e)
+            {
+                return (false, $"The fee wasn't bumped: {e.Message}");
+            }
+            BroadcastOutcome outcome;
+            try
+            {
+                outcome = await wallets.BroadcastAsync(code, replacement.Hex, cancellationToken);
+            }
+            catch (Exception e) when (IsRecordedFailure(e, cancellationToken))
+            {
+                // Not known whether it went out; the deposit watch follows it if it did.
+                return (false, $"The replacement may not have been sent ({e.Message}). If it was, the deposit is followed to it within minutes.");
+            }
+            if (!outcome.Accepted)
+                return (false, $"The node refused the replacement: {outcome.Error}");
+            var now = clock.GetUtcNow();
+            Record(storeId, state, code, ActivityOutcome.Changed,
+                $"Fee bumped by hand: the {Amount(awaiting.Amount)} {code} sweep ({awaiting.Txid}) was replaced by {replacement.Txid} at " +
+                $"{Amount(replacement.FeeRate ?? feeRate)} {RateUnit(code)}, fee {Amount(replacement.Amounts.Fee)} {code}. " +
+                $"{Amount(replacement.Amounts.ToExchange)} {code} now goes to the exchange; the other outputs are unchanged.");
+            awaiting.ReplacedTxids.Add(awaiting.Txid);
+            if (awaiting.ReplacedTxids.Count > MaxReplacedTxids)
+                awaiting.ReplacedTxids.RemoveRange(0, awaiting.ReplacedTxids.Count - MaxReplacedTxids);
+            awaiting.Txid = replacement.Txid;
+            awaiting.Amount = replacement.Amounts.ToExchange;
+            awaiting.SignedAt ??= awaiting.SentAt;
+            awaiting.SentAt = now;
+            awaiting.ReplacementCheckedAt = now;
+            awaiting.ReplacementCheckFailing = false;
+            await repository.SaveSweepStateAsync(storeId, state);
+            return (true, $"Fee bumped. The sweep is now {replacement.Txid}, at {Amount(replacement.FeeRate ?? feeRate)} {RateUnit(code)}.");
+        }
+        finally
+        {
+            storeLock.Release();
+        }
+    }
+
     /// <summary>The owner resumes sweeping a coin stopped by a failed deposit. False when it isn't stopped.</summary>
     public async Task<bool> ResumeCoinAsync(string storeId, string cryptoCode, CancellationToken cancellationToken)
     {

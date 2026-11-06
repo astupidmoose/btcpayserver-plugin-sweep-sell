@@ -1261,6 +1261,68 @@ public class SweepServiceTests
     }
 
     [Fact]
+    public async Task BumpedFeeReplacesTheSweepAndItsDepositIsFollowed()
+    {
+        Configure();
+        Awaiting("BTC", "sweep-tx", TimeSpan.FromHours(20));
+        var signedAt = State.Awaiting[0].SignedAt;
+        var service = Service();
+        var (done, message) = await service.BumpFeeAsync(_storeId, "sweep-tx", 3, Ct);
+        Assert.True(done, message);
+        Assert.Equal(("sweep-tx", 0.5m, 3m), Assert.Single(_wallets.Replacing));
+        Assert.Contains("signed-bumped-sweep-tx", _wallets.Broadcasts);
+        var awaiting = Assert.Single(State.Awaiting);
+        Assert.Equal(("bumped-sweep-tx", 0.4998m), (awaiting.Txid, awaiting.Amount));
+        Assert.Equal(["sweep-tx"], awaiting.ReplacedTxids);
+        Assert.Equal(_clock.GetUtcNow(), awaiting.SentAt); // a full watch for the new one
+        Assert.Equal(signedAt, awaiting.SignedAt);
+        Assert.StartsWith("Fee bumped by hand", State.Activity[0].Message);
+
+        _exchange.Deposits["bumped-sweep-tx"] = new DepositStatus(DepositState.Credited, 0.4998m);
+        _clock.Advance(TimeSpan.FromMinutes(1));
+        await service.WatchDepositsAsync(Ct);
+        Assert.Empty(State.Awaiting);
+        Assert.Empty(State.Stopped);
+    }
+
+    [Fact]
+    public async Task RefusedReplacementLeavesTheSweepAsItWas()
+    {
+        Configure();
+        Awaiting("BTC", "sweep-tx", TimeSpan.FromHours(1));
+        _wallets.BroadcastResults.Enqueue(() => new BroadcastOutcome(false, "insufficient fee"));
+        var (done, message) = await Service().BumpFeeAsync(_storeId, "sweep-tx", 3, Ct);
+        Assert.False(done);
+        Assert.Contains("insufficient fee", message);
+        Assert.Equal("sweep-tx", Assert.Single(State.Awaiting).Txid);
+    }
+
+    [Fact]
+    public async Task ReplacementThatCantBeBuiltSaysWhy()
+    {
+        Configure();
+        Awaiting("BTC", "sweep-tx", TimeSpan.FromHours(1));
+        _wallets.ReplaceError = new SweepException("The sweep sweep-tx is already confirmed.");
+        var (done, message) = await Service().BumpFeeAsync(_storeId, "sweep-tx", 3, Ct);
+        Assert.False(done);
+        Assert.Equal("The fee wasn't bumped: The sweep sweep-tx is already confirmed.", message);
+        Assert.Empty(_wallets.Broadcasts);
+    }
+
+    [Theory]
+    [InlineData("sweep-tx", 0)]
+    [InlineData("sweep-tx", 2001)]
+    [InlineData("other-tx", 3)]
+    public async Task BumpNeedsAWaitingSweepAndASensibleRate(string txid, double rate)
+    {
+        Configure();
+        Awaiting("BTC", "sweep-tx", TimeSpan.FromHours(1));
+        var (done, _) = await Service().BumpFeeAsync(_storeId, txid, (decimal)rate, Ct);
+        Assert.False(done);
+        Assert.Empty(_wallets.Replacing);
+    }
+
+    [Fact]
     public async Task SweepTheExchangeCreditedIsNotFollowedToAReplacement()
     {
         Configure();

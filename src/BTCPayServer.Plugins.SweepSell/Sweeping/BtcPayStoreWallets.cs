@@ -128,6 +128,31 @@ public class BtcPayStoreWallets(StoreRepository stores, PaymentMethodHandlerDict
         return raised ? sweep with { EstimatedFeeRate = Math.Round(estimate.SatoshiPerByte, 2) } : sweep;
     }
 
+    public async Task<SignedSweep> BuildReplacementAsync(StoreWallet wallet, string txid, decimal toExchange, decimal feeRate,
+        CancellationToken cancellationToken)
+    {
+        if (!wallet.IsHot)
+            throw new SweepException($"The {wallet.CryptoCode} wallet isn't a hot wallet, so this server can't sign a replacement.");
+        var (network, derivation) = Wallet(wallet);
+        var explorer = explorers.GetExplorerClient(network);
+        var info = await explorer.GetTransactionAsync(derivation, uint256.Parse(txid), cancellationToken)
+                   ?? throw new SweepException($"The {wallet.CryptoCode} wallet doesn't know the sweep {txid}.");
+        if (info.Confirmations > 0)
+            throw new SweepException($"The sweep {txid} is already confirmed.");
+        if (info.ReplacedBy is { } replacedBy)
+            throw new SweepException($"The sweep {txid} was already replaced by {replacedBy}.");
+        var tx = info.Transaction ?? throw new SweepException($"The {wallet.CryptoCode} wallet doesn't have the sweep {txid} itself.");
+        var accountKey = await explorer.GetMetadataAsync<string>(derivation, WellknownMetadataKeys.AccountHDKey, cancellationToken)
+                         ?? throw new SweepException($"The {wallet.CryptoCode} hot wallet's private key isn't on this server.");
+        var key = ExtKey.Parse(accountKey, network.NBitcoinNetwork);
+        var coins = info.Inputs
+            .Where(i => i.InputIndex >= 0 && i.InputIndex < tx.Inputs.Count && i.KeyPath is not null)
+            .Select(i => ((ICoin)new Coin(tx.Inputs[i.InputIndex].PrevOut, new TxOut((Money)i.Value, i.ScriptPubKey)), key.Derive(i.KeyPath).PrivateKey))
+            .ToList();
+        var minRelayFee = dashboard.Get(network.CryptoCode)?.Status?.BitcoinStatus?.MinRelayTxFee;
+        return SweepBuilder.Replace(network.NBitcoinNetwork, tx, coins, toExchange, new FeeRate(feeRate), minRelayFee);
+    }
+
     /// <summary>
     /// The estimate, or <paramref name="minimum"/> (smallest unit per vB; 0 for none) when that is higher: BTCPay falls back
     /// to the node's own estimate when it has no other, which can be far below the going rate.

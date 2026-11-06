@@ -122,4 +122,75 @@ public class SweepBuilderTests
         var address = Address();
         Assert.Throws<SweepException>(() => SweepBuilder.Build(Network, [CoinOf(1m, 0)], null, address, address, 10, Fee, null));
     }
+
+    [Fact]
+    public void ReplacementPaysTheHigherFeeFromTheExchangeOutputOnly()
+    {
+        var coins = new[] { CoinOf(0.5m, 0), CoinOf(0.25m, 1) };
+        var (exchange, cold) = (Address(), Address());
+        // Sent at 0.11 sat/vB, which a node relaying down to 0.1 accepts.
+        var nodeMinimum = new FeeRate(Money.Satoshis(100), 1000);
+        var sweep = SweepBuilder.Build(Network, coins, null, exchange, cold, 20, new FeeRate(Money.Satoshis(110), 1000), null, nodeMinimum);
+        var original = Transaction.Parse(sweep.Hex, Network);
+
+        var bumped = SweepBuilder.Replace(Network, original, coins, sweep.Amounts.ToExchange, new FeeRate(3m), nodeMinimum);
+        var tx = Transaction.Parse(bumped.Hex, Network);
+        Assert.NotEqual(sweep.Txid, bumped.Txid);
+        Assert.Equal(original.Inputs.Select(i => i.PrevOut), tx.Inputs.Select(i => i.PrevOut));
+        Assert.True(tx.RBF);
+        Assert.Equal(cold.ScriptPubKey, Assert.Single(tx.Outputs, o => o.Value == Money.Coins(sweep.Amounts.ToCold)).ScriptPubKey);
+        var toExchange = Assert.Single(tx.Outputs, o => o.ScriptPubKey == exchange.ScriptPubKey).Value.ToDecimal(MoneyUnit.BTC);
+        Assert.Equal(toExchange, bumped.Amounts.ToExchange);
+        Assert.True(bumped.Amounts.Fee > sweep.Amounts.Fee);
+        Assert.Equal(sweep.Amounts.ToExchange + sweep.Amounts.Fee, toExchange + bumped.Amounts.Fee); // the extra fee came from the exchange's share
+        Assert.InRange(bumped.FeeRate!.Value, 3m, 3.2m);
+    }
+
+    [Fact]
+    public void ReplacementCanBeBumpedAgain()
+    {
+        var coins = new[] { CoinOf(0.5m, 0) };
+        var sweep = SweepBuilder.Build(Network, coins, null, Address(), null, 0, Fee, null);
+        var once = SweepBuilder.Replace(Network, Transaction.Parse(sweep.Hex, Network), coins, sweep.Amounts.ToExchange, new FeeRate(20m));
+        var twice = SweepBuilder.Replace(Network, Transaction.Parse(once.Hex, Network), coins, once.Amounts.ToExchange, new FeeRate(30m));
+        Assert.True(twice.Amounts.Fee > once.Amounts.Fee);
+    }
+
+    [Fact]
+    public void ReplacementMustPayAtLeastOneSatPerVbyteMore()
+    {
+        var coins = new[] { CoinOf(0.5m, 0) };
+        var sweep = SweepBuilder.Build(Network, coins, null, Address(), null, 0, Fee, null); // 10 sat/vB
+        var e = Assert.Throws<SweepException>(() =>
+            SweepBuilder.Replace(Network, Transaction.Parse(sweep.Hex, Network), coins, sweep.Amounts.ToExchange, new FeeRate(10.5m)));
+        Assert.Contains("must be at least", e.Message);
+    }
+
+    [Fact]
+    public void ReplacementNeedsEveryCoinTheSweepSpent()
+    {
+        var coins = new[] { CoinOf(0.5m, 0), CoinOf(0.25m, 1) };
+        var sweep = SweepBuilder.Build(Network, coins, null, Address(), null, 0, Fee, null);
+        Assert.Throws<SweepException>(() =>
+            SweepBuilder.Replace(Network, Transaction.Parse(sweep.Hex, Network), [coins[0]], sweep.Amounts.ToExchange, new FeeRate(30m)));
+    }
+
+    [Fact]
+    public void ReplacementNeedsToKnowTheExchangeOutput()
+    {
+        var coins = new[] { CoinOf(0.5m, 0) };
+        var sweep = SweepBuilder.Build(Network, coins, null, Address(), Address(), 10, Fee, null);
+        var e = Assert.Throws<SweepException>(() =>
+            SweepBuilder.Replace(Network, Transaction.Parse(sweep.Hex, Network), coins, 0.123m, new FeeRate(30m)));
+        Assert.Contains("which of the sweep's outputs", e.Message);
+    }
+
+    [Fact]
+    public void ReplacementThatLeavesDustForTheExchangeIsRefused()
+    {
+        var coins = new[] { CoinOf(0.00002m, 0) };
+        var sweep = SweepBuilder.Build(Network, coins, null, Address(), null, 0, new FeeRate(Money.Satoshis(1000), 1000), null);
+        Assert.Throws<SweepException>(() =>
+            SweepBuilder.Replace(Network, Transaction.Parse(sweep.Hex, Network), coins, sweep.Amounts.ToExchange, new FeeRate(17m)));
+    }
 }

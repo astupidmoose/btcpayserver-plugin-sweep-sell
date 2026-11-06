@@ -336,6 +336,20 @@ public class UISweepSellController(ISweepSellRepository repository, IPayoutRepos
         return RedirectToAction(nameof(Settings), new { storeId });
     }
 
+    [HttpPost("sweep/awaiting/{txid}/bump")]
+    public async Task<IActionResult> BumpSweepFee(string storeId, string txid, decimal feeRate, CancellationToken cancellationToken)
+    {
+        if (!await CanSpendAsync(storeId))
+            return Forbid();
+        var (done, message) = await sweep.BumpFeeAsync(storeId, txid, feeRate, cancellationToken);
+        TempData.SetStatusMessageModel(new StatusMessageModel
+        {
+            Severity = done ? StatusMessageModel.StatusSeverity.Success : StatusMessageModel.StatusSeverity.Error,
+            Message = message
+        });
+        return RedirectToAction(nameof(Settings), new { storeId });
+    }
+
     [HttpPost("sweep/stopped/{cryptoCode}/resume")]
     public async Task<IActionResult> ResumeSweep(string storeId, string cryptoCode, CancellationToken cancellationToken)
     {

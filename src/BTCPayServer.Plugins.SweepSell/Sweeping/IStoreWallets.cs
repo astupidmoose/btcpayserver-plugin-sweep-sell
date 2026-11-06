@@ -60,6 +60,13 @@ public interface IStoreWallets
     /// <summary>Builds and signs the sweep with the hot wallet's key. Nothing is broadcast. Throws <see cref="SweepException"/>.</summary>
     Task<SignedSweep> BuildAsync(StoreWallet wallet, SweepRequest request, CancellationToken cancellationToken);
 
+    /// <summary>
+    /// Signs a replacement for the sent, unconfirmed sweep <paramref name="txid"/> at <paramref name="feeRate"/> (smallest unit
+    /// per vB): the same coins and outputs, the extra fee taken from its exchange output of <paramref name="toExchange"/>.
+    /// Nothing is broadcast. Throws <see cref="SweepException"/>.
+    /// </summary>
+    Task<SignedSweep> BuildReplacementAsync(StoreWallet wallet, string txid, decimal toExchange, decimal feeRate, CancellationToken cancellationToken);
+
     /// <summary>Broadcasts a signed transaction. Throws when the node can't be reached, so the outcome is unknown.</summary>
     Task<BroadcastOutcome> BroadcastAsync(string cryptoCode, string hex, CancellationToken cancellationToken);
 

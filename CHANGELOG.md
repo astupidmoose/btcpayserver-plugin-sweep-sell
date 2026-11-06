@@ -7,6 +7,10 @@
   now that nodes relay down to 0.1 sat/vB. The activity says when the lowest rate was used and what the estimate was.
 - **Never below 1 sat/vB:** whatever the estimate and the setting, a sweep pays at least 1 per vB, the lowest rate every
   node relays. Cheaper sweeps were dropped by many nodes and wallets, so they could sit unconfirmed and unseen.
+- **Bump fee:** a sent sweep stuck unconfirmed can have its fee raised from the settings page, under Waiting for the
+  exchange. It is replaced (RBF) by the same transaction at the rate you enter, the extra fee coming out of what the
+  exchange gets; the cold wallet's share is unchanged, and the deposit is followed to the new transaction. BTCPay's own
+  wallet can't bump a sweep split between the exchange and a cold wallet, since neither output is the hot wallet's.
 
 ## 0.1.5 (beta)
 
