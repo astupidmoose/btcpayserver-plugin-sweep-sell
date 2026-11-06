@@ -1459,7 +1459,7 @@ public class SweepServiceTests
         await service.WatchDepositsAsync(Ct);
         var awaiting = Assert.Single(State.Awaiting);
         Assert.Empty(State.Stopped);
-        Assert.Equal(_clock.GetUtcNow(), awaiting.SentAt);
+        Assert.Equal(_clock.GetUtcNow(), awaiting.ConfirmedSeenAt);
         Assert.Equal(signedAt, awaiting.SignedAt);
         Assert.Contains("has confirmed", State.Activity[0].Message);
 
@@ -1468,6 +1468,25 @@ public class SweepServiceTests
         await service.WatchDepositsAsync(Ct);
         Assert.Empty(State.Awaiting);
         Assert.True(State.Stopped.ContainsKey("BTC"));
+    }
+
+    [Fact]
+    public async Task FollowingAReplacementClearsTheOldTransactionsStatusState()
+    {
+        Configure();
+        Awaiting("BTC", "sweep-tx", SweepService.DepositWatchLimit);
+        _wallets.StatusError = new HttpRequestException("node unreachable");
+        var service = Service();
+        await service.WatchDepositsAsync(Ct);
+        Assert.True(State.Awaiting[0].StatusCheckFailing);
+
+        _wallets.Replacements["sweep-tx"] = "bumped-tx";
+        _clock.Advance(TimeSpan.FromMinutes(1));
+        await service.WatchDepositsAsync(Ct);
+        var awaiting = Assert.Single(State.Awaiting);
+        Assert.Equal("bumped-tx", awaiting.Txid);
+        Assert.False(awaiting.StatusCheckFailing); // a failure for the new transaction is shown again
+        Assert.Null(awaiting.ConfirmedSeenAt);
     }
 
     [Fact]
@@ -1521,7 +1540,14 @@ public class SweepServiceTests
         Configure();
         Awaiting("BTC", "sweep-tx", SweepService.DepositWatchLimit);
         _wallets.Statuses["sweep-tx"] = TransactionStatus.Confirmed;
-        await Service().WatchDepositsAsync(Ct);
+        var service = Service();
+        await service.WatchDepositsAsync(Ct);
+        // It may have only just confirmed: the exchange gets a full watch from now.
+        Assert.Single(State.Awaiting);
+        Assert.Contains("has confirmed but isn't credited yet", State.Activity[0].Message);
+
+        _clock.Advance(SweepService.DepositWatchLimit);
+        await service.WatchDepositsAsync(Ct);
         Assert.Empty(State.Awaiting);
         Assert.True(State.Stopped.ContainsKey("BTC"));
     }

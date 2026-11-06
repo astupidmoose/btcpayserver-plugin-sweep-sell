@@ -107,6 +107,12 @@ public class AwaitingDeposit
     /// <summary>Whether the last on-chain status check, made once the watch limit passed, failed (shown once).</summary>
     public bool StatusCheckFailing { get; set; }
 
+    /// <summary>
+    /// When the sweep was first seen confirmed once the watch limit passed: the exchange gets a full watch from then to credit
+    /// it, since it may have only just confirmed.
+    /// </summary>
+    public DateTimeOffset? ConfirmedSeenAt { get; set; }
+
     /// <summary>The exchange the sweep went to: its deposits are only looked up there.</summary>
     public string? ExchangeId { get; set; }
 

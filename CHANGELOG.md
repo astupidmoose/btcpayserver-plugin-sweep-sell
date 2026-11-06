@@ -14,8 +14,9 @@
   Refused while the store is paused or sweeping is off or in dry run, and when the exchange's share would fall below its
   minimum deposit.
 - **Unconfirmed sweeps aren't given up on:** a sweep still unconfirmed after 24 hours hasn't reached the exchange yet, so
-  it stays watched (and can be bumped) instead of the coin being stopped. The activity says so once. When it confirms,
-  the exchange gets another 24 hours to credit it.
+  it stays watched (and can be bumped) instead of the coin being stopped. The activity says so once. A confirmed sweep
+  not credited within 24 hours gets another 24 hours from when it is first seen confirmed, since it may have only just
+  reached the exchange.
 
 ## 0.1.5 (beta)
 

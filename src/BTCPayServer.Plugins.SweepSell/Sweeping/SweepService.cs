@@ -743,6 +743,8 @@ public class SweepService(ISweepSellRepository repository, SecretProtector prote
                             awaiting.SignedAt ??= awaiting.SentAt;
                             awaiting.SentAt = now;
                             awaiting.StillUnconfirmedShown = false;
+                            awaiting.StatusCheckFailing = false;
+                            awaiting.ConfirmedSeenAt = null;
                             continue;
                         }
                     }
@@ -787,6 +789,7 @@ public class SweepService(ISweepSellRepository repository, SecretProtector prote
                                 awaiting.StatusCheckFailing = false;
                                 if (onChain == TransactionStatus.Unconfirmed)
                                 {
+                                    awaiting.ConfirmedSeenAt = null; // a block can be reorganized away
                                     if (!awaiting.StillUnconfirmedShown)
                                     {
                                         awaiting.StillUnconfirmedShown = true;
@@ -796,18 +799,19 @@ public class SweepService(ISweepSellRepository repository, SecretProtector prote
                                     }
                                     break;
                                 }
-                                if (awaiting.StillUnconfirmedShown && onChain == TransactionStatus.Confirmed)
+                                if (onChain == TransactionStatus.Confirmed && awaiting.ConfirmedSeenAt is null)
                                 {
-                                    // Seen unconfirmed past the limit and confirmed since: it only just reached the exchange, which
-                                    // gets a full watch from now to credit it. The exchange is still searched from when it was signed.
+                                    // When it confirmed isn't known: it may have only just reached the exchange. The exchange gets a
+                                    // full watch from now, when it is first seen confirmed past the limit, to credit it.
+                                    awaiting.ConfirmedSeenAt = now;
                                     awaiting.StillUnconfirmedShown = false;
-                                    awaiting.SignedAt ??= awaiting.SentAt;
-                                    awaiting.SentAt = now;
                                     Record(storeId, state, awaiting.Asset, ActivityOutcome.Waiting,
-                                        $"The {Amount(awaiting.Amount)} {awaiting.Asset} sweep ({awaiting.Txid}) has confirmed. Its deposit is watched for another " +
-                                        $"{DepositWatchLimit.TotalHours:0} hours for the exchange to credit it.");
+                                        $"The {Amount(awaiting.Amount)} {awaiting.Asset} sweep ({awaiting.Txid}) has confirmed but isn't credited yet. Its deposit is watched for another " +
+                                        $"{DepositWatchLimit.TotalHours:0} hours.");
                                     break;
                                 }
+                                if (onChain == TransactionStatus.Confirmed && now - awaiting.ConfirmedSeenAt < DepositWatchLimit)
+                                    break;
                                 state.Awaiting.Remove(awaiting);
                                 // No longer watched, so a later return couldn't be seen: stopped like a failed deposit.
                                 Stop(state, awaiting, now);
@@ -959,6 +963,8 @@ public class SweepService(ISweepSellRepository repository, SecretProtector prote
                 awaiting.ReplacementCheckedAt = now;
                 awaiting.ReplacementCheckFailing = false;
                 awaiting.StillUnconfirmedShown = false;
+                awaiting.StatusCheckFailing = false;
+                awaiting.ConfirmedSeenAt = null;
                 await repository.SaveSweepStateAsync(storeId, state);
                 return (true, $"Fee bumped. The sweep is now {replacement.Txid}, at {Amount(replacement.FeeRate ?? feeRate)} {RateUnit(code)}.");
             }
