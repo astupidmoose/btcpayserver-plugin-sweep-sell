@@ -300,7 +300,8 @@ public class SweepService(ISweepSellRepository repository, SecretProtector prote
             }
             var feeTarget = Math.Clamp(settings.Sweep.FeeTargetBlocks, SweepSettings.MinFeeTargetBlocks, SweepSettings.MaxFeeTargetBlocks);
             var sweep = await wallets.BuildAsync(wallet,
-                new SweepRequest(rule.IncludeUnconfirmed, amount, deposit.Address, coldAddress, coldAddress is null ? 0 : rule.ColdPercent, feeTarget),
+                new SweepRequest(rule.IncludeUnconfirmed, amount, deposit.Address, coldAddress, coldAddress is null ? 0 : rule.ColdPercent, feeTarget,
+                    Math.Clamp(rule.MinimumFeeRate, 0, SweepSettings.MaxMinimumFeeRate)),
                 cancellationToken);
             // The wallet is read again to build the sweep, and something else on the server may have spent from it meanwhile.
             if (sweep.Balance < rule.MinimumBalance)
@@ -316,7 +317,7 @@ public class SweepService(ISweepSellRepository repository, SecretProtector prote
                 return;
             }
             var what = Describe(code, sweep.Amounts.ToExchange, exchange.Name, deposit.Address, sweep.Amounts.ToCold, coldAddress, sweep.Amounts.Fee,
-                sweep.FeeRate, feeTarget);
+                sweep.FeeRate, feeTarget, sweep.EstimatedFeeRate);
             if (settings.Sweep.DryRun)
             {
                 Record(storeId, state, code, ActivityOutcome.DryRun, $"Dry run: would send {what}. The transaction was signed but not broadcast.");
@@ -357,6 +358,7 @@ public class SweepService(ISweepSellRepository repository, SecretProtector prote
                     Fee = sweep.Amounts.Fee,
                     FeeRate = sweep.FeeRate,
                     FeeTargetBlocks = feeTarget,
+                    EstimatedFeeRate = sweep.EstimatedFeeRate,
                     ColdDestination = coldIndex is null ? null : ColdKey(rule.ColdDestination!),
                     ColdIndex = coldIndex,
                     CreatedAt = now
@@ -404,7 +406,7 @@ public class SweepService(ISweepSellRepository repository, SecretProtector prote
     {
         var code = pending.CryptoCode;
         var what = Describe(code, pending.ToExchange, pending.ExchangeId ?? "the exchange", pending.ExchangeAddress, pending.ToCold, pending.ColdAddress, pending.Fee,
-            pending.FeeRate, pending.FeeTargetBlocks);
+            pending.FeeRate, pending.FeeTargetBlocks, pending.EstimatedFeeRate);
         var status = await wallets.GetStatusAsync(code, pending.Txid, cancellationToken);
         if (status == TransactionStatus.Replaced)
         {
@@ -544,7 +546,16 @@ public class SweepService(ISweepSellRepository repository, SecretProtector prote
         return null;
     }
 
-    static string RuleSnapshot(SweepRule rule) => Newtonsoft.Json.JsonConvert.SerializeObject(rule);
+    /// <summary>
+    /// The parts of a rule that decide a sweep's outputs and amount. The lowest fee rate is left out: the signed transaction's
+    /// fee is fixed, so changing it never makes a rebroadcast differ (and sweeps signed before it existed still match).
+    /// </summary>
+    static string RuleSnapshot(SweepRule rule)
+    {
+        var json = Newtonsoft.Json.Linq.JObject.FromObject(rule);
+        json.Remove(nameof(SweepRule.MinimumFeeRate));
+        return json.ToString(Newtonsoft.Json.Formatting.None);
+    }
 
     static SemaphoreSlim WalletLock(string cryptoCode, string walletKey) =>
         WalletLocks.GetOrAdd($"{cryptoCode.ToUpperInvariant()}:{walletKey}", _ => new SemaphoreSlim(1, 1));
@@ -872,7 +883,8 @@ public class SweepService(ISweepSellRepository repository, SecretProtector prote
                credentials.Equals(protector.Credentials(current)) && // the whole key: a replaced secret must not be used either
                now is not null && now.ColdPercent == rule.ColdPercent && now.ColdDestination == rule.ColdDestination &&
                now.ColdStartIndex == rule.ColdStartIndex && now.DailyCap == rule.DailyCap && now.IncludeUnconfirmed == rule.IncludeUnconfirmed &&
-               now.MinimumBalance == rule.MinimumBalance && current.Sweep.FeeTargetBlocks == planned.Sweep.FeeTargetBlocks;
+               now.MinimumBalance == rule.MinimumBalance && now.MinimumFeeRate == rule.MinimumFeeRate &&
+               current.Sweep.FeeTargetBlocks == planned.Sweep.FeeTargetBlocks;
     }
 
     static SweepRule? Rule(SweepSellSettings settings, string cryptoCode) =>
@@ -881,14 +893,18 @@ public class SweepService(ISweepSellRepository repository, SecretProtector prote
     static string ColdKey(string destination) => destination.Trim();
 
     static string Describe(string code, decimal toExchange, string exchangeName, string exchangeAddress, decimal toCold, string? coldAddress, decimal fee,
-        decimal? feeRate, int? feeTarget) =>
+        decimal? feeRate, int? feeTarget, decimal? estimatedFeeRate = null) =>
         $"{Amount(toExchange)} {code} to {exchangeName} ({exchangeAddress})" +
         (toCold > 0 ? $" and {Amount(toCold)} {code} to the cold wallet ({coldAddress})" : "") +
         $", fee {Amount(fee)} {code}" +
         // The rate and target are shown so the fee can be compared with the network's estimates.
         (feeRate is { } rate && feeTarget is { } target
-            ? $" ({Amount(rate)} {RateUnit(code)}, aiming for {(target == 1 ? "the next block" : $"confirmation within {target} blocks")})"
+            ? estimatedFeeRate is { } estimate
+                ? $" ({Amount(rate)} {RateUnit(code)}, the lowest fee rate set for {code}: the estimate for {Within(target)} was only {Amount(estimate)})"
+                : $" ({Amount(rate)} {RateUnit(code)}, aiming for {Within(target)})"
             : "");
+
+    static string Within(int target) => target == 1 ? "the next block" : $"confirmation within {target} blocks";
 
     /// <summary>Satoshis are Bitcoin's; other coins name their smallest unit differently, so they get a plain description.</summary>
     static string RateUnit(string code) =>

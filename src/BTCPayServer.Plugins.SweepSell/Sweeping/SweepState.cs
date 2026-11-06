@@ -73,6 +73,9 @@ public class PendingSweep
 
     public int? FeeTargetBlocks { get; set; }
 
+    /// <summary>The estimate for <see cref="FeeTargetBlocks"/>, kept only when the rule's lowest fee rate was paid instead.</summary>
+    public decimal? EstimatedFeeRate { get; set; }
+
     /// <summary>The cold wallet key and index the cold address came from, to move past it once the sweep is sent.</summary>
     public string? ColdDestination { get; set; }
 

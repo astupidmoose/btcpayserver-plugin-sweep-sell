@@ -83,6 +83,32 @@ public class SweepServiceTests
     }
 
     [Fact]
+    public async Task LowestFeeRateIsPaidWhenTheEstimateIsBelowIt()
+    {
+        Configure(dryRun: true, rule: r => r.MinimumFeeRate = 3);
+        await Service().RunAsync(_storeId, wait: false, Ct);
+        Assert.Equal(3m, Assert.Single(_wallets.Built).MinimumFeeRate);
+        Assert.Contains("(3 sat/vB, the lowest fee rate set for BTC: the estimate for confirmation within 3 blocks was only 2.5)", State.Activity[0].Message);
+    }
+
+    [Fact]
+    public async Task EstimateAboveTheLowestFeeRateIsPaidAsUsual()
+    {
+        Configure(dryRun: true, rule: r => r.MinimumFeeRate = 1);
+        await Service().RunAsync(_storeId, wait: false, Ct);
+        Assert.Contains("(2.5 sat/vB, aiming for confirmation within 3 blocks)", State.Activity[0].Message);
+    }
+
+    [Fact]
+    public async Task SentSweepStillSaysTheLowestFeeRateWasUsed()
+    {
+        Configure(rule: r => r.MinimumFeeRate = 3);
+        await Service().RunAsync(_storeId, wait: false, Ct);
+        Assert.Contains(State.Activity, a => a.Outcome == ActivityOutcome.Sent &&
+                                             a.Message.Contains("the lowest fee rate set for BTC: the estimate for confirmation within 3 blocks was only 2.5"));
+    }
+
+    [Fact]
     public async Task LiveSweepBroadcastsAndWaitsForTheDeposit()
     {
         Configure();
@@ -358,6 +384,39 @@ public class SweepServiceTests
         Assert.Contains("exchange key changed since it was signed", State.Activity[0].Message);
 
         _repository.Settings[_storeId].ProtectedApiKey = Protector.Protect("test-api-key"); // put back
+        await service.RunAsync(_storeId, wait: false, Ct);
+        Assert.Equal(2, _wallets.Broadcasts.Count);
+        Assert.Empty(State.Pending);
+    }
+
+    [Fact]
+    public async Task PendingSweepIsRebroadcastAfterTheLowestFeeRateChanges()
+    {
+        Configure();
+        _wallets.BroadcastResults.Enqueue(() => throw new HttpRequestException("timeout"));
+        var service = Service();
+        await service.RunAsync(_storeId, wait: false, Ct);
+        Assert.Single(State.Pending);
+
+        // The signed transaction's fee is fixed, so the new lowest rate can't change what a rebroadcast sends.
+        _repository.Settings[_storeId].Sweep.Rules[0].MinimumFeeRate = 3;
+        await service.RunAsync(_storeId, wait: false, Ct);
+        Assert.Equal(2, _wallets.Broadcasts.Count);
+        Assert.Empty(State.Pending);
+    }
+
+    [Fact]
+    public async Task PendingSweepSignedBeforeTheLowestFeeRateExistedIsStillRebroadcast()
+    {
+        Configure();
+        _wallets.BroadcastResults.Enqueue(() => throw new HttpRequestException("timeout"));
+        var service = Service();
+        await service.RunAsync(_storeId, wait: false, Ct);
+        // A rule saved by an earlier version has no lowest fee rate in it.
+        var pending = Assert.Single(State.Pending);
+        var old = Newtonsoft.Json.Linq.JObject.Parse(pending.Rule!);
+        old.Remove("MinimumFeeRate");
+        pending.Rule = Newtonsoft.Json.JsonConvert.SerializeObject(old);
         await service.RunAsync(_storeId, wait: false, Ct);
         Assert.Equal(2, _wallets.Broadcasts.Count);
         Assert.Empty(State.Pending);

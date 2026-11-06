@@ -119,7 +119,7 @@
                 <div class="form-text">
                     Counted in each coin's own blocks. For Bitcoin, 1 is the next block (high priority), 3 about half an hour (medium) and
                     6 about an hour (low); coins with faster blocks confirm sooner for the same number. The rate comes from BTCPay's own fee
-                    estimate, the one its wallet uses, and each sweep's rate is shown in the activity below.
+                    estimate, the one its wallet uses, raised to the coin's lowest fee rate below if you set one; each sweep's rate is shown in the activity below.
                 </div>
                 <span asp-validation-for="SweepFeeTargetBlocks" class="text-danger"></span>
             </div>
@@ -171,6 +171,15 @@
                         <input asp-for="SweepRules[i].DailyCap" type="number" step="any" min="0" class="form-control" />
                         <div class="form-text">The most to sweep per day (UTC), fee included. A larger balance is swept in parts. 0 for no cap.</div>
                         <span asp-validation-for="SweepRules[i].DailyCap" class="text-danger"></span>
+                    </div>
+                    <div class="form-group">
+                        <label asp-for="SweepRules[i].MinimumFeeRate" class="form-label">Lowest fee rate (@(string.Equals(rule.CryptoCode, "BTC", StringComparison.OrdinalIgnoreCase) ? "sat/vB" : $"smallest {rule.CryptoCode} unit per vB"))</label>
+                        <input asp-for="SweepRules[i].MinimumFeeRate" type="number" step="any" min="0" max="@SweepSettings.MaxMinimumFeeRate" class="form-control" />
+                        <div class="form-text">
+                            A sweep never pays less than this, even when the estimate is lower. BTCPay's estimate falls back to your node's own
+                            when it can't reach its fee source, and that can be far below the going rate. 0 for none.
+                        </div>
+                        <span asp-validation-for="SweepRules[i].MinimumFeeRate" class="text-danger"></span>
                     </div>
                     <div class="form-check">
                         <input asp-for="SweepRules[i].IncludeUnconfirmed" type="checkbox" class="form-check-input" />

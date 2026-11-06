@@ -16,9 +16,11 @@ public sealed record SweepAmounts(decimal ToExchange, decimal ToCold, decimal Fe
 /// <summary>
 /// A signed sweep, ready to broadcast. Broadcasting the same transaction again can never pay twice. <paramref name="Balance"/>
 /// is what the wallet's coins added up to when it was built; <paramref name="FeeRate"/> is the fee it pays, in satoshis per
-/// virtual byte, when known.
+/// virtual byte, when known. <paramref name="EstimatedFeeRate"/> is the estimate, set only when the rule's lowest fee rate
+/// was used instead.
 /// </summary>
-public sealed record SignedSweep(string Txid, string Hex, SweepAmounts Amounts, decimal Balance, decimal? FeeRate = null);
+public sealed record SignedSweep(string Txid, string Hex, SweepAmounts Amounts, decimal Balance, decimal? FeeRate = null,
+    decimal? EstimatedFeeRate = null);
 
 /// <summary>A sweep that can't be built, with a message for the store owner.</summary>
 public class SweepException(string message) : Exception(message);

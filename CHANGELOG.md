@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.1.6 (beta)
+
+- **Lowest fee rate per coin:** a sweep never pays less than the rate you set, even when the estimate is lower. BTCPay's
+  estimate falls back to the node's own when it can't reach its fee source, and that can be far below the going rate
+  now that nodes relay down to 0.1 sat/vB. The activity says when the lowest rate was used and what the estimate was.
+  Blank (0) by default, so nothing changes until you set it.
+
 ## 0.1.5 (beta)
 
 - **Sweeps signal replace-by-fee** (BIP 125), so a sweep stuck below the going fee can be bumped from the wallet.

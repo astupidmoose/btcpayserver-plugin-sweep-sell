@@ -241,7 +241,10 @@ sealed class FakeWallets : IStoreWallets
         var txid = Interlocked.Increment(ref _txids).ToString("x64");
         lock (_signed)
             _signed["signed-" + txid] = (id, swept);
-        return new SignedSweep(txid, "signed-" + txid, new SweepAmounts(toExchange, toCold, Fee, Balances[id] - swept), Balances[id], FeeRate);
+        // Like BTCPay's: the estimate (FeeRate here) unless the rule's lowest fee rate is higher.
+        var raised = request.MinimumFeeRate > FeeRate;
+        return new SignedSweep(txid, "signed-" + txid, new SweepAmounts(toExchange, toCold, Fee, Balances[id] - swept), Balances[id],
+            raised ? request.MinimumFeeRate : FeeRate, raised ? FeeRate : null);
     }
 
     public Task<BroadcastOutcome> BroadcastAsync(string cryptoCode, string hex, CancellationToken cancellationToken)

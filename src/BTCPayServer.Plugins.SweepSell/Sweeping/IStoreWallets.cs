@@ -26,9 +26,12 @@ public enum TransactionStatus
     Replaced
 }
 
-/// <summary>What to sweep. <see cref="Amount"/> null sweeps everything; less leaves change in the wallet.</summary>
+/// <summary>
+/// What to sweep. <see cref="Amount"/> null sweeps everything; less leaves change in the wallet. The fee rate is the estimate
+/// for <see cref="FeeTargetBlocks"/>, but never below <see cref="MinimumFeeRate"/> (smallest unit per vB; 0 for none).
+/// </summary>
 public sealed record SweepRequest(bool IncludeUnconfirmed, decimal? Amount, string ExchangeAddress, string? ColdAddress, decimal ColdPercent,
-    int FeeTargetBlocks);
+    int FeeTargetBlocks, decimal MinimumFeeRate = 0);
 
 /// <summary>The store wallets, as the sweep job needs them. BTCPay's implementation is <see cref="BtcPayStoreWallets"/>.</summary>
 public interface IStoreWallets

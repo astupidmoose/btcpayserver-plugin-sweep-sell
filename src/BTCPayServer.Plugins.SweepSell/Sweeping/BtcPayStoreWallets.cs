@@ -120,11 +120,20 @@ public class BtcPayStoreWallets(StoreRepository stores, PaymentMethodHandlerDict
             ? null
             : (await explorer.GetUnusedAsync(derivation, DerivationFeature.Change, 0, false, cancellationToken))?.Address
               ?? throw new SweepException($"The {wallet.CryptoCode} wallet has no change address.");
-        var feeRate = await fees.CreateFeeProvider(network).GetFeeRateAsync(request.FeeTargetBlocks);
+        var estimate = await fees.CreateFeeProvider(network).GetFeeRateAsync(request.FeeTargetBlocks);
+        var (feeRate, raised) = ChooseFeeRate(estimate, request.MinimumFeeRate);
         // The node's minimum relay fee, as BTCPay's own wallet uses it; unknown leaves NBitcoin's 1 sat/vB default.
         var minRelayFee = dashboard.Get(network.CryptoCode)?.Status?.BitcoinStatus?.MinRelayTxFee;
-        return SweepBuilder.Build(network.NBitcoinNetwork, signing, request.Amount, exchange, cold, request.ColdPercent, feeRate, change, minRelayFee);
+        var sweep = SweepBuilder.Build(network.NBitcoinNetwork, signing, request.Amount, exchange, cold, request.ColdPercent, feeRate, change, minRelayFee);
+        return raised ? sweep with { EstimatedFeeRate = Math.Round(estimate.SatoshiPerByte, 2) } : sweep;
     }
+
+    /// <summary>
+    /// The estimate, or <paramref name="minimum"/> (smallest unit per vB; 0 for none) when that is higher: BTCPay falls back
+    /// to the node's own estimate when it has no other, which can be far below the going rate.
+    /// </summary>
+    public static (FeeRate Rate, bool Raised) ChooseFeeRate(FeeRate estimate, decimal minimum) =>
+        minimum > 0 && new FeeRate(minimum) is var floor && floor > estimate ? (floor, true) : (estimate, false);
 
     public async Task<BroadcastOutcome> BroadcastAsync(string cryptoCode, string hex, CancellationToken cancellationToken)
     {

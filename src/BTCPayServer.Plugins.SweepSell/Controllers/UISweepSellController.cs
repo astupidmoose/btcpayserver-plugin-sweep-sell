@@ -65,7 +65,7 @@ public class UISweepSellController(ISweepSellRepository repository, IPayoutRepos
         // A coin without a rule and one with an untouched, disabled rule sweep the same: the page lists every wallet's coin.
         static Dictionary<string, SweepRule> Rules(SweepSettings s) => s.Rules
             .Where(r => r.Enabled || r.MinimumBalance != 0 || r.ColdPercent != 0 || !string.IsNullOrEmpty(r.ColdDestination) ||
-                        r.ColdStartIndex != 0 || r.DailyCap != 0 || r.IncludeUnconfirmed)
+                        r.ColdStartIndex != 0 || r.DailyCap != 0 || r.IncludeUnconfirmed || r.MinimumFeeRate != 0)
             .GroupBy(r => r.CryptoCode.ToUpperInvariant())
             .ToDictionary(g => g.Key, g => g.First());
         var (ra, rb) = (Rules(a), Rules(b));
@@ -73,7 +73,8 @@ public class UISweepSellController(ISweepSellRepository repository, IPayoutRepos
                ra.Count == rb.Count && ra.All(r => rb.TryGetValue(r.Key, out var o) && r.Value.Enabled == o.Enabled &&
                                                  r.Value.MinimumBalance == o.MinimumBalance && r.Value.ColdPercent == o.ColdPercent &&
                                                  r.Value.ColdDestination == o.ColdDestination && r.Value.ColdStartIndex == o.ColdStartIndex &&
-                                                 r.Value.DailyCap == o.DailyCap && r.Value.IncludeUnconfirmed == o.IncludeUnconfirmed);
+                                                 r.Value.DailyCap == o.DailyCap && r.Value.IncludeUnconfirmed == o.IncludeUnconfirmed &&
+                                                 r.Value.MinimumFeeRate == o.MinimumFeeRate);
     }
 
     [HttpPost("")]
@@ -511,6 +512,9 @@ public class UISweepSellController(ISweepSellRepository repository, IPayoutRepos
                 yield return (field + nameof(rule.DailyCap), $"{code}: the daily cap can't be negative. Use 0 for no cap.");
             if (rule.ColdPercent is < 0 or >= 100)
                 yield return (field + nameof(rule.ColdPercent), $"{code}: the cold wallet share must be at least 0% and under 100%.");
+            if (rule.MinimumFeeRate is < 0 or > SweepSettings.MaxMinimumFeeRate)
+                yield return (field + nameof(rule.MinimumFeeRate),
+                    $"{code}: the lowest fee rate must be from 0 to {SweepSettings.MaxMinimumFeeRate.ToString(System.Globalization.CultureInfo.InvariantCulture)} per vB. Use 0 for none.");
             if (rule.ColdStartIndex < 0)
                 yield return (field + nameof(rule.ColdStartIndex), $"{code}: the first address index can't be negative.");
             var cold = Clean(rule.ColdDestination);
@@ -574,7 +578,8 @@ public class UISweepSellController(ISweepSellRepository repository, IPayoutRepos
                     ColdDestination = Clean(r.ColdDestination),
                     ColdStartIndex = r.ColdStartIndex,
                     DailyCap = r.DailyCap,
-                    IncludeUnconfirmed = r.IncludeUnconfirmed
+                    IncludeUnconfirmed = r.IncludeUnconfirmed,
+                    MinimumFeeRate = r.MinimumFeeRate
                 }).ToList()
             },
             Hedge = new HedgeSettings
@@ -631,7 +636,8 @@ public class UISweepSellController(ISweepSellRepository repository, IPayoutRepos
                 ColdDestination = r.ColdDestination,
                 ColdStartIndex = r.ColdStartIndex,
                 DailyCap = r.DailyCap,
-                IncludeUnconfirmed = r.IncludeUnconfirmed
+                IncludeUnconfirmed = r.IncludeUnconfirmed,
+                MinimumFeeRate = r.MinimumFeeRate
             })
             .ToList();
         foreach (var rule in rules)
@@ -848,6 +854,7 @@ public class SweepRuleViewModel
     public int ColdStartIndex { get; set; }
     public decimal DailyCap { get; set; }
     public bool IncludeUnconfirmed { get; set; }
+    public decimal MinimumFeeRate { get; set; }
 
     /// <summary>Shown next to the coin; not posted.</summary>
     public string? WalletStatus { get; set; }
