@@ -20,7 +20,13 @@ public class KrakenWithdrawals(KrakenConnector kraken) : IWithdrawalConnector
     public string Name => kraken.Name;
 
     // Every name Kraken has for an asset (USD, ZUSD; BTC, XBT, XXBT) gives the same key, as the balances are read.
-    public string AssetKey(string asset) => ToKraken(KrakenConnector.FromKrakenAsset(asset) ?? asset);
+    public string AssetKey(string asset) => ToKraken(Ticker(asset));
+
+    /// <summary>
+    /// The ticker for any name Kraken has for an asset (XBT and XXBT are BTC, ZUSD is USD), as balances and listed
+    /// withdrawals and destinations are read, so an asset entered under another name still matches them.
+    /// </summary>
+    static string Ticker(string asset) => KrakenConnector.FromKrakenAsset(asset) ?? asset.ToUpperInvariant();
 
     public string KeyPermissionsHelp =>
         "In Kraken: Settings > API > Create key. Use a separate key from the trading key, and tick only Query Funds and Withdraw Funds. " +
@@ -28,8 +34,7 @@ public class KrakenWithdrawals(KrakenConnector kraken) : IWithdrawalConnector
         "enter its name exactly as Kraken shows it.";
 
     public async Task<decimal> GetAvailableBalanceAsync(ExchangeCredentials credentials, string asset, CancellationToken cancellationToken) =>
-        // Balances are keyed by ticker (BTC), so another name for the asset (XBT) is mapped to it first.
-        (await kraken.GetAvailableBalancesAsync(credentials, cancellationToken)).GetValueOrDefault(KrakenConnector.FromKrakenAsset(asset) ?? asset.ToUpperInvariant());
+        (await kraken.GetAvailableBalancesAsync(credentials, cancellationToken)).GetValueOrDefault(Ticker(asset));
 
     public async Task<IReadOnlyList<WithdrawalDestination>> GetDestinationsAsync(ExchangeCredentials credentials, string asset,
         CancellationToken cancellationToken) =>
@@ -131,7 +136,7 @@ public class KrakenWithdrawals(KrakenConnector kraken) : IWithdrawalConnector
                 throw new ExchangeException("Kraken sent an unexpected withdrawal entry.");
             // Kraken filtered by asset already; an entry of another asset is not counted.
             if (Text(entry["asset"]) is { } entryAsset && FromKrakenAsset(entryAsset) is { } ticker &&
-                !string.Equals(ticker, asset, StringComparison.OrdinalIgnoreCase))
+                !string.Equals(ticker, Ticker(asset), StringComparison.OrdinalIgnoreCase))
                 continue;
             var refid = Text(entry["refid"]) is { Length: > 0 } r ? r : throw new ExchangeException("Kraken sent a withdrawal without a reference.");
             if (entry["time"] is not JValue { Type: JTokenType.Integer or JTokenType.Float } time ||
@@ -218,7 +223,7 @@ public class KrakenWithdrawals(KrakenConnector kraken) : IWithdrawalConnector
 
     static List<WithdrawalDestination> Destinations(JArray addresses, string asset) =>
         addresses.OfType<JObject>()
-            .Where(a => Text(a["asset"]) is not { } listed || string.Equals(FromKrakenAsset(listed), asset, StringComparison.OrdinalIgnoreCase))
+            .Where(a => Text(a["asset"]) is not { } listed || string.Equals(FromKrakenAsset(listed), Ticker(asset), StringComparison.OrdinalIgnoreCase))
             .Where(a => !string.IsNullOrEmpty(Text(a["key"])))
             .Select(a => new WithdrawalDestination(Text(a["key"])!, Text(a["method"]) ?? "", IsTrue(a["verified"])))
             .ToList();

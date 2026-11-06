@@ -140,6 +140,23 @@ public class KrakenWithdrawalsTests
         Assert.False(e.Rejected); // may have gone through: looked up, never retried
     }
 
+    [Theory]
+    [InlineData("USD")]
+    [InlineData("ZUSD")]
+    [InlineData("zusd")]
+    public async Task WithdrawalsAndDestinationsMatchAnyNameOfTheAsset(string asset)
+    {
+        var (http, kraken) = Setup();
+        http.Responses["/0/private/WithdrawStatus"] = """
+            {"error":[],"result":[
+              {"asset":"ZUSD","refid":"R1","amount":"99.00","fee":"1.00","time":1893456000,"status":"Success","key":"test-bank"},
+              {"asset":"XXBT","refid":"R2","amount":"1","fee":"0","time":1893456100,"status":"Pending"}]}
+            """;
+        var records = await kraken.GetRecentWithdrawalsAsync(Credentials, asset, DateTimeOffset.FromUnixTimeSeconds(1893400000), Ct);
+        Assert.Equal(["R1"], records.Select(r => r.Reference));
+        Assert.Equal(["test-bank"], (await kraken.GetDestinationsAsync(Credentials, asset, Ct)).Select(d => d.Name));
+    }
+
     [Fact]
     public async Task RecentWithdrawalsMapKrakensStatuses()
     {
