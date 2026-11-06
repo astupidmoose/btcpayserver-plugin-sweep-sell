@@ -5,7 +5,10 @@
 - **Payout reserve:** payout can wait while the exchange holds less than a set amount of another asset, e.g. no
   USD paid out while the USDC balance is under 10,000. Set the asset and the amount on the payout page (empty for no
   check). The reserve's spendable balance is read with the payout key every run and again right before a withdrawal;
-  if it can't be read, nothing is withdrawn.
+  if it can't be read, nothing is withdrawn. This store's own withdrawals of the reserve asset still in progress are
+  left out of it, and a store won't pay out an asset another store on the same exchange account keeps as its reserve.
+- **Payout:** two names for one asset on an exchange (BTC and XBT, USD and ZUSD on Kraken) now share one daily cap
+  and one list of withdrawals in progress.
 
 ## 0.1.5 (beta)
 

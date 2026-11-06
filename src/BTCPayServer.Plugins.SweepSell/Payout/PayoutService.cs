@@ -172,7 +172,7 @@ public class PayoutService(IPayoutRepository payouts, ISweepSellRepository repos
 
         // Withdrawals still in progress are remembered by account and asset (not by key, so a new key for the same account
         // still holds them back), and read back to the oldest of them.
-        var list = new WithdrawalList(connector.Id, account.Hash, asset);
+        var list = new WithdrawalList(connector.Id, account.Hash, asset, connector.AssetKey);
         var since = Since(state, list);
         IReadOnlyList<WithdrawalRecord> recent;
         try
@@ -188,14 +188,14 @@ public class PayoutService(IPayoutRepository payouts, ISweepSellRepository repos
         if (!Reconcile(storeId, state, asset, connector, credentials, recent))
             return;
 
-        var left = payout.DailyCap - state.WithdrawnOn(clock.GetUtcNow(), asset);
+        var left = payout.DailyCap - state.WithdrawnOn(clock.GetUtcNow(), asset, connector.AssetKey);
         if (left <= 0)
         {
             Record(storeId, state, asset, ActivityOutcome.Waiting, $"Today's cap of {Amount(payout.DailyCap)} {asset} is reached. Payout resumes tomorrow (UTC).");
             return;
         }
 
-        if (!await ReserveHeldAsync(storeId, state, asset, payout, connector, credentials, "", cancellationToken))
+        if (!await ReserveHeldAsync(storeId, state, asset, payout, connector, credentials, account, "", cancellationToken))
             return;
 
         decimal balance;
@@ -329,7 +329,7 @@ public class PayoutService(IPayoutRepository payouts, ISweepSellRepository repos
                 return;
             }
             // The reserve too: it may have been moved or spent since it was read.
-            if (!await ReserveHeldAsync(storeId, state, asset, payout, connector, credentials, " Nothing was withdrawn.", cancellationToken))
+            if (!await ReserveHeldAsync(storeId, state, asset, payout, connector, credentials, account, " Nothing was withdrawn.", cancellationToken))
                 return;
             // The balance and withdrawals are read again under the lock: a convert sell or another withdrawal of this asset
             // since they were first read must not eat into what is kept, and every withdrawal that could be confused with this
@@ -353,7 +353,7 @@ public class PayoutService(IPayoutRepository payouts, ISweepSellRepository repos
             pending.SeenBefore = recent.Concat(before).Where(r => r.RequestedAt >= pending.SentAt - MatchBefore - TimeSpan.FromMinutes(1))
                 .Select(r => r.Reference).Distinct().ToList();
             var availableNow = balanceNow - payout.KeepBalance - Track(state, list, before, sinceNow);
-            var leftNow = payout.DailyCap - state.WithdrawnOn(pending.SentAt, asset);
+            var leftNow = payout.DailyCap - state.WithdrawnOn(pending.SentAt, asset, connector.AssetKey);
             if (quote.Amount > availableNow || quote.Amount > leftNow)
             {
                 Record(storeId, state, asset, ActivityOutcome.Waiting, quote.Amount > leftNow
@@ -417,7 +417,7 @@ public class PayoutService(IPayoutRepository payouts, ISweepSellRepository repos
         foreach (var pending in state.Pending.ToList())
         {
             var what = $"the earlier withdrawal of {Amount(pending.Amount)} {pending.Asset} to \"{pending.Destination}\" (sent {pending.SentAt:u})";
-            if (pending.ExchangeId != connector.Id || pending.KeyFingerprint != fingerprint || pending.Asset != asset)
+            if (pending.ExchangeId != connector.Id || pending.KeyFingerprint != fingerprint || connector.AssetKey(pending.Asset) != connector.AssetKey(asset))
             {
                 // Another account (or another asset's list) would never show it, and it would wrongly look lost.
                 Record(storeId, state, pending.Asset, ActivityOutcome.Failed,
@@ -603,6 +603,7 @@ public class PayoutService(IPayoutRepository payouts, ISweepSellRepository repos
     /// <list type="bullet">
     /// <item>another store paying it out live (enabled, not a dry run) with the same key, or a key whose account its last run saved as this one;</item>
     /// <item>another store's pending or unsettled withdrawals of it from the account, whatever its settings now;</item>
+    /// <item>another store paying out live from the account only while it holds a reserve of it (this payout could take that reserve below its minimum);</item>
     /// <item>this store's convert or hedging selling it from the account.</item>
     /// </list>
     /// Each run saves its account before this check, so of two stores paying out together the later run always finds the
@@ -617,6 +618,12 @@ public class PayoutService(IPayoutRepository payouts, ISweepSellRepository repos
         if (await OtherStorePaysOutAsync(storeId, asset, connector, credentials, account) is { } what)
             return $"Another store on this server {what} the same {name} account{unknown}. Only one store may pay out each asset of an account: " +
                    $"pay out {asset} from one store, or use another account.";
+        // The other half of the reserve check a store makes before paying out: whichever of the two runs checks later
+        // finds the other, as each saves its account first.
+        if (await OtherStoreReservesAsync(storeId, asset, connector, credentials, account))
+            return $"Another store on this server pays out from the same {name} account{unknown} only while it holds a {asset} reserve, and this " +
+                   $"payout could take that reserve below its minimum while that store's withdrawal is sent. Pay out {asset} from another " +
+                   "account, or clear that store's reserve.";
         // Assets are compared as the exchange names them, so two names for one balance (BTC and XBT) count as the same.
         var key = connector.AssetKey(asset);
         bool Same(string? other) => other is not null && connector.AssetKey(other) == key;
@@ -658,14 +665,36 @@ public class PayoutService(IPayoutRepository payouts, ISweepSellRepository repos
             if (other is not { Enabled: true, DryRun: false } || other.ExchangeId != connector.Id ||
                 !Same(other.Asset) || protector.Credentials(other) is not { } otherKey)
                 continue;
-            // A saved account counts for the key the other store still has; one saved for an older key is checked by its next run.
-            var saved = otherState.Account;
-            if (otherKey.ApiKey == credentials.ApiKey || account.Hash is null ||
-                saved is not null && saved.Hash == account.Hash && saved.KeyFingerprint == otherKey.Fingerprint())
+            if (SameAccount(otherState, otherKey, credentials, account))
                 return $"pays out {asset} live from";
         }
         return null;
     }
+
+    /// <summary>Whether another store pays out live from the account only while it holds a reserve of <paramref name="asset"/>.</summary>
+    async Task<bool> OtherStoreReservesAsync(string storeId, string asset, IWithdrawalConnector connector, ExchangeCredentials credentials,
+        PayoutAccount account)
+    {
+        var key = connector.AssetKey(asset);
+        foreach (var (otherId, other) in await payouts.GetAllAsync())
+        {
+            if (otherId == storeId || other is not { Enabled: true, DryRun: false, HasReserve: true } || other.ExchangeId != connector.Id ||
+                connector.AssetKey(other.ReserveAsset) != key || protector.Credentials(other) is not { } otherKey)
+                continue;
+            if (SameAccount(await payouts.GetStateAsync(otherId), otherKey, credentials, account))
+                return true;
+        }
+        return false;
+    }
+
+    /// <summary>
+    /// Whether another store's payout key is for <paramref name="account"/>: the same key, or one whose account that store's
+    /// last run saved as this one (any, when the exchange doesn't report accounts). A saved account counts for the key the
+    /// other store still has; one saved for an older key is checked by its next run.
+    /// </summary>
+    static bool SameAccount(PayoutState otherState, ExchangeCredentials otherKey, ExchangeCredentials credentials, PayoutAccount account) =>
+        otherKey.ApiKey == credentials.ApiKey || account.Hash is null ||
+        otherState.Account is { } saved && saved.Hash == account.Hash && saved.KeyFingerprint == otherKey.Fingerprint();
 
     /// <summary>The store's trading key when it is on the payout exchange, where it could change the saved destinations.</summary>
     ExchangeCredentials? TradingKey(SweepSellSettings settings, IWithdrawalConnector connector) =>
@@ -700,7 +729,7 @@ public class PayoutService(IPayoutRepository payouts, ISweepSellRepository repos
     {
         var since = clock.GetUtcNow() - History;
         return state.Unsettled.Where(list.Holds).Select(u => u.RequestedAt)
-            .Concat(state.Pending.Where(p => p.ExchangeId == list.ExchangeId && p.Asset == list.Asset).Select(p => p.SentAt))
+            .Concat(state.Pending.Where(p => p.ExchangeId == list.ExchangeId && list.Same(p.Asset)).Select(p => p.SentAt))
             .Select(t => t - MatchBefore).Append(since).Min();
     }
 
@@ -728,10 +757,16 @@ public class PayoutService(IPayoutRepository payouts, ISweepSellRepository repos
         return state.Unsettled.Where(list.Holds).Sum(u => u.Amount);
     }
 
-    /// <summary>The exchange account (by hash, null when the exchange doesn't report one) and asset whose withdrawals a run reads.</summary>
-    sealed record WithdrawalList(string ExchangeId, string? AccountHash, string Asset)
+    /// <summary>
+    /// The exchange account (by hash, null when the exchange doesn't report one) and asset whose withdrawals a run reads.
+    /// Assets are compared by <paramref name="Key"/>, the exchange's name for them, so entries saved under another name of
+    /// the same asset (BTC and XBT) still count.
+    /// </summary>
+    sealed record WithdrawalList(string ExchangeId, string? AccountHash, string Asset, Func<string, string> Key)
     {
-        public bool Holds(UnsettledWithdrawal u) => u.ExchangeId == ExchangeId && u.AccountHash == AccountHash && u.Asset == Asset;
+        public bool Same(string other) => Key(other) == Key(Asset);
+
+        public bool Holds(UnsettledWithdrawal u) => u.ExchangeId == ExchangeId && u.AccountHash == AccountHash && Same(u.Asset);
     }
 
     /// <summary>Whether the settings saved now still allow the live withdrawal a run planned with <paramref name="planned"/>.</summary>
@@ -745,29 +780,43 @@ public class PayoutService(IPayoutRepository payouts, ISweepSellRepository repos
 
     /// <summary>
     /// Whether the exchange holds at least the reserve the owner set (always, when none is set). Records why not, ending
-    /// with <paramref name="suffix"/>.
+    /// with <paramref name="suffix"/>. Withdrawals of the reserve asset this store sent from the account (when it paid that
+    /// asset out) that may not have left the balance yet are taken off it; those still in progress are read again first, so
+    /// one that settled stops counting.
     /// </summary>
     async Task<bool> ReserveHeldAsync(string storeId, PayoutState state, string asset, PayoutSettings payout, IWithdrawalConnector connector,
-        ExchangeCredentials credentials, string suffix, CancellationToken cancellationToken)
+        ExchangeCredentials credentials, PayoutAccount account, string suffix, CancellationToken cancellationToken)
     {
         if (!payout.HasReserve)
             return true;
         var reserve = payout.ReserveAsset;
-        decimal held;
+        var list = new WithdrawalList(connector.Id, account.Hash, reserve, connector.AssetKey);
+        decimal held, inProgress = 0;
         try
         {
+            if (state.Unsettled.Any(list.Holds))
+            {
+                var since = Since(state, list);
+                inProgress = Track(state, list, await connector.GetRecentWithdrawalsAsync(credentials, reserve, since, cancellationToken), since);
+            }
             held = await connector.GetAvailableBalanceAsync(credentials, reserve, cancellationToken);
         }
         catch (Exception e) when (IsRecordedFailure(e, cancellationToken))
         {
             Record(storeId, state, asset, ActivityOutcome.Failed,
-                $"Could not read the {reserve} balance from {connector.Name}, which must be at least {Amount(payout.ReserveMinimum)} before {asset} is paid out: {e.Message}.{suffix}");
+                $"Could not read the {reserve} balance and withdrawals from {connector.Name}, which must hold at least {Amount(payout.ReserveMinimum)} {reserve} " +
+                $"before {asset} is paid out: {e.Message}.{suffix}");
             return false;
         }
-        if (held >= payout.ReserveMinimum)
+        // Not yet accepted or listed: whether it left the balance isn't known.
+        inProgress += state.Pending.Where(p => p.ExchangeId == connector.Id && (p.AccountHash is null || p.AccountHash == account.Hash) && list.Same(p.Asset))
+            .Sum(p => p.Amount);
+        var counted = held - inProgress;
+        if (counted >= payout.ReserveMinimum)
             return true;
         Record(storeId, state, asset, ActivityOutcome.Waiting,
-            $"The {reserve} balance is {Amount(held)}, below the {Amount(payout.ReserveMinimum)} {reserve} required before {asset} is paid out. Waiting.{suffix}");
+            $"The {reserve} balance is {Amount(held)}" + (inProgress > 0 ? $", {Amount(counted)} once {Amount(inProgress)} in withdrawals still in progress leaves" : "") +
+            $", below the {Amount(payout.ReserveMinimum)} {reserve} required before {asset} is paid out. Waiting.{suffix}");
         return false;
     }
 
