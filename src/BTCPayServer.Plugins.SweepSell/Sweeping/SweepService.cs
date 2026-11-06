@@ -796,6 +796,18 @@ public class SweepService(ISweepSellRepository repository, SecretProtector prote
                                     }
                                     break;
                                 }
+                                if (awaiting.StillUnconfirmedShown && onChain == TransactionStatus.Confirmed)
+                                {
+                                    // Seen unconfirmed past the limit and confirmed since: it only just reached the exchange, which
+                                    // gets a full watch from now to credit it. The exchange is still searched from when it was signed.
+                                    awaiting.StillUnconfirmedShown = false;
+                                    awaiting.SignedAt ??= awaiting.SentAt;
+                                    awaiting.SentAt = now;
+                                    Record(storeId, state, awaiting.Asset, ActivityOutcome.Waiting,
+                                        $"The {Amount(awaiting.Amount)} {awaiting.Asset} sweep ({awaiting.Txid}) has confirmed. Its deposit is watched for another " +
+                                        $"{DepositWatchLimit.TotalHours:0} hours for the exchange to credit it.");
+                                    break;
+                                }
                                 state.Awaiting.Remove(awaiting);
                                 // No longer watched, so a later return couldn't be seen: stopped like a failed deposit.
                                 Stop(state, awaiting, now);

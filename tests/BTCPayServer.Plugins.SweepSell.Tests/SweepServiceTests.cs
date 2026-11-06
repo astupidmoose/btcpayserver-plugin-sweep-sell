@@ -1445,6 +1445,32 @@ public class SweepServiceTests
     }
 
     [Fact]
+    public async Task SweepConfirmedLateGetsAFreshWatch()
+    {
+        Configure();
+        Awaiting("BTC", "sweep-tx", SweepService.DepositWatchLimit);
+        _wallets.Statuses["sweep-tx"] = TransactionStatus.Unconfirmed;
+        var service = Service();
+        await service.WatchDepositsAsync(Ct);
+        var signedAt = State.Awaiting[0].SignedAt;
+
+        _wallets.Statuses["sweep-tx"] = TransactionStatus.Confirmed; // not credited yet: the exchange needs time to see it
+        _clock.Advance(TimeSpan.FromHours(1));
+        await service.WatchDepositsAsync(Ct);
+        var awaiting = Assert.Single(State.Awaiting);
+        Assert.Empty(State.Stopped);
+        Assert.Equal(_clock.GetUtcNow(), awaiting.SentAt);
+        Assert.Equal(signedAt, awaiting.SignedAt);
+        Assert.Contains("has confirmed", State.Activity[0].Message);
+
+        // Still not credited a full watch after it confirmed: stopped as usual.
+        _clock.Advance(SweepService.DepositWatchLimit);
+        await service.WatchDepositsAsync(Ct);
+        Assert.Empty(State.Awaiting);
+        Assert.True(State.Stopped.ContainsKey("BTC"));
+    }
+
+    [Fact]
     public async Task BumpIsRefusedAfterTheExchangeKeyChanged()
     {
         Configure();
