@@ -120,11 +120,56 @@ public class BtcPayStoreWallets(StoreRepository stores, PaymentMethodHandlerDict
             ? null
             : (await explorer.GetUnusedAsync(derivation, DerivationFeature.Change, 0, false, cancellationToken))?.Address
               ?? throw new SweepException($"The {wallet.CryptoCode} wallet has no change address.");
-        var feeRate = await fees.CreateFeeProvider(network).GetFeeRateAsync(request.FeeTargetBlocks);
+        var estimate = await fees.CreateFeeProvider(network).GetFeeRateAsync(request.FeeTargetBlocks);
+        var (feeRate, raised) = ChooseFeeRate(estimate, request.MinimumFeeRate);
         // The node's minimum relay fee, as BTCPay's own wallet uses it; unknown leaves NBitcoin's 1 sat/vB default.
         var minRelayFee = dashboard.Get(network.CryptoCode)?.Status?.BitcoinStatus?.MinRelayTxFee;
-        return SweepBuilder.Build(network.NBitcoinNetwork, signing, request.Amount, exchange, cold, request.ColdPercent, feeRate, change, minRelayFee);
+        var sweep = SweepBuilder.Build(network.NBitcoinNetwork, signing, request.Amount, exchange, cold, request.ColdPercent, feeRate, change, minRelayFee);
+        return raised ? sweep with { EstimatedFeeRate = Math.Round(estimate.SatoshiPerByte, 2) } : sweep;
     }
+
+    public async Task<SignedSweep> BuildReplacementAsync(StoreWallet wallet, string txid, string? exchangeAddress, decimal toExchange, decimal feeRate,
+        CancellationToken cancellationToken)
+    {
+        if (!wallet.IsHot)
+            throw new SweepException($"The {wallet.CryptoCode} wallet isn't a hot wallet, so this server can't sign a replacement.");
+        var (network, derivation) = Wallet(wallet);
+        var explorer = explorers.GetExplorerClient(network);
+        var info = await explorer.GetTransactionAsync(derivation, uint256.Parse(txid), cancellationToken)
+                   ?? throw new SweepException($"The {wallet.CryptoCode} wallet doesn't know the sweep {txid}.");
+        if (info.Confirmations > 0)
+            throw new SweepException($"The sweep {txid} is already confirmed.");
+        if (info.ReplacedBy is { } replacedBy)
+            throw new SweepException($"The sweep {txid} was already replaced by {replacedBy}.");
+        var tx = info.Transaction ?? throw new SweepException($"The {wallet.CryptoCode} wallet doesn't have the sweep {txid} itself.");
+        var accountKey = await explorer.GetMetadataAsync<string>(derivation, WellknownMetadataKeys.AccountHDKey, cancellationToken)
+                         ?? throw new SweepException($"The {wallet.CryptoCode} hot wallet's private key isn't on this server.");
+        var key = ExtKey.Parse(accountKey, network.NBitcoinNetwork);
+        var coins = info.Inputs
+            .Where(i => i.InputIndex >= 0 && i.InputIndex < tx.Inputs.Count && i.KeyPath is not null)
+            .Select(i => (Coin(tx.Inputs[i.InputIndex].PrevOut, new TxOut((Money)i.Value, i.ScriptPubKey), i.KeyPath), key.Derive(i.KeyPath).PrivateKey))
+            .ToList();
+        var minRelayFee = dashboard.Get(network.CryptoCode)?.Status?.BitcoinStatus?.MinRelayTxFee;
+        var exchangeScript = exchangeAddress is null ? null : Address(network, exchangeAddress).ScriptPubKey;
+        return SweepBuilder.Replace(network.NBitcoinNetwork, tx, coins, toExchange, new FeeRate(feeRate), minRelayFee, exchangeScript);
+
+        // As BTCPay's own wallet builds them: a wrapped (P2SH) SegWit coin needs its redeem script to be signed.
+        ICoin Coin(OutPoint outpoint, TxOut output, KeyPath keyPath)
+        {
+            var coin = new Coin(outpoint, output);
+            return output.ScriptPubKey.IsScriptType(ScriptType.P2SH) && derivation is StandardDerivationStrategyBase standard &&
+                   standard.GetDerivation(keyPath).Redeem is { } redeem
+                ? coin.ToScriptCoin(redeem)
+                : coin;
+        }
+    }
+
+    /// <summary>
+    /// The estimate, or <paramref name="minimum"/> (smallest unit per vB; 0 for none) when that is higher: BTCPay falls back
+    /// to the node's own estimate when it has no other, which can be far below the going rate.
+    /// </summary>
+    public static (FeeRate Rate, bool Raised) ChooseFeeRate(FeeRate estimate, decimal minimum) =>
+        minimum > 0 && new FeeRate(minimum) is var floor && floor > estimate ? (floor, true) : (estimate, false);
 
     public async Task<BroadcastOutcome> BroadcastAsync(string cryptoCode, string hex, CancellationToken cancellationToken)
     {

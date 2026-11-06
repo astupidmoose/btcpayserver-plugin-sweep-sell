@@ -241,7 +241,28 @@ sealed class FakeWallets : IStoreWallets
         var txid = Interlocked.Increment(ref _txids).ToString("x64");
         lock (_signed)
             _signed["signed-" + txid] = (id, swept);
-        return new SignedSweep(txid, "signed-" + txid, new SweepAmounts(toExchange, toCold, Fee, Balances[id] - swept), Balances[id], FeeRate);
+        // Like BTCPay's: the estimate (FeeRate here) unless the rule's lowest fee rate is higher.
+        var raised = request.MinimumFeeRate > FeeRate;
+        return new SignedSweep(txid, "signed-" + txid, new SweepAmounts(toExchange, toCold, Fee, Balances[id] - swept), Balances[id],
+            raised ? request.MinimumFeeRate : FeeRate, raised ? FeeRate : null);
+    }
+
+    public List<(string Txid, decimal ToExchange, decimal FeeRate)> Replacing { get; } = [];
+    public Exception? ReplaceError { get; set; }
+
+    /// <summary>The exchange address each replacement was asked to find its exchange output by.</summary>
+    public List<string?> ReplacingAddresses { get; } = [];
+
+    public Task<SignedSweep> BuildReplacementAsync(StoreWallet wallet, string txid, string? exchangeAddress, decimal toExchange, decimal feeRate,
+        CancellationToken cancellationToken)
+    {
+        Replacing.Add((txid, toExchange, feeRate));
+        ReplacingAddresses.Add(exchangeAddress);
+        if (ReplaceError is not null)
+            throw ReplaceError;
+        const decimal extra = 0.0002m;
+        var newTxid = "bumped-" + txid;
+        return Task.FromResult(new SignedSweep(newTxid, "signed-" + newTxid, new SweepAmounts(toExchange - extra, 0, Fee + extra, 0), 0, feeRate));
     }
 
     public Task<BroadcastOutcome> BroadcastAsync(string cryptoCode, string hex, CancellationToken cancellationToken)
@@ -261,8 +282,10 @@ sealed class FakeWallets : IStoreWallets
         return Task.FromResult(outcome);
     }
 
+    public Exception? StatusError { get; set; }
+
     public Task<TransactionStatus> GetStatusAsync(string cryptoCode, string txid, CancellationToken cancellationToken) =>
-        Task.FromResult(Statuses.GetValueOrDefault(txid, TransactionStatus.Unknown));
+        StatusError is not null ? Task.FromException<TransactionStatus>(StatusError) : Task.FromResult(Statuses.GetValueOrDefault(txid, TransactionStatus.Unknown));
 
     /// <summary>Replaced transaction to the one that replaced it, as the wallet would report it after following every bump.</summary>
     public Dictionary<string, string> Replacements { get; } = new();

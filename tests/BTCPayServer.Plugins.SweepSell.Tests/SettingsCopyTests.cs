@@ -32,7 +32,7 @@ public class SettingsCopyTests
             Enabled = true, DryRun = false, IntervalMinutes = 30, FeeTargetBlocks = 3,
             Rules =
             [
-                new SweepRule { CryptoCode = "BTC", Enabled = true, MinimumBalance = 0.01m, ColdPercent = 20, ColdDestination = FixedCold, DailyCap = 1 },
+                new SweepRule { CryptoCode = "BTC", Enabled = true, MinimumBalance = 0.01m, ColdPercent = 20, ColdDestination = FixedCold, DailyCap = 1, MinimumFeeRate = 3 },
                 new SweepRule { CryptoCode = "LTC", Enabled = true, MinimumBalance = 1, ColdPercent = 10, ColdDestination = ColdXpub, ColdStartIndex = 5 },
                 new SweepRule { CryptoCode = "DOGE", Enabled = true, MinimumBalance = 100 }
             ]
@@ -66,7 +66,7 @@ public class SettingsCopyTests
         Assert.Equal("CAD", copy.Hedge.Markets["GBP"]);
         Assert.Equal((30, 3), (copy.Sweep.IntervalMinutes, copy.Sweep.FeeTargetBlocks));
         var btc = Assert.Single(copy.Sweep.Rules, r => r.CryptoCode == "BTC");
-        Assert.Equal((0.01m, 20m, FixedCold, 1m), (btc.MinimumBalance, btc.ColdPercent, btc.ColdDestination, btc.DailyCap));
+        Assert.Equal((0.01m, 20m, FixedCold, 1m, 3m), (btc.MinimumBalance, btc.ColdPercent, btc.ColdDestination, btc.DailyCap, btc.MinimumFeeRate));
     }
 
     [Fact]

@@ -41,7 +41,8 @@ public static class SettingsCopy
                 ColdDestination = rule.ColdDestination,
                 ColdStartIndex = rule.ColdStartIndex,
                 DailyCap = rule.DailyCap,
-                IncludeUnconfirmed = rule.IncludeUnconfirmed
+                IncludeUnconfirmed = rule.IncludeUnconfirmed,
+                MinimumFeeRate = rule.MinimumFeeRate
             };
             // Each store counts its own addresses from an extended public key, so two stores would give out the same ones.
             if (!string.IsNullOrEmpty(copy.ColdDestination) && isExtendedKey(code, copy.ColdDestination))
