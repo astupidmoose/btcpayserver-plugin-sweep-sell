@@ -73,6 +73,9 @@ public class PendingSweep
 
     public int? FeeTargetBlocks { get; set; }
 
+    /// <summary>The estimate for <see cref="FeeTargetBlocks"/>, kept only when the rule's lowest fee rate was paid instead.</summary>
+    public decimal? EstimatedFeeRate { get; set; }
+
     /// <summary>The cold wallet key and index the cold address came from, to move past it once the sweep is sent.</summary>
     public string? ColdDestination { get; set; }
 
@@ -88,6 +91,27 @@ public class AwaitingDeposit
     public string Asset { get; set; } = "";
     public string Txid { get; set; } = "";
     public decimal Amount { get; set; }
+
+    /// <summary>
+    /// The exchange deposit address the sweep pays, which finds its output in any replacement (a bump made elsewhere may
+    /// have changed the amount). Null for sweeps sent by earlier versions, whose output is found by <see cref="Amount"/>.
+    /// </summary>
+    public string? ExchangeAddress { get; set; }
+
+    /// <summary>
+    /// Fingerprint of the exchange key the deposit address was read with: a bump's minimum deposit must be read for the same
+    /// account. Null for sweeps sent by earlier versions.
+    /// </summary>
+    public string? KeyFingerprint { get; set; }
+
+    /// <summary>Whether the last on-chain status check, made once the watch limit passed, failed (shown once).</summary>
+    public bool StatusCheckFailing { get; set; }
+
+    /// <summary>
+    /// When the sweep was first seen confirmed once the watch limit passed: the exchange gets a full watch from then to credit
+    /// it, since it may have only just confirmed.
+    /// </summary>
+    public DateTimeOffset? ConfirmedSeenAt { get; set; }
 
     /// <summary>The exchange the sweep went to: its deposits are only looked up there.</summary>
     public string? ExchangeId { get; set; }
@@ -106,6 +130,9 @@ public class AwaitingDeposit
 
     /// <summary>When the wallet last said whether <see cref="Txid"/> was replaced.</summary>
     public DateTimeOffset? ReplacementCheckedAt { get; set; }
+
+    /// <summary>The activity already says the sweep is still unconfirmed past the watch limit.</summary>
+    public bool StillUnconfirmedShown { get; set; }
 
     /// <summary>The wallet couldn't say whether the sweep was replaced; recorded once when it starts failing.</summary>
     public bool ReplacementCheckFailing { get; set; }

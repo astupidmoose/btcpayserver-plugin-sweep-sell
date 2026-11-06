@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.1.6 (beta)
+
+- **Lowest fee rate per coin:** a sweep never pays less than the rate you set, even when the estimate is lower. BTCPay's
+  estimate falls back to the node's own when it can't reach its fee source, and that can be far below the going rate
+  now that nodes relay down to 0.1 sat/vB. The activity says when the lowest rate was used and what the estimate was.
+- **Never below 1 sat/vB:** whatever the estimate and the setting, a sweep pays at least 1 per vB, the lowest rate every
+  node relays. Cheaper sweeps were dropped by many nodes and wallets, so they could sit unconfirmed and unseen.
+- **Bump fee:** a sent sweep stuck unconfirmed can have its fee raised from the settings page, under Waiting for the
+  exchange. It is replaced (RBF) by the same transaction at the rate you enter, the extra fee coming out of what the
+  exchange gets; the cold wallet's share is unchanged, and the deposit is followed to the new transaction. BTCPay's own
+  wallet can't bump a sweep split between the exchange and a cold wallet, since neither output is the hot wallet's.
+  Refused while the store is paused or sweeping is off or in dry run, and when the exchange's share would fall below its
+  minimum deposit.
+- **Unconfirmed sweeps aren't given up on:** a sweep still unconfirmed after 24 hours hasn't reached the exchange yet, so
+  it stays watched (and can be bumped) instead of the coin being stopped. The activity says so once. A confirmed sweep
+  not credited within 24 hours gets another 24 hours from when it is first seen confirmed, since it may have only just
+  reached the exchange.
+
 ## 0.1.5 (beta)
 
 - **Sweeps signal replace-by-fee** (BIP 125), so a sweep stuck below the going fee can be bumped from the wallet.

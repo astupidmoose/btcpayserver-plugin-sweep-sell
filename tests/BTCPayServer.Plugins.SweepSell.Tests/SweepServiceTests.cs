@@ -83,12 +83,48 @@ public class SweepServiceTests
     }
 
     [Fact]
+    public async Task LowestFeeRateIsPaidWhenTheEstimateIsBelowIt()
+    {
+        Configure(dryRun: true, rule: r => r.MinimumFeeRate = 3);
+        await Service().RunAsync(_storeId, wait: false, Ct);
+        Assert.Equal(3m, Assert.Single(_wallets.Built).MinimumFeeRate);
+        Assert.Contains("(3 sat/vB, the lowest fee rate for BTC: the estimate for confirmation within 3 blocks was only 2.5)", State.Activity[0].Message);
+    }
+
+    [Fact]
+    public async Task EstimateAboveTheLowestFeeRateIsPaidAsUsual()
+    {
+        Configure(dryRun: true, rule: r => r.MinimumFeeRate = 1);
+        await Service().RunAsync(_storeId, wait: false, Ct);
+        Assert.Contains("(2.5 sat/vB, aiming for confirmation within 3 blocks)", State.Activity[0].Message);
+    }
+
+    [Fact]
+    public async Task SentSweepStillSaysTheLowestFeeRateWasUsed()
+    {
+        Configure(rule: r => r.MinimumFeeRate = 3);
+        await Service().RunAsync(_storeId, wait: false, Ct);
+        Assert.Contains(State.Activity, a => a.Outcome == ActivityOutcome.Sent &&
+                                             a.Message.Contains("the lowest fee rate for BTC: the estimate for confirmation within 3 blocks was only 2.5"));
+    }
+
+    [Theory]
+    [InlineData(0)]
+    [InlineData(0.5)]
+    public async Task SweepsNeverAskForLessThanOneSatPerVbyte(double rate)
+    {
+        Configure(dryRun: true, rule: r => r.MinimumFeeRate = (decimal)rate);
+        await Service().RunAsync(_storeId, wait: false, Ct);
+        Assert.Equal(SweepSettings.LowestFeeRate, Assert.Single(_wallets.Built).MinimumFeeRate);
+    }
+
+    [Fact]
     public async Task LiveSweepBroadcastsAndWaitsForTheDeposit()
     {
         Configure();
         await Service().RunAsync(_storeId, wait: false, Ct);
         var request = Assert.Single(_wallets.Built);
-        Assert.Equal(new SweepRequest(false, null, "exchange-deposit-address", null, 0, 3), request);
+        Assert.Equal(new SweepRequest(false, null, "exchange-deposit-address", null, 0, 3, SweepSettings.LowestFeeRate), request);
         Assert.Single(_wallets.Broadcasts);
         Assert.Empty(State.Pending);
         var awaiting = Assert.Single(State.Awaiting);
@@ -358,6 +394,72 @@ public class SweepServiceTests
         Assert.Contains("exchange key changed since it was signed", State.Activity[0].Message);
 
         _repository.Settings[_storeId].ProtectedApiKey = Protector.Protect("test-api-key"); // put back
+        await service.RunAsync(_storeId, wait: false, Ct);
+        Assert.Equal(2, _wallets.Broadcasts.Count);
+        Assert.Empty(State.Pending);
+    }
+
+    [Fact]
+    public async Task PendingSweepIsRebroadcastAfterTheLowestFeeRateChangesBelowWhatItPays()
+    {
+        Configure();
+        _wallets.BroadcastResults.Enqueue(() => throw new HttpRequestException("timeout"));
+        var service = Service();
+        await service.RunAsync(_storeId, wait: false, Ct);
+        Assert.Equal(FakeWallets.FeeRate, Assert.Single(State.Pending).FeeRate);
+
+        // The signed transaction already pays at least the new lowest rate.
+        _repository.Settings[_storeId].Sweep.Rules[0].MinimumFeeRate = 2;
+        await service.RunAsync(_storeId, wait: false, Ct);
+        Assert.Equal(2, _wallets.Broadcasts.Count);
+        Assert.Empty(State.Pending);
+    }
+
+    [Fact]
+    public async Task PendingSweepBelowARaisedLowestFeeRateIsNotRebroadcast()
+    {
+        Configure();
+        _wallets.BroadcastResults.Enqueue(() => throw new HttpRequestException("timeout"));
+        var service = Service();
+        await service.RunAsync(_storeId, wait: false, Ct);
+        Assert.Single(State.Pending);
+
+        // Raised to stop the underpriced sweep: the old transaction must not go out.
+        _repository.Settings[_storeId].Sweep.Rules[0].MinimumFeeRate = 3;
+        await service.RunAsync(_storeId, wait: false, Ct);
+        Assert.Single(_wallets.Broadcasts);
+        Assert.Single(State.Pending);
+        Assert.Contains(State.Activity, a => a.Outcome == ActivityOutcome.Waiting && a.Message.Contains("below the lowest fee rate now set (3)"));
+    }
+
+    [Fact]
+    public async Task PendingSweepWithoutARecordedFeeRateIsStillRebroadcastAfterTheLowestFeeRateRises()
+    {
+        Configure();
+        _wallets.BroadcastResults.Enqueue(() => throw new HttpRequestException("timeout"));
+        var service = Service();
+        await service.RunAsync(_storeId, wait: false, Ct);
+        // Saved by a version that didn't record the fee rate.
+        Assert.Single(State.Pending).FeeRate = null;
+
+        _repository.Settings[_storeId].Sweep.Rules[0].MinimumFeeRate = 3;
+        await service.RunAsync(_storeId, wait: false, Ct);
+        Assert.Equal(2, _wallets.Broadcasts.Count);
+        Assert.Empty(State.Pending);
+    }
+
+    [Fact]
+    public async Task PendingSweepSignedBeforeTheLowestFeeRateExistedIsStillRebroadcast()
+    {
+        Configure();
+        _wallets.BroadcastResults.Enqueue(() => throw new HttpRequestException("timeout"));
+        var service = Service();
+        await service.RunAsync(_storeId, wait: false, Ct);
+        // A rule saved by an earlier version has no lowest fee rate in it.
+        var pending = Assert.Single(State.Pending);
+        var old = Newtonsoft.Json.Linq.JObject.Parse(pending.Rule!);
+        old.Remove("MinimumFeeRate");
+        pending.Rule = Newtonsoft.Json.JsonConvert.SerializeObject(old);
         await service.RunAsync(_storeId, wait: false, Ct);
         Assert.Equal(2, _wallets.Broadcasts.Count);
         Assert.Empty(State.Pending);
@@ -1189,6 +1291,265 @@ public class SweepServiceTests
         await service.WatchDepositsAsync(Ct);
         Assert.Equal("bumped-tx", Assert.Single(State.Awaiting).Txid);
         Assert.True(State.Stopped.ContainsKey("BTC")); // only the owner resumes it
+    }
+
+    [Fact]
+    public async Task BumpedFeeReplacesTheSweepAndItsDepositIsFollowed()
+    {
+        Configure();
+        Awaiting("BTC", "sweep-tx", TimeSpan.FromHours(20));
+        var signedAt = State.Awaiting[0].SignedAt;
+        var service = Service();
+        var (done, message) = await service.BumpFeeAsync(_storeId, "sweep-tx", 3, Ct);
+        Assert.True(done, message);
+        Assert.Equal(("sweep-tx", 0.5m, 3m), Assert.Single(_wallets.Replacing));
+        Assert.Contains("signed-bumped-sweep-tx", _wallets.Broadcasts);
+        var awaiting = Assert.Single(State.Awaiting);
+        Assert.Equal(("bumped-sweep-tx", 0.4998m), (awaiting.Txid, awaiting.Amount));
+        Assert.Equal(["sweep-tx"], awaiting.ReplacedTxids);
+        Assert.Equal(_clock.GetUtcNow(), awaiting.SentAt); // a full watch for the new one
+        Assert.Equal(signedAt, awaiting.SignedAt);
+        Assert.StartsWith("Fee bumped by hand", State.Activity[0].Message);
+
+        _exchange.Deposits["bumped-sweep-tx"] = new DepositStatus(DepositState.Credited, 0.4998m);
+        _clock.Advance(TimeSpan.FromMinutes(1));
+        await service.WatchDepositsAsync(Ct);
+        Assert.Empty(State.Awaiting);
+        Assert.Empty(State.Stopped);
+    }
+
+    [Fact]
+    public async Task RefusedReplacementLeavesTheSweepAsItWas()
+    {
+        Configure();
+        Awaiting("BTC", "sweep-tx", TimeSpan.FromHours(1));
+        _wallets.BroadcastResults.Enqueue(() => new BroadcastOutcome(false, "insufficient fee"));
+        var (done, message) = await Service().BumpFeeAsync(_storeId, "sweep-tx", 3, Ct);
+        Assert.False(done);
+        Assert.Contains("insufficient fee", message);
+        Assert.Equal("sweep-tx", Assert.Single(State.Awaiting).Txid);
+    }
+
+    [Fact]
+    public async Task ReplacementThatCantBeBuiltSaysWhy()
+    {
+        Configure();
+        Awaiting("BTC", "sweep-tx", TimeSpan.FromHours(1));
+        _wallets.ReplaceError = new SweepException("The sweep sweep-tx is already confirmed.");
+        var (done, message) = await Service().BumpFeeAsync(_storeId, "sweep-tx", 3, Ct);
+        Assert.False(done);
+        Assert.Equal("The fee wasn't bumped: The sweep sweep-tx is already confirmed.", message);
+        Assert.Empty(_wallets.Broadcasts);
+    }
+
+    [Theory]
+    [InlineData("paused")]
+    [InlineData("off")]
+    [InlineData("dry run")]
+    public async Task BumpIsRefusedWhileSweepingIsPausedOffOrInDryRun(string how)
+    {
+        Configure();
+        var settings = _repository.Settings[_storeId];
+        switch (how)
+        {
+            case "paused": settings.Paused = true; break;
+            case "off": settings.Sweep.Enabled = false; break;
+            case "dry run": settings.Sweep.DryRun = true; break;
+        }
+        Awaiting("BTC", "sweep-tx", TimeSpan.FromHours(1));
+        var (done, message) = await Service().BumpFeeAsync(_storeId, "sweep-tx", 3, Ct);
+        Assert.False(done);
+        Assert.Contains("paused, off or in dry run", message);
+        Assert.Empty(_wallets.Replacing);
+        Assert.Empty(_wallets.Broadcasts);
+    }
+
+    [Fact]
+    public async Task BumpThatWouldLeaveTheDepositBelowTheExchangeMinimumIsRefused()
+    {
+        Configure();
+        Awaiting("BTC", "sweep-tx", TimeSpan.FromHours(1));
+        _exchange.MinimumDeposit = 0.4999m; // the bump takes 0.0002 from the 0.5 deposit
+        var (done, message) = await Service().BumpFeeAsync(_storeId, "sweep-tx", 3, Ct);
+        Assert.False(done);
+        Assert.Contains("below its minimum deposit of 0.4999 BTC", message);
+        Assert.Empty(_wallets.Broadcasts);
+        Assert.Equal("sweep-tx", Assert.Single(State.Awaiting).Txid);
+    }
+
+    [Fact]
+    public async Task BumpFailingOnAnUnreachableWalletSaysWhy()
+    {
+        Configure();
+        Awaiting("BTC", "sweep-tx", TimeSpan.FromHours(1));
+        _wallets.ReplaceError = new HttpRequestException("explorer unreachable");
+        var (done, message) = await Service().BumpFeeAsync(_storeId, "sweep-tx", 3, Ct);
+        Assert.False(done);
+        Assert.Equal("The fee wasn't bumped: explorer unreachable", message);
+        Assert.Empty(_wallets.Broadcasts);
+    }
+
+    [Fact]
+    public async Task BumpFindsTheExchangeOutputByItsAddress()
+    {
+        Configure();
+        Awaiting("BTC", "sweep-tx", TimeSpan.FromHours(1));
+        State.Awaiting[0].ExchangeAddress = "exchange-deposit-address";
+        var (done, message) = await Service().BumpFeeAsync(_storeId, "sweep-tx", 3, Ct);
+        Assert.True(done, message);
+        Assert.Equal("exchange-deposit-address", Assert.Single(_wallets.ReplacingAddresses));
+    }
+
+    [Fact]
+    public async Task SentSweepIsWatchedWithItsExchangeAddress()
+    {
+        Configure();
+        await Service().RunAsync(_storeId, wait: false, Ct);
+        Assert.Equal("exchange-deposit-address", Assert.Single(State.Awaiting).ExchangeAddress);
+    }
+
+    [Theory]
+    [InlineData("sweep-tx", 0)]
+    [InlineData("sweep-tx", 2001)]
+    [InlineData("other-tx", 3)]
+    public async Task BumpNeedsAWaitingSweepAndASensibleRate(string txid, double rate)
+    {
+        Configure();
+        Awaiting("BTC", "sweep-tx", TimeSpan.FromHours(1));
+        var (done, _) = await Service().BumpFeeAsync(_storeId, txid, (decimal)rate, Ct);
+        Assert.False(done);
+        Assert.Empty(_wallets.Replacing);
+    }
+
+    [Fact]
+    public async Task FailedStatusCheckAtTheWatchLimitIsShownOnceAndKeepsWatching()
+    {
+        Configure();
+        Awaiting("BTC", "sweep-tx", SweepService.DepositWatchLimit);
+        _wallets.StatusError = new HttpRequestException("node unreachable");
+        var service = Service();
+        await service.WatchDepositsAsync(Ct);
+        Assert.Single(State.Awaiting);
+        Assert.Empty(State.Stopped);
+        Assert.Contains("couldn't say whether the sweep has confirmed: node unreachable", Assert.Single(State.Activity).Message);
+
+        _clock.Advance(TimeSpan.FromMinutes(1));
+        await service.WatchDepositsAsync(Ct);
+        Assert.Single(State.Activity); // not again every minute
+
+        _wallets.StatusError = null;
+        _wallets.Statuses["sweep-tx"] = TransactionStatus.Unconfirmed;
+        _clock.Advance(TimeSpan.FromMinutes(1));
+        await service.WatchDepositsAsync(Ct);
+        Assert.False(Assert.Single(State.Awaiting).StatusCheckFailing);
+    }
+
+    [Fact]
+    public async Task SweepConfirmedLateGetsAFreshWatch()
+    {
+        Configure();
+        Awaiting("BTC", "sweep-tx", SweepService.DepositWatchLimit);
+        _wallets.Statuses["sweep-tx"] = TransactionStatus.Unconfirmed;
+        var service = Service();
+        await service.WatchDepositsAsync(Ct);
+        var signedAt = State.Awaiting[0].SignedAt;
+
+        _wallets.Statuses["sweep-tx"] = TransactionStatus.Confirmed; // not credited yet: the exchange needs time to see it
+        _clock.Advance(TimeSpan.FromHours(1));
+        await service.WatchDepositsAsync(Ct);
+        var awaiting = Assert.Single(State.Awaiting);
+        Assert.Empty(State.Stopped);
+        Assert.Equal(_clock.GetUtcNow(), awaiting.ConfirmedSeenAt);
+        Assert.Equal(signedAt, awaiting.SignedAt);
+        Assert.Contains("has confirmed", State.Activity[0].Message);
+
+        // Still not credited a full watch after it confirmed: stopped as usual.
+        _clock.Advance(SweepService.DepositWatchLimit);
+        await service.WatchDepositsAsync(Ct);
+        Assert.Empty(State.Awaiting);
+        Assert.True(State.Stopped.ContainsKey("BTC"));
+    }
+
+    [Fact]
+    public async Task FollowingAReplacementClearsTheOldTransactionsStatusState()
+    {
+        Configure();
+        Awaiting("BTC", "sweep-tx", SweepService.DepositWatchLimit);
+        _wallets.StatusError = new HttpRequestException("node unreachable");
+        var service = Service();
+        await service.WatchDepositsAsync(Ct);
+        Assert.True(State.Awaiting[0].StatusCheckFailing);
+
+        _wallets.Replacements["sweep-tx"] = "bumped-tx";
+        _clock.Advance(TimeSpan.FromMinutes(1));
+        await service.WatchDepositsAsync(Ct);
+        var awaiting = Assert.Single(State.Awaiting);
+        Assert.Equal("bumped-tx", awaiting.Txid);
+        Assert.False(awaiting.StatusCheckFailing); // a failure for the new transaction is shown again
+        Assert.Null(awaiting.ConfirmedSeenAt);
+    }
+
+    [Fact]
+    public async Task BumpIsRefusedAfterTheExchangeKeyChanged()
+    {
+        Configure();
+        Awaiting("BTC", "sweep-tx", TimeSpan.FromHours(1));
+        State.Awaiting[0].KeyFingerprint = "fingerprint-of-an-older-key";
+        var (done, message) = await Service().BumpFeeAsync(_storeId, "sweep-tx", 3, Ct);
+        Assert.False(done);
+        Assert.Contains("exchange or its key changed", message);
+        Assert.Empty(_wallets.Replacing);
+    }
+
+    [Fact]
+    public async Task SentSweepIsWatchedWithItsKeyAndBumpedWithTheSameKey()
+    {
+        Configure();
+        var service = Service();
+        await service.RunAsync(_storeId, wait: false, Ct);
+        var awaiting = Assert.Single(State.Awaiting);
+        Assert.NotNull(awaiting.KeyFingerprint);
+        var (done, message) = await service.BumpFeeAsync(_storeId, awaiting.Txid, 3, Ct);
+        Assert.True(done, message);
+    }
+
+    [Fact]
+    public async Task SweepStillUnconfirmedAfterTheWatchLimitStaysWatched()
+    {
+        Configure();
+        Awaiting("BTC", "sweep-tx", SweepService.DepositWatchLimit);
+        _wallets.Statuses["sweep-tx"] = TransactionStatus.Unconfirmed;
+        var service = Service();
+        await service.WatchDepositsAsync(Ct);
+        Assert.Single(State.Awaiting);
+        Assert.Empty(State.Stopped);
+        Assert.Contains("still isn't confirmed after 24 hours", Assert.Single(State.Activity).Message);
+
+        _clock.Advance(TimeSpan.FromMinutes(1));
+        await service.WatchDepositsAsync(Ct);
+        Assert.Single(State.Activity); // said once
+
+        var (done, _) = await service.BumpFeeAsync(_storeId, "sweep-tx", 3, Ct);
+        Assert.True(done);
+        Assert.False(Assert.Single(State.Awaiting).StillUnconfirmedShown);
+    }
+
+    [Fact]
+    public async Task ConfirmedSweepNotCreditedWithinTheLimitStillStopsTheCoin()
+    {
+        Configure();
+        Awaiting("BTC", "sweep-tx", SweepService.DepositWatchLimit);
+        _wallets.Statuses["sweep-tx"] = TransactionStatus.Confirmed;
+        var service = Service();
+        await service.WatchDepositsAsync(Ct);
+        // It may have only just confirmed: the exchange gets a full watch from now.
+        Assert.Single(State.Awaiting);
+        Assert.Contains("has confirmed but isn't credited yet", State.Activity[0].Message);
+
+        _clock.Advance(SweepService.DepositWatchLimit);
+        await service.WatchDepositsAsync(Ct);
+        Assert.Empty(State.Awaiting);
+        Assert.True(State.Stopped.ContainsKey("BTC"));
     }
 
     [Fact]

@@ -246,7 +246,7 @@ public class SettingsTests
                 new SweepRuleViewModel
                 {
                     CryptoCode = " btc ", Enabled = true, MinimumBalance = 0.01m, ColdPercent = 25, ColdDestination = " xpub-cold ",
-                    ColdStartIndex = 4, DailyCap = 0.5m, IncludeUnconfirmed = true, WalletStatus = "Hot wallet"
+                    ColdStartIndex = 4, DailyCap = 0.5m, IncludeUnconfirmed = true, MinimumFeeRate = 3, WalletStatus = "Hot wallet"
                 },
                 new SweepRuleViewModel { CryptoCode = "LTC", ColdDestination = " " }
             ]
@@ -255,6 +255,8 @@ public class SettingsTests
         var btc = settings.Sweep.Rules[0];
         Assert.Equal(("BTC", true, 0.01m, 25m, "xpub-cold", 4, 0.5m, true),
             (btc.CryptoCode, btc.Enabled, btc.MinimumBalance, btc.ColdPercent, btc.ColdDestination, btc.ColdStartIndex, btc.DailyCap, btc.IncludeUnconfirmed));
+        Assert.Equal(3m, btc.MinimumFeeRate);
+        Assert.Equal(0m, settings.Sweep.Rules[1].MinimumFeeRate);
         Assert.Equal(("LTC", false, null), (settings.Sweep.Rules[1].CryptoCode, settings.Sweep.Rules[1].Enabled, settings.Sweep.Rules[1].ColdDestination));
     }
 
@@ -282,6 +284,22 @@ public class SettingsTests
 
     [Fact]
     public void ValidSweepFormHasNoErrors() => Assert.Empty(SweepErrors(SweepForm()));
+
+    [Theory]
+    [InlineData("0", true)]
+    [InlineData("3", true)]
+    [InlineData("0.5", true)]
+    [InlineData("2000", true)]
+    [InlineData("-1", false)]
+    [InlineData("2000.01", false)]
+    public void LowestFeeRateIsValidated(string rate, bool valid)
+    {
+        var errors = SweepErrors(SweepForm(r => r.MinimumFeeRate = decimal.Parse(rate, System.Globalization.CultureInfo.InvariantCulture)));
+        if (valid)
+            Assert.Empty(errors);
+        else
+            Assert.Equal("SweepRules[0].MinimumFeeRate", Assert.Single(errors));
+    }
 
     [Theory]
     [InlineData("min", "SweepRules[0].MinimumBalance")]

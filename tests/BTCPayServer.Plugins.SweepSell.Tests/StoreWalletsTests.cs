@@ -56,4 +56,16 @@ public class StoreWalletsTests
         Assert.Throws<SweepException>(() => Wallets.GetColdAddress("BTC", Account.ToString(Regtest), -1));
         Assert.Throws<SweepException>(() => Wallets.GetColdAddress("DOGE", Receive(0), 0)); // not on this server
     }
+
+    [Theory]
+    [InlineData(0.11, 0, 0.11, false)]
+    [InlineData(0.11, 3, 3, true)]
+    [InlineData(5, 3, 5, false)]
+    [InlineData(3, 3, 3, false)]
+    public void TheLowestFeeRateRaisesALowerEstimate(double estimate, double minimum, double paid, bool raised)
+    {
+        var (rate, wasRaised) = BtcPayStoreWallets.ChooseFeeRate(new FeeRate((decimal)estimate), (decimal)minimum);
+        Assert.Equal((decimal)paid, rate.SatoshiPerByte);
+        Assert.Equal(raised, wasRaised);
+    }
 }

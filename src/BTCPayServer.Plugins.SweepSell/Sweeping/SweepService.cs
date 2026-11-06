@@ -300,7 +300,8 @@ public class SweepService(ISweepSellRepository repository, SecretProtector prote
             }
             var feeTarget = Math.Clamp(settings.Sweep.FeeTargetBlocks, SweepSettings.MinFeeTargetBlocks, SweepSettings.MaxFeeTargetBlocks);
             var sweep = await wallets.BuildAsync(wallet,
-                new SweepRequest(rule.IncludeUnconfirmed, amount, deposit.Address, coldAddress, coldAddress is null ? 0 : rule.ColdPercent, feeTarget),
+                new SweepRequest(rule.IncludeUnconfirmed, amount, deposit.Address, coldAddress, coldAddress is null ? 0 : rule.ColdPercent, feeTarget,
+                    Math.Clamp(rule.MinimumFeeRate, SweepSettings.LowestFeeRate, SweepSettings.MaxMinimumFeeRate)),
                 cancellationToken);
             // The wallet is read again to build the sweep, and something else on the server may have spent from it meanwhile.
             if (sweep.Balance < rule.MinimumBalance)
@@ -316,7 +317,7 @@ public class SweepService(ISweepSellRepository repository, SecretProtector prote
                 return;
             }
             var what = Describe(code, sweep.Amounts.ToExchange, exchange.Name, deposit.Address, sweep.Amounts.ToCold, coldAddress, sweep.Amounts.Fee,
-                sweep.FeeRate, feeTarget);
+                sweep.FeeRate, feeTarget, sweep.EstimatedFeeRate);
             if (settings.Sweep.DryRun)
             {
                 Record(storeId, state, code, ActivityOutcome.DryRun, $"Dry run: would send {what}. The transaction was signed but not broadcast.");
@@ -357,6 +358,7 @@ public class SweepService(ISweepSellRepository repository, SecretProtector prote
                     Fee = sweep.Amounts.Fee,
                     FeeRate = sweep.FeeRate,
                     FeeTargetBlocks = feeTarget,
+                    EstimatedFeeRate = sweep.EstimatedFeeRate,
                     ColdDestination = coldIndex is null ? null : ColdKey(rule.ColdDestination!),
                     ColdIndex = coldIndex,
                     CreatedAt = now
@@ -404,7 +406,7 @@ public class SweepService(ISweepSellRepository repository, SecretProtector prote
     {
         var code = pending.CryptoCode;
         var what = Describe(code, pending.ToExchange, pending.ExchangeId ?? "the exchange", pending.ExchangeAddress, pending.ToCold, pending.ColdAddress, pending.Fee,
-            pending.FeeRate, pending.FeeTargetBlocks);
+            pending.FeeRate, pending.FeeTargetBlocks, pending.EstimatedFeeRate);
         var status = await wallets.GetStatusAsync(code, pending.Txid, cancellationToken);
         if (status == TransactionStatus.Replaced)
         {
@@ -442,6 +444,18 @@ public class SweepService(ISweepSellRepository repository, SecretProtector prote
                 Record(storeId, state, code, ActivityOutcome.Waiting,
                     $"The earlier sweep of {Amount(pending.Spent)} {code} ({pending.Txid}) isn't on the network, and the {code} rule changed since it was signed, so it isn't rebroadcast. " +
                     "Put the rule back, or remove it under Pending sweeps. Nothing more is swept until then.");
+                return false;
+            }
+            // The lowest fee rate isn't part of the snapshot, so raising it doesn't block a rebroadcast by itself; but a sweep
+            // signed below it is the underpriced sweep the owner raised it to stop. One signed before the fee rate was recorded
+            // has no rate to compare, and is rebroadcast as before.
+            var floor = Math.Clamp(rule.MinimumFeeRate, SweepSettings.LowestFeeRate, SweepSettings.MaxMinimumFeeRate);
+            if (pending.FeeRate is { } paid && paid < floor)
+            {
+                Record(storeId, state, code, ActivityOutcome.Waiting,
+                    $"The earlier sweep of {Amount(pending.Spent)} {code} ({pending.Txid}) isn't on the network, and it was signed at {Amount(paid)} {RateUnit(code)}, " +
+                    $"below the lowest fee rate now set ({Amount(floor)}), so it isn't rebroadcast. Remove it under Pending sweeps to sweep again at the current rate. " +
+                    "Nothing more is swept until then.");
                 return false;
             }
             if (current.ExchangeId != pending.ExchangeId || protector.Credentials(current)?.Fingerprint() is not { } key || key != pending.KeyFingerprint)
@@ -511,7 +525,9 @@ public class SweepService(ISweepSellRepository repository, SecretProtector prote
             Asset = pending.CryptoCode,
             Txid = pending.Txid,
             Amount = pending.ToExchange,
+            ExchangeAddress = string.IsNullOrEmpty(pending.ExchangeAddress) ? null : pending.ExchangeAddress,
             ExchangeId = pending.ExchangeId,
+            KeyFingerprint = pending.KeyFingerprint,
             // Watched from when it is known sent, so a sweep settled late still gets the full watch, but searched for
             // from when it was signed: a broadcast found late may have been credited long before.
             SentAt = now,
@@ -544,7 +560,16 @@ public class SweepService(ISweepSellRepository repository, SecretProtector prote
         return null;
     }
 
-    static string RuleSnapshot(SweepRule rule) => Newtonsoft.Json.JsonConvert.SerializeObject(rule);
+    /// <summary>
+    /// The parts of a rule that decide a sweep's outputs and amount. The lowest fee rate is left out: the signed transaction's
+    /// fee is fixed, so changing it never makes a rebroadcast differ (and sweeps signed before it existed still match).
+    /// </summary>
+    static string RuleSnapshot(SweepRule rule)
+    {
+        var json = Newtonsoft.Json.Linq.JObject.FromObject(rule);
+        json.Remove(nameof(SweepRule.MinimumFeeRate));
+        return json.ToString(Newtonsoft.Json.Formatting.None);
+    }
 
     static SemaphoreSlim WalletLock(string cryptoCode, string walletKey) =>
         WalletLocks.GetOrAdd($"{cryptoCode.ToUpperInvariant()}:{walletKey}", _ => new SemaphoreSlim(1, 1));
@@ -717,6 +742,9 @@ public class SweepService(ISweepSellRepository repository, SecretProtector prote
                             // The new transaction gets a full watch; the exchange is still searched from when the first was signed.
                             awaiting.SignedAt ??= awaiting.SentAt;
                             awaiting.SentAt = now;
+                            awaiting.StillUnconfirmedShown = false;
+                            awaiting.StatusCheckFailing = false;
+                            awaiting.ConfirmedSeenAt = null;
                             continue;
                         }
                     }
@@ -738,6 +766,52 @@ public class SweepService(ISweepSellRepository repository, SecretProtector prote
                         default:
                             if (now - awaiting.SentAt >= DepositWatchLimit)
                             {
+                                // A sweep still waiting to confirm hasn't reached the exchange yet: it stays watched, so its fee
+                                // can still be bumped here, rather than the coin being stopped.
+                                TransactionStatus onChain;
+                                try
+                                {
+                                    onChain = await wallets.GetStatusAsync(awaiting.Asset, awaiting.Txid, cancellationToken);
+                                }
+                                catch (Exception e) when (IsRecordedFailure(e, cancellationToken))
+                                {
+                                    // Not known: never expired on a failed check. Shown once, until a check succeeds again.
+                                    logger.LogWarning(e, "Sweep & Sell store {StoreId}: could not read the status of {Asset} sweep {Txid}", storeId, awaiting.Asset, awaiting.Txid);
+                                    if (!awaiting.StatusCheckFailing)
+                                    {
+                                        awaiting.StatusCheckFailing = true;
+                                        Record(storeId, state, awaiting.Asset, ActivityOutcome.Waiting,
+                                            $"The {Amount(awaiting.Amount)} {awaiting.Asset} deposit ({awaiting.Txid}) wasn't credited within {DepositWatchLimit.TotalHours:0} hours, and the wallet " +
+                                            $"couldn't say whether the sweep has confirmed: {e.Message}. It stays watched and is checked again each minute.");
+                                    }
+                                    break;
+                                }
+                                awaiting.StatusCheckFailing = false;
+                                if (onChain == TransactionStatus.Unconfirmed)
+                                {
+                                    awaiting.ConfirmedSeenAt = null; // a block can be reorganized away
+                                    if (!awaiting.StillUnconfirmedShown)
+                                    {
+                                        awaiting.StillUnconfirmedShown = true;
+                                        Record(storeId, state, awaiting.Asset, ActivityOutcome.Waiting,
+                                            $"The {Amount(awaiting.Amount)} {awaiting.Asset} sweep ({awaiting.Txid}) still isn't confirmed after {DepositWatchLimit.TotalHours:0} hours. " +
+                                            "It stays watched until it confirms; to speed it up, bump its fee under Waiting for the exchange.");
+                                    }
+                                    break;
+                                }
+                                if (onChain == TransactionStatus.Confirmed && awaiting.ConfirmedSeenAt is null)
+                                {
+                                    // When it confirmed isn't known: it may have only just reached the exchange. The exchange gets a
+                                    // full watch from now, when it is first seen confirmed past the limit, to credit it.
+                                    awaiting.ConfirmedSeenAt = now;
+                                    awaiting.StillUnconfirmedShown = false;
+                                    Record(storeId, state, awaiting.Asset, ActivityOutcome.Waiting,
+                                        $"The {Amount(awaiting.Amount)} {awaiting.Asset} sweep ({awaiting.Txid}) has confirmed but isn't credited yet. Its deposit is watched for another " +
+                                        $"{DepositWatchLimit.TotalHours:0} hours.");
+                                    break;
+                                }
+                                if (onChain == TransactionStatus.Confirmed && now - awaiting.ConfirmedSeenAt < DepositWatchLimit)
+                                    break;
                                 state.Awaiting.Remove(awaiting);
                                 // No longer watched, so a later return couldn't be seen: stopped like a failed deposit.
                                 Stop(state, awaiting, now);
@@ -801,6 +875,103 @@ public class SweepService(ISweepSellRepository repository, SecretProtector prote
                 "It counts against today's cap, since whether it went through isn't known, and its deposit is watched on the exchange in case it did. Sweeping resumes.");
             await repository.SaveSweepStateAsync(storeId, state);
             return true;
+        }
+        finally
+        {
+            storeLock.Release();
+        }
+    }
+
+    /// <summary>
+    /// The owner raises the fee of a sent sweep that is stuck unconfirmed: it is replaced (BIP 125) by the same transaction at
+    /// <paramref name="feeRate"/> (smallest unit per vB), the extra fee coming out of what the exchange gets, and its deposit is
+    /// then watched by the new transaction. Returns what happened, for the page.
+    /// </summary>
+    public async Task<(bool Done, string Message)> BumpFeeAsync(string storeId, string txid, decimal feeRate, CancellationToken cancellationToken)
+    {
+        if (feeRate is <= 0 or > SweepSettings.MaxMinimumFeeRate)
+            return (false, $"Enter a fee rate above 0 and up to {Amount(SweepSettings.MaxMinimumFeeRate)} per vB.");
+        var storeLock = StoreLock(storeId);
+        await storeLock.WaitAsync(cancellationToken);
+        try
+        {
+            var state = await repository.GetSweepStateAsync(storeId);
+            var awaiting = state.Awaiting.FirstOrDefault(a => string.Equals(a.Txid, txid, StringComparison.OrdinalIgnoreCase));
+            if (awaiting is null)
+                return (false, "That sweep isn't waiting for the exchange any more.");
+            var code = awaiting.Asset.ToUpperInvariant();
+            // A bump spends more of the hot wallet's funds (on fees), so it is held to the same switches as a sweep, checked
+            // under the settings lock that saves take, held until it is broadcast.
+            var settingsLock = SettingsGate.For(storeId);
+            await settingsLock.WaitAsync(cancellationToken);
+            try
+            {
+                var settings = await repository.GetAsync(storeId);
+                if (settings.Paused || !settings.Sweep.Enabled || settings.Sweep.DryRun)
+                    return (false, "Sweeping is paused, off or in dry run, so the fee isn't bumped.");
+                // The extra fee comes out of the deposit, which must stay at or above the exchange's minimum to be credited.
+                var exchange = exchanges.Find(settings.ExchangeId);
+                var credentials = protector.Credentials(settings);
+                if (exchange is null || credentials is null || awaiting.ExchangeId is { } sentTo && sentTo != exchange.Id ||
+                    awaiting.KeyFingerprint is { } sentWith && sentWith != credentials.Fingerprint())
+                    return (false, "The exchange or its key changed since this sweep was sent, so its minimum deposit can't be checked and the fee isn't bumped.");
+                var wallet = await wallets.GetWalletAsync(storeId, code, cancellationToken);
+                if (wallet is null)
+                    return (false, $"The store has no {code} wallet any more.");
+                SignedSweep replacement;
+                decimal minimumDeposit;
+                try
+                {
+                    minimumDeposit = await exchange.GetMinimumDepositAsync(credentials, code, cancellationToken);
+                    replacement = await wallets.BuildReplacementAsync(wallet, awaiting.Txid, awaiting.ExchangeAddress, awaiting.Amount, feeRate, cancellationToken);
+                }
+                catch (Exception e) when (!cancellationToken.IsCancellationRequested)
+                {
+                    // Nothing was sent: any failure (the wallet, node or exchange unreachable) is shown, never a server error.
+                    if (e is not SweepException)
+                        logger.LogWarning(e, "Sweep & Sell fee bump of store {StoreId}, {Code} sweep {Txid}, failed", storeId, code, awaiting.Txid);
+                    return (false, $"The fee wasn't bumped: {e.Message}");
+                }
+                if (replacement.Amounts.ToExchange < minimumDeposit)
+                    return (false, $"At that fee rate, {Amount(replacement.Amounts.ToExchange)} {code} would reach {exchange.Name}, below its minimum deposit of " +
+                                   $"{Amount(minimumDeposit)} {code}. The fee wasn't bumped.");
+                BroadcastOutcome outcome;
+                try
+                {
+                    outcome = await wallets.BroadcastAsync(code, replacement.Hex, cancellationToken);
+                }
+                catch (Exception e) when (!cancellationToken.IsCancellationRequested)
+                {
+                    // Not known whether it went out; the deposit watch follows it if it did.
+                    logger.LogWarning(e, "Sweep & Sell fee bump of store {StoreId}, {Code} sweep {Txid}: broadcast outcome unknown", storeId, code, awaiting.Txid);
+                    return (false, $"The replacement may not have been sent ({e.Message}). If it was, the deposit is followed to it within minutes.");
+                }
+                if (!outcome.Accepted)
+                    return (false, $"The node refused the replacement: {outcome.Error}");
+                var now = clock.GetUtcNow();
+                Record(storeId, state, code, ActivityOutcome.Changed,
+                    $"Fee bumped by hand: the {Amount(awaiting.Amount)} {code} sweep ({awaiting.Txid}) was replaced by {replacement.Txid} at " +
+                    $"{Amount(replacement.FeeRate ?? feeRate)} {RateUnit(code)}, fee {Amount(replacement.Amounts.Fee)} {code}. " +
+                    $"{Amount(replacement.Amounts.ToExchange)} {code} now goes to the exchange; the other outputs are unchanged.");
+                awaiting.ReplacedTxids.Add(awaiting.Txid);
+                if (awaiting.ReplacedTxids.Count > MaxReplacedTxids)
+                    awaiting.ReplacedTxids.RemoveRange(0, awaiting.ReplacedTxids.Count - MaxReplacedTxids);
+                awaiting.Txid = replacement.Txid;
+                awaiting.Amount = replacement.Amounts.ToExchange;
+                awaiting.SignedAt ??= awaiting.SentAt;
+                awaiting.SentAt = now;
+                awaiting.ReplacementCheckedAt = now;
+                awaiting.ReplacementCheckFailing = false;
+                awaiting.StillUnconfirmedShown = false;
+                awaiting.StatusCheckFailing = false;
+                awaiting.ConfirmedSeenAt = null;
+                await repository.SaveSweepStateAsync(storeId, state);
+                return (true, $"Fee bumped. The sweep is now {replacement.Txid}, at {Amount(replacement.FeeRate ?? feeRate)} {RateUnit(code)}.");
+            }
+            finally
+            {
+                settingsLock.Release();
+            }
         }
         finally
         {
@@ -872,7 +1043,8 @@ public class SweepService(ISweepSellRepository repository, SecretProtector prote
                credentials.Equals(protector.Credentials(current)) && // the whole key: a replaced secret must not be used either
                now is not null && now.ColdPercent == rule.ColdPercent && now.ColdDestination == rule.ColdDestination &&
                now.ColdStartIndex == rule.ColdStartIndex && now.DailyCap == rule.DailyCap && now.IncludeUnconfirmed == rule.IncludeUnconfirmed &&
-               now.MinimumBalance == rule.MinimumBalance && current.Sweep.FeeTargetBlocks == planned.Sweep.FeeTargetBlocks;
+               now.MinimumBalance == rule.MinimumBalance && now.MinimumFeeRate == rule.MinimumFeeRate &&
+               current.Sweep.FeeTargetBlocks == planned.Sweep.FeeTargetBlocks;
     }
 
     static SweepRule? Rule(SweepSellSettings settings, string cryptoCode) =>
@@ -881,14 +1053,18 @@ public class SweepService(ISweepSellRepository repository, SecretProtector prote
     static string ColdKey(string destination) => destination.Trim();
 
     static string Describe(string code, decimal toExchange, string exchangeName, string exchangeAddress, decimal toCold, string? coldAddress, decimal fee,
-        decimal? feeRate, int? feeTarget) =>
+        decimal? feeRate, int? feeTarget, decimal? estimatedFeeRate = null) =>
         $"{Amount(toExchange)} {code} to {exchangeName} ({exchangeAddress})" +
         (toCold > 0 ? $" and {Amount(toCold)} {code} to the cold wallet ({coldAddress})" : "") +
         $", fee {Amount(fee)} {code}" +
         // The rate and target are shown so the fee can be compared with the network's estimates.
         (feeRate is { } rate && feeTarget is { } target
-            ? $" ({Amount(rate)} {RateUnit(code)}, aiming for {(target == 1 ? "the next block" : $"confirmation within {target} blocks")})"
+            ? estimatedFeeRate is { } estimate
+                ? $" ({Amount(rate)} {RateUnit(code)}, the lowest fee rate for {code}: the estimate for {Within(target)} was only {Amount(estimate)})"
+                : $" ({Amount(rate)} {RateUnit(code)}, aiming for {Within(target)})"
             : "");
+
+    static string Within(int target) => target == 1 ? "the next block" : $"confirmation within {target} blocks";
 
     /// <summary>Satoshis are Bitcoin's; other coins name their smallest unit differently, so they get a plain description.</summary>
     static string RateUnit(string code) =>

@@ -16,9 +16,11 @@ public sealed record SweepAmounts(decimal ToExchange, decimal ToCold, decimal Fe
 /// <summary>
 /// A signed sweep, ready to broadcast. Broadcasting the same transaction again can never pay twice. <paramref name="Balance"/>
 /// is what the wallet's coins added up to when it was built; <paramref name="FeeRate"/> is the fee it pays, in satoshis per
-/// virtual byte, when known.
+/// virtual byte, when known. <paramref name="EstimatedFeeRate"/> is the estimate, set only when the rule's lowest fee rate
+/// was used instead.
 /// </summary>
-public sealed record SignedSweep(string Txid, string Hex, SweepAmounts Amounts, decimal Balance, decimal? FeeRate = null);
+public sealed record SignedSweep(string Txid, string Hex, SweepAmounts Amounts, decimal Balance, decimal? FeeRate = null,
+    decimal? EstimatedFeeRate = null);
 
 /// <summary>A sweep that can't be built, with a message for the store owner.</summary>
 public class SweepException(string message) : Exception(message);
@@ -106,6 +108,71 @@ public static class SweepBuilder
         var fee = tx.GetFee(coins.Select(c => c.Coin).ToArray());
         return new SignedSweep(tx.GetHash().ToString(), tx.ToHex(),
             new SweepAmounts(Sum(exchange), Sum(cold), fee.ToDecimal(MoneyUnit.BTC), Sum(change)),
+            total.ToDecimal(MoneyUnit.BTC), Math.Round((decimal)fee.Satoshi / tx.GetVirtualSize(), 2));
+    }
+
+    /// <summary>
+    /// Replaces <paramref name="original"/>, a sent sweep, with the same transaction at a higher fee rate (BIP 125): same
+    /// coins, same outputs, except that the exchange's output pays the extra fee: the one paying <paramref name="exchangeScript"/>
+    /// or, when that is null, the one of <paramref name="toExchange"/>. <paramref name="coins"/> are the coins it spends, all
+    /// from the hot wallet.
+    /// </summary>
+    public static SignedSweep Replace(Network network, Transaction original, IReadOnlyList<(ICoin Coin, Key Key)> coins, decimal toExchange,
+        FeeRate feeRate, FeeRate? minRelayFee = null, Script? exchangeScript = null)
+    {
+        var spent = original.Inputs.Select(i => i.PrevOut).ToList();
+        var byOutpoint = coins.ToDictionary(c => c.Coin.Outpoint);
+        if (spent.Count == 0 || spent.Any(o => !byOutpoint.ContainsKey(o)) || byOutpoint.Count != spent.Count)
+            throw new SweepException("The sweep spends coins this wallet doesn't hold, so it can't be replaced here.");
+        var exchangeValue = Money.Coins(toExchange);
+        var exchangeOutputs = original.Outputs.AsIndexedOutputs()
+            .Where(o => exchangeScript is null ? o.TxOut.Value == exchangeValue : o.TxOut.ScriptPubKey == exchangeScript).ToList();
+        if (exchangeOutputs.Count != 1)
+            throw new SweepException("Couldn't tell which of the sweep's outputs goes to the exchange, so it isn't replaced.");
+        var exchangeIndex = (int)exchangeOutputs[0].N;
+
+        var inputs = spent.Select(o => byOutpoint[o].Coin).ToArray();
+        var total = inputs.Select(c => (Money)c.Amount).Sum();
+        var oldFee = total - original.Outputs.Select(o => o.Value).Sum();
+        // The signatures are made again, and may come out a byte longer.
+        var vsize = original.GetVirtualSize() + original.Inputs.Count;
+        var newFee = feeRate.GetFee(vsize);
+        // Nodes accept a replacement only if it pays at least the incremental relay fee (1 sat/vB by default) more.
+        var incremental = new FeeRate(Money.Satoshis(1000), 1000);
+        var lowest = oldFee + incremental.GetFee(vsize);
+        if (newFee < lowest)
+            throw new SweepException($"The new fee rate must be at least {Math.Ceiling(lowest.Satoshi * 100m / vsize) / 100m} per vB: " +
+                                     $"the sweep already pays about {Math.Round(oldFee.Satoshi / (decimal)original.GetVirtualSize(), 2)}, and nodes want at least 1 more.");
+        var newExchange = original.Outputs[exchangeIndex].Value - (newFee - oldFee);
+        if (newExchange <= Money.Zero || new TxOut(newExchange, original.Outputs[exchangeIndex].ScriptPubKey).IsDust())
+            throw new SweepException("At that fee rate, too little would be left for the exchange.");
+
+        var tx = original.Clone();
+        tx.Outputs[exchangeIndex].Value = newExchange;
+        foreach (var input in tx.Inputs)
+        {
+            // Still replaceable, so it can be bumped again.
+            input.Sequence = new Sequence(0xfffffffd);
+            input.ScriptSig = Script.Empty;
+            input.WitScript = WitScript.Empty;
+        }
+        var builder = network.CreateTransactionBuilder();
+        if (minRelayFee is not null)
+        {
+            var policy = builder.StandardTransactionPolicy.Clone();
+            policy.MinRelayTxFee = minRelayFee;
+            builder.StandardTransactionPolicy = policy;
+        }
+        builder.AddCoins(inputs);
+        builder.AddKeys(coins.Select(c => c.Key).ToArray());
+        builder.SignTransactionInPlace(tx);
+        if (!builder.Verify(tx, out var errors))
+            throw new SweepException("The replacement didn't verify: " + string.Join("; ", errors.Select(e => e.ToString())));
+
+        var fee = tx.GetFee(inputs);
+        var others = tx.Outputs.Where((_, i) => i != exchangeIndex).Select(o => o.Value).Sum();
+        return new SignedSweep(tx.GetHash().ToString(), tx.ToHex(),
+            new SweepAmounts(newExchange.ToDecimal(MoneyUnit.BTC), others.ToDecimal(MoneyUnit.BTC), fee.ToDecimal(MoneyUnit.BTC), 0m),
             total.ToDecimal(MoneyUnit.BTC), Math.Round((decimal)fee.Satoshi / tx.GetVirtualSize(), 2));
     }
 }

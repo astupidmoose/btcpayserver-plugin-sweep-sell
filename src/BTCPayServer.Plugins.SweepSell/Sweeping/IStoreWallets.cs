@@ -26,9 +26,12 @@ public enum TransactionStatus
     Replaced
 }
 
-/// <summary>What to sweep. <see cref="Amount"/> null sweeps everything; less leaves change in the wallet.</summary>
+/// <summary>
+/// What to sweep. <see cref="Amount"/> null sweeps everything; less leaves change in the wallet. The fee rate is the estimate
+/// for <see cref="FeeTargetBlocks"/>, but never below <see cref="MinimumFeeRate"/> (smallest unit per vB; 0 for none).
+/// </summary>
 public sealed record SweepRequest(bool IncludeUnconfirmed, decimal? Amount, string ExchangeAddress, string? ColdAddress, decimal ColdPercent,
-    int FeeTargetBlocks);
+    int FeeTargetBlocks, decimal MinimumFeeRate = 0);
 
 /// <summary>The store wallets, as the sweep job needs them. BTCPay's implementation is <see cref="BtcPayStoreWallets"/>.</summary>
 public interface IStoreWallets
@@ -56,6 +59,15 @@ public interface IStoreWallets
 
     /// <summary>Builds and signs the sweep with the hot wallet's key. Nothing is broadcast. Throws <see cref="SweepException"/>.</summary>
     Task<SignedSweep> BuildAsync(StoreWallet wallet, SweepRequest request, CancellationToken cancellationToken);
+
+    /// <summary>
+    /// Signs a replacement for the sent, unconfirmed sweep <paramref name="txid"/> at <paramref name="feeRate"/> (smallest unit
+    /// per vB): the same coins and outputs, the extra fee taken from its exchange output, the one paying
+    /// <paramref name="exchangeAddress"/> (or, when that is null, the one of <paramref name="toExchange"/>).
+    /// Nothing is broadcast. Throws <see cref="SweepException"/>.
+    /// </summary>
+    Task<SignedSweep> BuildReplacementAsync(StoreWallet wallet, string txid, string? exchangeAddress, decimal toExchange, decimal feeRate,
+        CancellationToken cancellationToken);
 
     /// <summary>Broadcasts a signed transaction. Throws when the node can't be reached, so the outcome is unknown.</summary>
     Task<BroadcastOutcome> BroadcastAsync(string cryptoCode, string hex, CancellationToken cancellationToken);
