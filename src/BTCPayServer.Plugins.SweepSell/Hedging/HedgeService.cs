@@ -388,12 +388,15 @@ public class HedgeService(ISweepSellRepository repository, SecretProtector prote
                 await repository.SaveHedgeStateAsync(storeId, state);
                 // A payout waiting on a reserve of this asset, in any store, reads it and withdraws with no sale of it running.
                 var sale = await AssetGate.For(exchange.Id, exchange.AssetKey(Asset)).SaleAsync(cancellationToken);
+                var outcomeKnown = false;
                 try
                 {
                     result = await exchange.SellAsync(credentials, Asset, market, amount, limitPrice, pending.ClientOrderId, validateOnly: false, cancellationToken);
+                    outcomeKnown = true;
                 }
                 catch (ExchangeException e) when (e.Rejected)
                 {
+                    outcomeKnown = true;
                     state.Pending.Remove(pending);
                     Record(storeId, state, Asset, ActivityOutcome.Failed,
                         $"{exchange.Name} refused selling {Amount(amount)} BTC for {market}: {e.Message}. Nothing was sold.");
@@ -407,7 +410,12 @@ public class HedgeService(ISweepSellRepository repository, SecretProtector prote
                 }
                 finally
                 {
-                    sale.Dispose();
+                    // An order whose outcome isn't known may still execute until its deadline: until then no reserve of
+                    // the asset is read for a payout.
+                    if (outcomeKnown)
+                        sale.Dispose();
+                    else
+                        AssetGate.ReleaseAfter(sale, pending.SentAt + PendingOrders.MaxExecutionDelay - clock.GetUtcNow());
                 }
             }
             finally

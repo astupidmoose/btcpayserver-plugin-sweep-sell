@@ -373,6 +373,22 @@ public class ConvertTests
     }
 
     [Fact]
+    public async Task ASaleWithALostResponseKeepsReservePayoutsWaiting()
+    {
+        // The order may still execute until its deadline, so no reserve of the asset is read before then.
+        Configure(assets: "XLM");
+        _exchange.Balances["XLM"] = 300m;
+        _exchange.OnSell = () =>
+        {
+            if (!_exchange.Orders[^1].ValidateOnly)
+                throw new HttpRequestException("connection reset");
+        };
+        await Service().RunAsync(StoreId, Ct);
+        Assert.Single(State.Pending);
+        Assert.True(AssetGate.For(FakeExchange.ExchangeId, "XLM").Held);
+    }
+
+    [Fact]
     public async Task LostResponseIsLookedUpInsteadOfSellingAgain()
     {
         Configure();
