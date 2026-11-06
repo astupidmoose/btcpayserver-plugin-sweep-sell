@@ -232,12 +232,21 @@ public class ConvertService(ISweepSellRepository repository, SecretProtector pro
                         "The settings changed during the run (paused, conversion or its options changed, or another key); nothing more is sent this run.");
                     return;
                 }
-                // Stamped once the lock is held, just before sending: the fill's day and the lookup grace count from here.
-                pending.SentAt = clock.GetUtcNow();
-                state.Pending.Add(pending);
-                await repository.SaveConvertStateAsync(storeId, state);
                 // A payout waiting on a reserve of this asset, in any store, reads it and withdraws with no sale of it running.
+                // Taken before the order is saved as pending, so waiting here never leaves an order pending that wasn't sent.
                 var sale = await AssetGate.For(exchange.Id, exchange.AssetKey(asset)).SaleAsync(cancellationToken);
+                try
+                {
+                    // Stamped once the lock is held, just before sending: the fill's day and the lookup grace count from here.
+                    pending.SentAt = clock.GetUtcNow();
+                    state.Pending.Add(pending);
+                    await repository.SaveConvertStateAsync(storeId, state);
+                }
+                catch
+                {
+                    sale.Dispose(); // nothing was sent
+                    throw;
+                }
                 var outcomeKnown = false;
                 try
                 {

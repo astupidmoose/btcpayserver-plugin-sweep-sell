@@ -373,6 +373,28 @@ public class ConvertTests
     }
 
     [Fact]
+    public async Task ASaleWaitingBehindAReservePayoutIsNotSavedAsPending()
+    {
+        // Stopped while it waits, it was never sent, so it must not be looked up as an order whose outcome is unknown.
+        Configure(assets: "ADA");
+        _exchange.Balances["ADA"] = 300m;
+        var priced = new TaskCompletionSource();
+        _exchange.OnPrice = () => priced.TrySetResult();
+        using (await AssetGate.For(FakeExchange.ExchangeId, "ADA").ReserveAsync(Ct))
+        {
+            using var cts = CancellationTokenSource.CreateLinkedTokenSource(Ct);
+            var run = Service().RunAsync(StoreId, cts.Token);
+            await priced.Task.WaitAsync(TimeSpan.FromSeconds(10), Ct);
+            await Task.Delay(200, Ct); // now waiting for the lock
+            Assert.False(run.IsCompleted);
+            await cts.CancelAsync();
+            await Assert.ThrowsAnyAsync<OperationCanceledException>(() => run);
+        }
+        Assert.DoesNotContain(_exchange.Orders, o => !o.ValidateOnly);
+        Assert.Empty(_repository.States.GetValueOrDefault(StoreId)?.Pending ?? []);
+    }
+
+    [Fact]
     public async Task ASaleWithALostResponseKeepsReservePayoutsWaiting()
     {
         // The order may still execute until its deadline, so no reserve of the asset is read before then.
