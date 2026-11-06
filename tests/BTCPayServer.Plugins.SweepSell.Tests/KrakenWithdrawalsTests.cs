@@ -28,6 +28,8 @@ public class KrakenWithdrawalsTests
         var (_, kraken) = Setup();
         Assert.Equal(kraken.AssetKey("XBT"), kraken.AssetKey("btc"));
         Assert.Equal(kraken.AssetKey("XDG"), kraken.AssetKey("DOGE"));
+        Assert.Equal(kraken.AssetKey("XXBT"), kraken.AssetKey("btc"));
+        Assert.Equal(kraken.AssetKey("ZUSD"), kraken.AssetKey("usd"));
         Assert.NotEqual(kraken.AssetKey("USD"), kraken.AssetKey("CAD"));
     }
 

@@ -105,6 +105,7 @@ public class PayoutSettingsTests
     [InlineData("", 0, null)]
     [InlineData("US$C", 10000, "ReserveAsset")]
     [InlineData("usd", 10000, "ReserveAsset")] // the asset paid out: that's "Always keep on the exchange"
+    [InlineData("zusd", 10000, "ReserveAsset")] // the same, by Kraken's legacy name
     [InlineData("USDC", 0, "ReserveMinimum")]
     [InlineData("USDC", -1, "ReserveMinimum")]
     [InlineData("", 10000, "ReserveAsset")]
