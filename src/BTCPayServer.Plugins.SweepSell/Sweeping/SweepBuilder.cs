@@ -142,8 +142,7 @@ public static class SweepBuilder
             throw new SweepException($"The new fee rate must be at least {Math.Ceiling(lowest.Satoshi * 100m / vsize) / 100m} per vB: " +
                                      $"the sweep already pays about {Math.Round(oldFee.Satoshi / (decimal)original.GetVirtualSize(), 2)}, and nodes want at least 1 more.");
         var newExchange = original.Outputs[exchangeIndex].Value - (newFee - oldFee);
-        var dustRate = minRelayFee ?? new FeeRate(Money.Satoshis(1000), 1000);
-        if (newExchange <= Money.Zero || new TxOut(newExchange, original.Outputs[exchangeIndex].ScriptPubKey).IsDust(dustRate))
+        if (newExchange <= Money.Zero || new TxOut(newExchange, original.Outputs[exchangeIndex].ScriptPubKey).IsDust())
             throw new SweepException("At that fee rate, too little would be left for the exchange.");
 
         var tx = original.Clone();

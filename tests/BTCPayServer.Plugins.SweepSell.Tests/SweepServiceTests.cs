@@ -400,7 +400,23 @@ public class SweepServiceTests
     }
 
     [Fact]
-    public async Task PendingSweepIsRebroadcastAfterTheLowestFeeRateChanges()
+    public async Task PendingSweepIsRebroadcastAfterTheLowestFeeRateChangesBelowWhatItPays()
+    {
+        Configure();
+        _wallets.BroadcastResults.Enqueue(() => throw new HttpRequestException("timeout"));
+        var service = Service();
+        await service.RunAsync(_storeId, wait: false, Ct);
+        Assert.Equal(FakeWallets.FeeRate, Assert.Single(State.Pending).FeeRate);
+
+        // The signed transaction already pays at least the new lowest rate.
+        _repository.Settings[_storeId].Sweep.Rules[0].MinimumFeeRate = 2;
+        await service.RunAsync(_storeId, wait: false, Ct);
+        Assert.Equal(2, _wallets.Broadcasts.Count);
+        Assert.Empty(State.Pending);
+    }
+
+    [Fact]
+    public async Task PendingSweepBelowARaisedLowestFeeRateIsNotRebroadcast()
     {
         Configure();
         _wallets.BroadcastResults.Enqueue(() => throw new HttpRequestException("timeout"));
@@ -408,7 +424,24 @@ public class SweepServiceTests
         await service.RunAsync(_storeId, wait: false, Ct);
         Assert.Single(State.Pending);
 
-        // The signed transaction's fee is fixed, so the new lowest rate can't change what a rebroadcast sends.
+        // Raised to stop the underpriced sweep: the old transaction must not go out.
+        _repository.Settings[_storeId].Sweep.Rules[0].MinimumFeeRate = 3;
+        await service.RunAsync(_storeId, wait: false, Ct);
+        Assert.Single(_wallets.Broadcasts);
+        Assert.Single(State.Pending);
+        Assert.Contains(State.Activity, a => a.Outcome == ActivityOutcome.Waiting && a.Message.Contains("below the lowest fee rate now set (3)"));
+    }
+
+    [Fact]
+    public async Task PendingSweepWithoutARecordedFeeRateIsStillRebroadcastAfterTheLowestFeeRateRises()
+    {
+        Configure();
+        _wallets.BroadcastResults.Enqueue(() => throw new HttpRequestException("timeout"));
+        var service = Service();
+        await service.RunAsync(_storeId, wait: false, Ct);
+        // Saved by a version that didn't record the fee rate.
+        Assert.Single(State.Pending).FeeRate = null;
+
         _repository.Settings[_storeId].Sweep.Rules[0].MinimumFeeRate = 3;
         await service.RunAsync(_storeId, wait: false, Ct);
         Assert.Equal(2, _wallets.Broadcasts.Count);

@@ -446,6 +446,18 @@ public class SweepService(ISweepSellRepository repository, SecretProtector prote
                     "Put the rule back, or remove it under Pending sweeps. Nothing more is swept until then.");
                 return false;
             }
+            // The lowest fee rate isn't part of the snapshot, so raising it doesn't block a rebroadcast by itself; but a sweep
+            // signed below it is the underpriced sweep the owner raised it to stop. One signed before the fee rate was recorded
+            // has no rate to compare, and is rebroadcast as before.
+            var floor = Math.Clamp(rule.MinimumFeeRate, SweepSettings.LowestFeeRate, SweepSettings.MaxMinimumFeeRate);
+            if (pending.FeeRate is { } paid && paid < floor)
+            {
+                Record(storeId, state, code, ActivityOutcome.Waiting,
+                    $"The earlier sweep of {Amount(pending.Spent)} {code} ({pending.Txid}) isn't on the network, and it was signed at {Amount(paid)} {RateUnit(code)}, " +
+                    $"below the lowest fee rate now set ({Amount(floor)}), so it isn't rebroadcast. Remove it under Pending sweeps to sweep again at the current rate. " +
+                    "Nothing more is swept until then.");
+                return false;
+            }
             if (current.ExchangeId != pending.ExchangeId || protector.Credentials(current)?.Fingerprint() is not { } key || key != pending.KeyFingerprint)
             {
                 // Its deposit address belongs to the account it was signed for, which the deposit watch no longer reads.
