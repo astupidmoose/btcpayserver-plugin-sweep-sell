@@ -236,6 +236,8 @@ public class ConvertService(ISweepSellRepository repository, SecretProtector pro
                 pending.SentAt = clock.GetUtcNow();
                 state.Pending.Add(pending);
                 await repository.SaveConvertStateAsync(storeId, state);
+                // A payout waiting on a reserve of this asset, in any store, reads it and withdraws with no sale of it running.
+                var sale = await AssetGate.For(exchange.Id, exchange.AssetKey(asset)).SaleAsync(cancellationToken);
                 try
                 {
                     result = await exchange.SellAsync(credentials, asset, target, amount, limitPrice, pending.ClientOrderId, validateOnly: false, cancellationToken);
@@ -254,6 +256,10 @@ public class ConvertService(ISweepSellRepository repository, SecretProtector pro
                     Record(storeId, state, asset, ActivityOutcome.Failed,
                         $"Selling {Amount(amount)} {asset} for {target} failed or got no answer: {e.Message}. The next run checks {exchange.Name} for the order before selling again.");
                     return;
+                }
+                finally
+                {
+                    sale.Dispose();
                 }
             }
             finally

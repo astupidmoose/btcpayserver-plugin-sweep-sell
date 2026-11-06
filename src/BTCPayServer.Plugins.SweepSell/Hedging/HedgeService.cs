@@ -386,6 +386,8 @@ public class HedgeService(ISweepSellRepository repository, SecretProtector prote
                 pending.SentAt = clock.GetUtcNow();
                 state.Pending.Add(pending);
                 await repository.SaveHedgeStateAsync(storeId, state);
+                // A payout waiting on a reserve of this asset, in any store, reads it and withdraws with no sale of it running.
+                var sale = await AssetGate.For(exchange.Id, exchange.AssetKey(Asset)).SaleAsync(cancellationToken);
                 try
                 {
                     result = await exchange.SellAsync(credentials, Asset, market, amount, limitPrice, pending.ClientOrderId, validateOnly: false, cancellationToken);
@@ -402,6 +404,10 @@ public class HedgeService(ISweepSellRepository repository, SecretProtector prote
                     Record(storeId, state, Asset, ActivityOutcome.Failed,
                         $"Selling {Amount(amount)} BTC for {market} failed or got no answer: {e.Message}. The next run checks {exchange.Name} for the order before selling again.");
                     return;
+                }
+                finally
+                {
+                    sale.Dispose();
                 }
             }
             finally

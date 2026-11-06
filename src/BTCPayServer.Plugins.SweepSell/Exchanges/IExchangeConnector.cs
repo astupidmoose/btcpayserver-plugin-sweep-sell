@@ -21,6 +21,9 @@ public interface IExchangeConnector
     /// <summary>What the exchange's API key needs, shown on the settings page.</summary>
     string KeyPermissionsHelp { get; }
 
+    /// <summary>The asset as the exchange identifies it, so two names for one asset (e.g. BTC and XBT) compare equal.</summary>
+    string AssetKey(string asset) => asset.ToUpperInvariant();
+
     /// <summary>Spendable balances by asset: the total minus anything held by open orders. Zero balances are left out.</summary>
     Task<IReadOnlyDictionary<string, decimal>> GetAvailableBalancesAsync(ExchangeCredentials credentials, CancellationToken cancellationToken);
 

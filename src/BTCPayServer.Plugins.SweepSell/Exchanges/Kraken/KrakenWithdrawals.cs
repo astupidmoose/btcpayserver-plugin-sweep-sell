@@ -19,14 +19,7 @@ public class KrakenWithdrawals(KrakenConnector kraken) : IWithdrawalConnector
     public string Id => kraken.Id;
     public string Name => kraken.Name;
 
-    // Every name Kraken has for an asset (USD, ZUSD; BTC, XBT, XXBT) gives the same key, as the balances are read.
-    public string AssetKey(string asset) => ToKraken(Ticker(asset));
-
-    /// <summary>
-    /// The ticker for any name Kraken has for an asset (XBT and XXBT are BTC, ZUSD is USD), as balances and listed
-    /// withdrawals and destinations are read, so an asset entered under another name still matches them.
-    /// </summary>
-    static string Ticker(string asset) => KrakenConnector.FromKrakenAsset(asset) ?? asset.ToUpperInvariant();
+    public string AssetKey(string asset) => kraken.AssetKey(asset);
 
     public string KeyPermissionsHelp =>
         "In Kraken: Settings > API > Create key. Use a separate key from the trading key, and tick only Query Funds and Withdraw Funds. " +

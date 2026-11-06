@@ -346,6 +346,23 @@ public class ConvertTests
     }
 
     [Fact]
+    public async Task ALiveSaleHoldsTheLockReservePayoutsTake()
+    {
+        // A payout waiting on a reserve of the asset, in any store, reads it and withdraws under the same lock.
+        Configure();
+        _exchange.Balances["DOGE"] = 300m;
+        var gate = AssetGate.For(FakeExchange.ExchangeId, "DOGE");
+        var live = new List<bool>();
+        _exchange.OnSell = () =>
+        {
+            if (!_exchange.Orders[^1].ValidateOnly)
+                live.Add(gate.Held);
+        };
+        await Service().RunAsync(StoreId, Ct);
+        Assert.Equal([true], live);
+    }
+
+    [Fact]
     public async Task PendingOrderIsSavedBeforeSending()
     {
         Configure();

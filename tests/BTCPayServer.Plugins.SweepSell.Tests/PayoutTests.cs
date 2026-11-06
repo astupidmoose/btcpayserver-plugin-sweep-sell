@@ -721,23 +721,28 @@ public class PayoutTests
     }
 
     [Fact]
-    public async Task AnotherStoreSellingTheReserveStopsPayout()
+    public async Task NoSaleOfTheReserveCanLandBetweenItsLastReadAndTheWithdrawal()
     {
-        // Its sales take its own store's lock, not this one, so one could empty the reserve while this payout is sent.
+        // Every store's sale of the reserve asset takes this lock, so none can run while it is held.
         Configure(reserveAsset: "USDC", reserveMinimum: 10000m);
         _exchange.Balance = 500m;
         _exchange.OtherBalances["USDC"] = 20000m;
-        _main.Settings["test-store-2"] = Copy(_main.Settings[StoreId]);
-        _main.Settings["test-store-2"].ProtectedApiKey = Protector.Protect("test-trading-key-2");
-        _main.Settings["test-store-2"].Convert = new ConvertSettings { Enabled = true, DryRun = false, Assets = ["usdc"], TargetAsset = "BTC" };
+        var reads = 0;
+        var heldOnLastRead = false;
+        var heldOnWithdraw = false;
+        var reserve = AssetGate.For(FakeWithdrawals.ExchangeId, "USDC");
+        _exchange.OnOtherBalance = () =>
+        {
+            if (++reads == 2)
+                heldOnLastRead = reserve.Held;
+        };
+        _exchange.OnWithdraw = () => heldOnWithdraw = reserve.Held;
         await Service().RunAsync(StoreId, Ct);
-        Assert.Empty(_exchange.Withdrawals);
-        Assert.Equal(ActivityOutcome.Failed, State.Activity[0].Outcome);
-        Assert.Contains("Another store on this server sells USDC on Fake Exchange (convert)", State.Activity[0].Message);
-
-        _main.Settings["test-store-2"].Convert.DryRun = true; // a convert dry run sells nothing
-        await Service().RunAsync(StoreId, Ct);
-        Assert.Equal("USD", Assert.Single(_exchange.Withdrawals).Asset);
+        Assert.Single(_exchange.Withdrawals);
+        Assert.Equal(2, reads);
+        Assert.True(heldOnLastRead);
+        Assert.True(heldOnWithdraw);
+        Assert.False(reserve.Held); // released once sent
     }
 
     [Fact]
