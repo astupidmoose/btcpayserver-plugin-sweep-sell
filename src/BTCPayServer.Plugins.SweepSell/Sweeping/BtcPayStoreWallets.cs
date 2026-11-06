@@ -128,7 +128,7 @@ public class BtcPayStoreWallets(StoreRepository stores, PaymentMethodHandlerDict
         return raised ? sweep with { EstimatedFeeRate = Math.Round(estimate.SatoshiPerByte, 2) } : sweep;
     }
 
-    public async Task<SignedSweep> BuildReplacementAsync(StoreWallet wallet, string txid, decimal toExchange, decimal feeRate,
+    public async Task<SignedSweep> BuildReplacementAsync(StoreWallet wallet, string txid, string? exchangeAddress, decimal toExchange, decimal feeRate,
         CancellationToken cancellationToken)
     {
         if (!wallet.IsHot)
@@ -147,10 +147,21 @@ public class BtcPayStoreWallets(StoreRepository stores, PaymentMethodHandlerDict
         var key = ExtKey.Parse(accountKey, network.NBitcoinNetwork);
         var coins = info.Inputs
             .Where(i => i.InputIndex >= 0 && i.InputIndex < tx.Inputs.Count && i.KeyPath is not null)
-            .Select(i => ((ICoin)new Coin(tx.Inputs[i.InputIndex].PrevOut, new TxOut((Money)i.Value, i.ScriptPubKey)), key.Derive(i.KeyPath).PrivateKey))
+            .Select(i => (Coin(tx.Inputs[i.InputIndex].PrevOut, new TxOut((Money)i.Value, i.ScriptPubKey), i.KeyPath), key.Derive(i.KeyPath).PrivateKey))
             .ToList();
         var minRelayFee = dashboard.Get(network.CryptoCode)?.Status?.BitcoinStatus?.MinRelayTxFee;
-        return SweepBuilder.Replace(network.NBitcoinNetwork, tx, coins, toExchange, new FeeRate(feeRate), minRelayFee);
+        var exchangeScript = exchangeAddress is null ? null : Address(network, exchangeAddress).ScriptPubKey;
+        return SweepBuilder.Replace(network.NBitcoinNetwork, tx, coins, toExchange, new FeeRate(feeRate), minRelayFee, exchangeScript);
+
+        // As BTCPay's own wallet builds them: a wrapped (P2SH) SegWit coin needs its redeem script to be signed.
+        ICoin Coin(OutPoint outpoint, TxOut output, KeyPath keyPath)
+        {
+            var coin = new Coin(outpoint, output);
+            return output.ScriptPubKey.IsScriptType(ScriptType.P2SH) && derivation is StandardDerivationStrategyBase standard &&
+                   standard.GetDerivation(keyPath).Redeem is { } redeem
+                ? coin.ToScriptCoin(redeem)
+                : coin;
+        }
     }
 
     /// <summary>

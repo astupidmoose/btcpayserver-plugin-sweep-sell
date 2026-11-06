@@ -525,6 +525,7 @@ public class SweepService(ISweepSellRepository repository, SecretProtector prote
             Asset = pending.CryptoCode,
             Txid = pending.Txid,
             Amount = pending.ToExchange,
+            ExchangeAddress = string.IsNullOrEmpty(pending.ExchangeAddress) ? null : pending.ExchangeAddress,
             ExchangeId = pending.ExchangeId,
             // Watched from when it is known sent, so a sweep settled late still gets the full watch, but searched for
             // from when it was signed: a broadcast found late may have been credited long before.
@@ -872,47 +873,75 @@ public class SweepService(ISweepSellRepository repository, SecretProtector prote
             if (awaiting is null)
                 return (false, "That sweep isn't waiting for the exchange any more.");
             var code = awaiting.Asset.ToUpperInvariant();
-            var wallet = await wallets.GetWalletAsync(storeId, code, cancellationToken);
-            if (wallet is null)
-                return (false, $"The store has no {code} wallet any more.");
-            SignedSweep replacement;
+            // A bump spends more of the hot wallet's funds (on fees), so it is held to the same switches as a sweep, checked
+            // under the settings lock that saves take, held until it is broadcast.
+            var settingsLock = SettingsGate.For(storeId);
+            await settingsLock.WaitAsync(cancellationToken);
             try
             {
-                replacement = await wallets.BuildReplacementAsync(wallet, awaiting.Txid, awaiting.Amount, feeRate, cancellationToken);
+                var settings = await repository.GetAsync(storeId);
+                if (settings.Paused || !settings.Sweep.Enabled || settings.Sweep.DryRun)
+                    return (false, "Sweeping is paused, off or in dry run, so the fee isn't bumped.");
+                // The extra fee comes out of the deposit, which must stay at or above the exchange's minimum to be credited.
+                var exchange = exchanges.Find(settings.ExchangeId);
+                var credentials = protector.Credentials(settings);
+                if (exchange is null || credentials is null || awaiting.ExchangeId is { } sentTo && sentTo != exchange.Id)
+                    return (false, "The exchange or its key changed since this sweep was sent, so its minimum deposit can't be checked and the fee isn't bumped.");
+                var wallet = await wallets.GetWalletAsync(storeId, code, cancellationToken);
+                if (wallet is null)
+                    return (false, $"The store has no {code} wallet any more.");
+                SignedSweep replacement;
+                decimal minimumDeposit;
+                try
+                {
+                    minimumDeposit = await exchange.GetMinimumDepositAsync(credentials, code, cancellationToken);
+                    replacement = await wallets.BuildReplacementAsync(wallet, awaiting.Txid, awaiting.ExchangeAddress, awaiting.Amount, feeRate, cancellationToken);
+                }
+                catch (Exception e) when (!cancellationToken.IsCancellationRequested)
+                {
+                    // Nothing was sent: any failure (the wallet, node or exchange unreachable) is shown, never a server error.
+                    if (e is not SweepException)
+                        logger.LogWarning(e, "Sweep & Sell fee bump of store {StoreId}, {Code} sweep {Txid}, failed", storeId, code, awaiting.Txid);
+                    return (false, $"The fee wasn't bumped: {e.Message}");
+                }
+                if (replacement.Amounts.ToExchange < minimumDeposit)
+                    return (false, $"At that fee rate, {Amount(replacement.Amounts.ToExchange)} {code} would reach {exchange.Name}, below its minimum deposit of " +
+                                   $"{Amount(minimumDeposit)} {code}. The fee wasn't bumped.");
+                BroadcastOutcome outcome;
+                try
+                {
+                    outcome = await wallets.BroadcastAsync(code, replacement.Hex, cancellationToken);
+                }
+                catch (Exception e) when (!cancellationToken.IsCancellationRequested)
+                {
+                    // Not known whether it went out; the deposit watch follows it if it did.
+                    logger.LogWarning(e, "Sweep & Sell fee bump of store {StoreId}, {Code} sweep {Txid}: broadcast outcome unknown", storeId, code, awaiting.Txid);
+                    return (false, $"The replacement may not have been sent ({e.Message}). If it was, the deposit is followed to it within minutes.");
+                }
+                if (!outcome.Accepted)
+                    return (false, $"The node refused the replacement: {outcome.Error}");
+                var now = clock.GetUtcNow();
+                Record(storeId, state, code, ActivityOutcome.Changed,
+                    $"Fee bumped by hand: the {Amount(awaiting.Amount)} {code} sweep ({awaiting.Txid}) was replaced by {replacement.Txid} at " +
+                    $"{Amount(replacement.FeeRate ?? feeRate)} {RateUnit(code)}, fee {Amount(replacement.Amounts.Fee)} {code}. " +
+                    $"{Amount(replacement.Amounts.ToExchange)} {code} now goes to the exchange; the other outputs are unchanged.");
+                awaiting.ReplacedTxids.Add(awaiting.Txid);
+                if (awaiting.ReplacedTxids.Count > MaxReplacedTxids)
+                    awaiting.ReplacedTxids.RemoveRange(0, awaiting.ReplacedTxids.Count - MaxReplacedTxids);
+                awaiting.Txid = replacement.Txid;
+                awaiting.Amount = replacement.Amounts.ToExchange;
+                awaiting.SignedAt ??= awaiting.SentAt;
+                awaiting.SentAt = now;
+                awaiting.ReplacementCheckedAt = now;
+                awaiting.ReplacementCheckFailing = false;
+                awaiting.StillUnconfirmedShown = false;
+                await repository.SaveSweepStateAsync(storeId, state);
+                return (true, $"Fee bumped. The sweep is now {replacement.Txid}, at {Amount(replacement.FeeRate ?? feeRate)} {RateUnit(code)}.");
             }
-            catch (SweepException e)
+            finally
             {
-                return (false, $"The fee wasn't bumped: {e.Message}");
+                settingsLock.Release();
             }
-            BroadcastOutcome outcome;
-            try
-            {
-                outcome = await wallets.BroadcastAsync(code, replacement.Hex, cancellationToken);
-            }
-            catch (Exception e) when (IsRecordedFailure(e, cancellationToken))
-            {
-                // Not known whether it went out; the deposit watch follows it if it did.
-                return (false, $"The replacement may not have been sent ({e.Message}). If it was, the deposit is followed to it within minutes.");
-            }
-            if (!outcome.Accepted)
-                return (false, $"The node refused the replacement: {outcome.Error}");
-            var now = clock.GetUtcNow();
-            Record(storeId, state, code, ActivityOutcome.Changed,
-                $"Fee bumped by hand: the {Amount(awaiting.Amount)} {code} sweep ({awaiting.Txid}) was replaced by {replacement.Txid} at " +
-                $"{Amount(replacement.FeeRate ?? feeRate)} {RateUnit(code)}, fee {Amount(replacement.Amounts.Fee)} {code}. " +
-                $"{Amount(replacement.Amounts.ToExchange)} {code} now goes to the exchange; the other outputs are unchanged.");
-            awaiting.ReplacedTxids.Add(awaiting.Txid);
-            if (awaiting.ReplacedTxids.Count > MaxReplacedTxids)
-                awaiting.ReplacedTxids.RemoveRange(0, awaiting.ReplacedTxids.Count - MaxReplacedTxids);
-            awaiting.Txid = replacement.Txid;
-            awaiting.Amount = replacement.Amounts.ToExchange;
-            awaiting.SignedAt ??= awaiting.SentAt;
-            awaiting.SentAt = now;
-            awaiting.ReplacementCheckedAt = now;
-            awaiting.ReplacementCheckFailing = false;
-            awaiting.StillUnconfirmedShown = false;
-            await repository.SaveSweepStateAsync(storeId, state);
-            return (true, $"Fee bumped. The sweep is now {replacement.Txid}, at {Amount(replacement.FeeRate ?? feeRate)} {RateUnit(code)}.");
         }
         finally
         {

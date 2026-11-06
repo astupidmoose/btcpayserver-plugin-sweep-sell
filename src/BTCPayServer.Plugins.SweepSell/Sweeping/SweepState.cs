@@ -92,6 +92,12 @@ public class AwaitingDeposit
     public string Txid { get; set; } = "";
     public decimal Amount { get; set; }
 
+    /// <summary>
+    /// The exchange deposit address the sweep pays, which finds its output in any replacement (a bump made elsewhere may
+    /// have changed the amount). Null for sweeps sent by earlier versions, whose output is found by <see cref="Amount"/>.
+    /// </summary>
+    public string? ExchangeAddress { get; set; }
+
     /// <summary>The exchange the sweep went to: its deposits are only looked up there.</summary>
     public string? ExchangeId { get; set; }
 

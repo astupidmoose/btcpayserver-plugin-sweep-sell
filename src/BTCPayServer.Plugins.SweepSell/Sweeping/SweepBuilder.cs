@@ -113,18 +113,20 @@ public static class SweepBuilder
 
     /// <summary>
     /// Replaces <paramref name="original"/>, a sent sweep, with the same transaction at a higher fee rate (BIP 125): same
-    /// coins, same outputs, except that the exchange's output (the one of <paramref name="toExchange"/>) pays the extra fee.
-    /// <paramref name="coins"/> are the coins it spends, all from the hot wallet.
+    /// coins, same outputs, except that the exchange's output pays the extra fee: the one paying <paramref name="exchangeScript"/>
+    /// or, when that is null, the one of <paramref name="toExchange"/>. <paramref name="coins"/> are the coins it spends, all
+    /// from the hot wallet.
     /// </summary>
     public static SignedSweep Replace(Network network, Transaction original, IReadOnlyList<(ICoin Coin, Key Key)> coins, decimal toExchange,
-        FeeRate feeRate, FeeRate? minRelayFee = null)
+        FeeRate feeRate, FeeRate? minRelayFee = null, Script? exchangeScript = null)
     {
         var spent = original.Inputs.Select(i => i.PrevOut).ToList();
         var byOutpoint = coins.ToDictionary(c => c.Coin.Outpoint);
         if (spent.Count == 0 || spent.Any(o => !byOutpoint.ContainsKey(o)) || byOutpoint.Count != spent.Count)
             throw new SweepException("The sweep spends coins this wallet doesn't hold, so it can't be replaced here.");
         var exchangeValue = Money.Coins(toExchange);
-        var exchangeOutputs = original.Outputs.AsIndexedOutputs().Where(o => o.TxOut.Value == exchangeValue).ToList();
+        var exchangeOutputs = original.Outputs.AsIndexedOutputs()
+            .Where(o => exchangeScript is null ? o.TxOut.Value == exchangeValue : o.TxOut.ScriptPubKey == exchangeScript).ToList();
         if (exchangeOutputs.Count != 1)
             throw new SweepException("Couldn't tell which of the sweep's outputs goes to the exchange, so it isn't replaced.");
         var exchangeIndex = (int)exchangeOutputs[0].N;
@@ -168,7 +170,6 @@ public static class SweepBuilder
             throw new SweepException("The replacement didn't verify: " + string.Join("; ", errors.Select(e => e.ToString())));
 
         var fee = tx.GetFee(inputs);
-        var exchangeScript = original.Outputs[exchangeIndex].ScriptPubKey;
         var others = tx.Outputs.Where((_, i) => i != exchangeIndex).Select(o => o.Value).Sum();
         return new SignedSweep(tx.GetHash().ToString(), tx.ToHex(),
             new SweepAmounts(newExchange.ToDecimal(MoneyUnit.BTC), others.ToDecimal(MoneyUnit.BTC), fee.ToDecimal(MoneyUnit.BTC), 0m),

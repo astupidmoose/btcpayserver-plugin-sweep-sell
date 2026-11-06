@@ -186,6 +186,34 @@ public class SweepBuilderTests
     }
 
     [Fact]
+    public void ReplacementFindsTheExchangeOutputByItsAddressAfterABumpMadeElsewhere()
+    {
+        var coins = new[] { CoinOf(0.5m, 0) };
+        var exchange = Address();
+        var sweep = SweepBuilder.Build(Network, coins, null, exchange, Address(), 10, Fee, null);
+        // Bumped by another wallet: the recorded amount no longer matches any output.
+        var elsewhere = SweepBuilder.Replace(Network, Transaction.Parse(sweep.Hex, Network), coins, sweep.Amounts.ToExchange, new FeeRate(20m));
+        var bumped = SweepBuilder.Replace(Network, Transaction.Parse(elsewhere.Hex, Network), coins, sweep.Amounts.ToExchange, new FeeRate(30m),
+            exchangeScript: exchange.ScriptPubKey);
+        var tx = Transaction.Parse(bumped.Hex, Network);
+        Assert.Equal(bumped.Amounts.ToExchange, Assert.Single(tx.Outputs, o => o.ScriptPubKey == exchange.ScriptPubKey).Value.ToDecimal(MoneyUnit.BTC));
+        Assert.True(bumped.Amounts.ToExchange < elsewhere.Amounts.ToExchange);
+    }
+
+    [Fact]
+    public void ReplacementOfAWrappedSegwitSweepIsSigned()
+    {
+        // A P2SH-wrapped SegWit hot wallet: its coins are signed with their redeem script, as the wallet adapter builds them.
+        var key = new Key();
+        var redeem = key.PubKey.GetScriptPubKey(ScriptPubKeyType.Segwit);
+        var coin = new Coin(new OutPoint(RandomUtils.GetUInt256(), 0), new TxOut(Money.Coins(0.5m), redeem.Hash.ScriptPubKey)).ToScriptCoin(redeem);
+        var coins = new (ICoin, Key)[] { (coin, key) };
+        var sweep = SweepBuilder.Build(Network, coins, null, Address(), null, 0, Fee, null);
+        var bumped = SweepBuilder.Replace(Network, Transaction.Parse(sweep.Hex, Network), coins, sweep.Amounts.ToExchange, new FeeRate(20m));
+        Assert.True(bumped.Amounts.Fee > sweep.Amounts.Fee);
+    }
+
+    [Fact]
     public void ReplacementThatLeavesDustForTheExchangeIsRefused()
     {
         var coins = new[] { CoinOf(0.00002m, 0) };

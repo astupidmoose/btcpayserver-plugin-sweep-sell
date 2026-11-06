@@ -11,6 +11,8 @@
   exchange. It is replaced (RBF) by the same transaction at the rate you enter, the extra fee coming out of what the
   exchange gets; the cold wallet's share is unchanged, and the deposit is followed to the new transaction. BTCPay's own
   wallet can't bump a sweep split between the exchange and a cold wallet, since neither output is the hot wallet's.
+  Refused while the store is paused or sweeping is off or in dry run, and when the exchange's share would fall below its
+  minimum deposit.
 - **Unconfirmed sweeps aren't given up on:** a sweep still unconfirmed after 24 hours hasn't reached the exchange yet, so
   it stays watched (and can be bumped) instead of the coin being stopped. The activity says so once.
 

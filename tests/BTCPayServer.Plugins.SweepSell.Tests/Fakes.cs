@@ -250,9 +250,14 @@ sealed class FakeWallets : IStoreWallets
     public List<(string Txid, decimal ToExchange, decimal FeeRate)> Replacing { get; } = [];
     public Exception? ReplaceError { get; set; }
 
-    public Task<SignedSweep> BuildReplacementAsync(StoreWallet wallet, string txid, decimal toExchange, decimal feeRate, CancellationToken cancellationToken)
+    /// <summary>The exchange address each replacement was asked to find its exchange output by.</summary>
+    public List<string?> ReplacingAddresses { get; } = [];
+
+    public Task<SignedSweep> BuildReplacementAsync(StoreWallet wallet, string txid, string? exchangeAddress, decimal toExchange, decimal feeRate,
+        CancellationToken cancellationToken)
     {
         Replacing.Add((txid, toExchange, feeRate));
+        ReplacingAddresses.Add(exchangeAddress);
         if (ReplaceError is not null)
             throw ReplaceError;
         const decimal extra = 0.0002m;

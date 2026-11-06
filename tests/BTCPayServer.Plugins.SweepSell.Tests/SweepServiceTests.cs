@@ -1343,6 +1343,72 @@ public class SweepServiceTests
     }
 
     [Theory]
+    [InlineData("paused")]
+    [InlineData("off")]
+    [InlineData("dry run")]
+    public async Task BumpIsRefusedWhileSweepingIsPausedOffOrInDryRun(string how)
+    {
+        Configure();
+        var settings = _repository.Settings[_storeId];
+        switch (how)
+        {
+            case "paused": settings.Paused = true; break;
+            case "off": settings.Sweep.Enabled = false; break;
+            case "dry run": settings.Sweep.DryRun = true; break;
+        }
+        Awaiting("BTC", "sweep-tx", TimeSpan.FromHours(1));
+        var (done, message) = await Service().BumpFeeAsync(_storeId, "sweep-tx", 3, Ct);
+        Assert.False(done);
+        Assert.Contains("paused, off or in dry run", message);
+        Assert.Empty(_wallets.Replacing);
+        Assert.Empty(_wallets.Broadcasts);
+    }
+
+    [Fact]
+    public async Task BumpThatWouldLeaveTheDepositBelowTheExchangeMinimumIsRefused()
+    {
+        Configure();
+        Awaiting("BTC", "sweep-tx", TimeSpan.FromHours(1));
+        _exchange.MinimumDeposit = 0.4999m; // the bump takes 0.0002 from the 0.5 deposit
+        var (done, message) = await Service().BumpFeeAsync(_storeId, "sweep-tx", 3, Ct);
+        Assert.False(done);
+        Assert.Contains("below its minimum deposit of 0.4999 BTC", message);
+        Assert.Empty(_wallets.Broadcasts);
+        Assert.Equal("sweep-tx", Assert.Single(State.Awaiting).Txid);
+    }
+
+    [Fact]
+    public async Task BumpFailingOnAnUnreachableWalletSaysWhy()
+    {
+        Configure();
+        Awaiting("BTC", "sweep-tx", TimeSpan.FromHours(1));
+        _wallets.ReplaceError = new HttpRequestException("explorer unreachable");
+        var (done, message) = await Service().BumpFeeAsync(_storeId, "sweep-tx", 3, Ct);
+        Assert.False(done);
+        Assert.Equal("The fee wasn't bumped: explorer unreachable", message);
+        Assert.Empty(_wallets.Broadcasts);
+    }
+
+    [Fact]
+    public async Task BumpFindsTheExchangeOutputByItsAddress()
+    {
+        Configure();
+        Awaiting("BTC", "sweep-tx", TimeSpan.FromHours(1));
+        State.Awaiting[0].ExchangeAddress = "exchange-deposit-address";
+        var (done, message) = await Service().BumpFeeAsync(_storeId, "sweep-tx", 3, Ct);
+        Assert.True(done, message);
+        Assert.Equal("exchange-deposit-address", Assert.Single(_wallets.ReplacingAddresses));
+    }
+
+    [Fact]
+    public async Task SentSweepIsWatchedWithItsExchangeAddress()
+    {
+        Configure();
+        await Service().RunAsync(_storeId, wait: false, Ct);
+        Assert.Equal("exchange-deposit-address", Assert.Single(State.Awaiting).ExchangeAddress);
+    }
+
+    [Theory]
     [InlineData("sweep-tx", 0)]
     [InlineData("sweep-tx", 2001)]
     [InlineData("other-tx", 3)]
