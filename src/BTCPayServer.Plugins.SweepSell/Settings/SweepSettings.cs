@@ -14,6 +14,12 @@ public class SweepSettings
     public const int MinFeeTargetBlocks = 1;
     public const int MaxFeeTargetBlocks = 144;
 
+    /// <summary>
+    /// Every sweep pays at least this per vB, whatever the rule says: nodes relay down to 0.1 sat/vB now, but many still drop
+    /// anything below 1, so a cheaper sweep may never reach the miners (or a wallet watching the cold address).
+    /// </summary>
+    public const decimal LowestFeeRate = 1;
+
     /// <summary>Highest lowest-fee-rate accepted, per vB: BTCPay never estimates above this either.</summary>
     public const decimal MaxMinimumFeeRate = 2000;
 
@@ -67,8 +73,9 @@ public class SweepRule
     public bool IncludeUnconfirmed { get; set; }
 
     /// <summary>
-    /// Lowest fee rate a sweep pays, in the coin's smallest unit per vB (sat/vB for Bitcoin); 0 for none. Used when the fee
-    /// estimate is lower, e.g. when BTCPay falls back to the node's own estimate.
+    /// Lowest fee rate a sweep pays, in the coin's smallest unit per vB (sat/vB for Bitcoin); never below
+    /// <see cref="SweepSettings.LowestFeeRate"/>, which 0 leaves in place. Used when the fee estimate is lower, e.g. when BTCPay
+    /// falls back to the node's own estimate.
     /// </summary>
     public decimal MinimumFeeRate { get; set; }
 }

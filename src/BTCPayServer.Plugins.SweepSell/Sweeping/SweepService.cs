@@ -301,7 +301,7 @@ public class SweepService(ISweepSellRepository repository, SecretProtector prote
             var feeTarget = Math.Clamp(settings.Sweep.FeeTargetBlocks, SweepSettings.MinFeeTargetBlocks, SweepSettings.MaxFeeTargetBlocks);
             var sweep = await wallets.BuildAsync(wallet,
                 new SweepRequest(rule.IncludeUnconfirmed, amount, deposit.Address, coldAddress, coldAddress is null ? 0 : rule.ColdPercent, feeTarget,
-                    Math.Clamp(rule.MinimumFeeRate, 0, SweepSettings.MaxMinimumFeeRate)),
+                    Math.Clamp(rule.MinimumFeeRate, SweepSettings.LowestFeeRate, SweepSettings.MaxMinimumFeeRate)),
                 cancellationToken);
             // The wallet is read again to build the sweep, and something else on the server may have spent from it meanwhile.
             if (sweep.Balance < rule.MinimumBalance)
@@ -900,7 +900,7 @@ public class SweepService(ISweepSellRepository repository, SecretProtector prote
         // The rate and target are shown so the fee can be compared with the network's estimates.
         (feeRate is { } rate && feeTarget is { } target
             ? estimatedFeeRate is { } estimate
-                ? $" ({Amount(rate)} {RateUnit(code)}, the lowest fee rate set for {code}: the estimate for {Within(target)} was only {Amount(estimate)})"
+                ? $" ({Amount(rate)} {RateUnit(code)}, the lowest fee rate for {code}: the estimate for {Within(target)} was only {Amount(estimate)})"
                 : $" ({Amount(rate)} {RateUnit(code)}, aiming for {Within(target)})"
             : "");
 

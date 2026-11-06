@@ -514,7 +514,7 @@ public class UISweepSellController(ISweepSellRepository repository, IPayoutRepos
                 yield return (field + nameof(rule.ColdPercent), $"{code}: the cold wallet share must be at least 0% and under 100%.");
             if (rule.MinimumFeeRate is < 0 or > SweepSettings.MaxMinimumFeeRate)
                 yield return (field + nameof(rule.MinimumFeeRate),
-                    $"{code}: the lowest fee rate must be from 0 to {SweepSettings.MaxMinimumFeeRate.ToString(System.Globalization.CultureInfo.InvariantCulture)} per vB. Use 0 for none.");
+                    $"{code}: the lowest fee rate must be from 0 to {SweepSettings.MaxMinimumFeeRate.ToString(System.Globalization.CultureInfo.InvariantCulture)} per vB. Use 0 for the built-in lowest rate (1 per vB).");
             if (rule.ColdStartIndex < 0)
                 yield return (field + nameof(rule.ColdStartIndex), $"{code}: the first address index can't be negative.");
             var cold = Clean(rule.ColdDestination);

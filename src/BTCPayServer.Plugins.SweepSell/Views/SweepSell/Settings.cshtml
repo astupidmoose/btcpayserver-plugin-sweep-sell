@@ -177,7 +177,8 @@
                         <input asp-for="SweepRules[i].MinimumFeeRate" type="number" step="any" min="0" max="@SweepSettings.MaxMinimumFeeRate" class="form-control" />
                         <div class="form-text">
                             A sweep never pays less than this, even when the estimate is lower. BTCPay's estimate falls back to your node's own
-                            when it can't reach its fee source, and that can be far below the going rate. 0 for none.
+                            when it can't reach its fee source, and that can be far below the going rate. Sweeps never pay less than 1 per vB
+                            in any case, the lowest rate every node relays, so 0 leaves just that.
                         </div>
                         <span asp-validation-for="SweepRules[i].MinimumFeeRate" class="text-danger"></span>
                     </div>

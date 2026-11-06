@@ -88,7 +88,7 @@ public class SweepServiceTests
         Configure(dryRun: true, rule: r => r.MinimumFeeRate = 3);
         await Service().RunAsync(_storeId, wait: false, Ct);
         Assert.Equal(3m, Assert.Single(_wallets.Built).MinimumFeeRate);
-        Assert.Contains("(3 sat/vB, the lowest fee rate set for BTC: the estimate for confirmation within 3 blocks was only 2.5)", State.Activity[0].Message);
+        Assert.Contains("(3 sat/vB, the lowest fee rate for BTC: the estimate for confirmation within 3 blocks was only 2.5)", State.Activity[0].Message);
     }
 
     [Fact]
@@ -105,7 +105,17 @@ public class SweepServiceTests
         Configure(rule: r => r.MinimumFeeRate = 3);
         await Service().RunAsync(_storeId, wait: false, Ct);
         Assert.Contains(State.Activity, a => a.Outcome == ActivityOutcome.Sent &&
-                                             a.Message.Contains("the lowest fee rate set for BTC: the estimate for confirmation within 3 blocks was only 2.5"));
+                                             a.Message.Contains("the lowest fee rate for BTC: the estimate for confirmation within 3 blocks was only 2.5"));
+    }
+
+    [Theory]
+    [InlineData(0)]
+    [InlineData(0.5)]
+    public async Task SweepsNeverAskForLessThanOneSatPerVbyte(double rate)
+    {
+        Configure(dryRun: true, rule: r => r.MinimumFeeRate = (decimal)rate);
+        await Service().RunAsync(_storeId, wait: false, Ct);
+        Assert.Equal(SweepSettings.LowestFeeRate, Assert.Single(_wallets.Built).MinimumFeeRate);
     }
 
     [Fact]
@@ -114,7 +124,7 @@ public class SweepServiceTests
         Configure();
         await Service().RunAsync(_storeId, wait: false, Ct);
         var request = Assert.Single(_wallets.Built);
-        Assert.Equal(new SweepRequest(false, null, "exchange-deposit-address", null, 0, 3), request);
+        Assert.Equal(new SweepRequest(false, null, "exchange-deposit-address", null, 0, 3, SweepSettings.LowestFeeRate), request);
         Assert.Single(_wallets.Broadcasts);
         Assert.Empty(State.Pending);
         var awaiting = Assert.Single(State.Awaiting);

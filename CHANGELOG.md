@@ -5,7 +5,8 @@
 - **Lowest fee rate per coin:** a sweep never pays less than the rate you set, even when the estimate is lower. BTCPay's
   estimate falls back to the node's own when it can't reach its fee source, and that can be far below the going rate
   now that nodes relay down to 0.1 sat/vB. The activity says when the lowest rate was used and what the estimate was.
-  Blank (0) by default, so nothing changes until you set it.
+- **Never below 1 sat/vB:** whatever the estimate and the setting, a sweep pays at least 1 per vB, the lowest rate every
+  node relays. Cheaper sweeps were dropped by many nodes and wallets, so they could sit unconfirmed and unseen.
 
 ## 0.1.5 (beta)
 
