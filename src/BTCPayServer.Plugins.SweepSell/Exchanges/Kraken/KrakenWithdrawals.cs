@@ -27,7 +27,8 @@ public class KrakenWithdrawals(KrakenConnector kraken) : IWithdrawalConnector
         "enter its name exactly as Kraken shows it.";
 
     public async Task<decimal> GetAvailableBalanceAsync(ExchangeCredentials credentials, string asset, CancellationToken cancellationToken) =>
-        (await kraken.GetAvailableBalancesAsync(credentials, cancellationToken)).GetValueOrDefault(asset.ToUpperInvariant());
+        // Balances are keyed by ticker (BTC), so another name for the asset (XBT) is mapped to it first.
+        (await kraken.GetAvailableBalancesAsync(credentials, cancellationToken)).GetValueOrDefault(KrakenConnector.FromKrakenAsset(asset) ?? asset.ToUpperInvariant());
 
     public async Task<IReadOnlyList<WithdrawalDestination>> GetDestinationsAsync(ExchangeCredentials credentials, string asset,
         CancellationToken cancellationToken) =>

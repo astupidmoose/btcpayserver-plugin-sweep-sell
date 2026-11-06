@@ -208,7 +208,8 @@ public class UISweepSellPayoutController(IPayoutRepository payouts, ISweepSellRe
         var reserve = Clean(vm.ReserveAsset)?.ToUpperInvariant();
         if (reserve is not null && !Ticker.IsMatch(reserve))
             yield return (nameof(vm.ReserveAsset), $"\"{reserve}\" isn't a ticker. Use letters and digits, e.g. USDC.");
-        else if (reserve is not null && reserve == asset)
+        else if (reserve is not null && asset is not null &&
+                 (withdrawals.Find(vm.ExchangeId) is { } exchange ? exchange.AssetKey(reserve) == exchange.AssetKey(asset) : reserve == asset))
             yield return (nameof(vm.ReserveAsset), "Use another asset than the one paid out. To leave some of it on the exchange, use \"Always keep on the exchange\".");
         if (vm.ReserveMinimum < 0)
             yield return (nameof(vm.ReserveMinimum), "The amount to hold can't be negative.");

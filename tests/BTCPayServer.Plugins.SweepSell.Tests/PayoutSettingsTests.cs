@@ -121,6 +121,16 @@ public class PayoutSettingsTests
     }
 
     [Fact]
+    public void TheReserveCantBeThePayoutAssetUnderAnotherName()
+    {
+        var vm = Valid();
+        vm.Asset = "BTC";
+        vm.ReserveAsset = "XBT"; // Kraken's name for the same balance
+        vm.ReserveMinimum = 1m;
+        Assert.Contains(nameof(vm.ReserveAsset), Errors(vm));
+    }
+
+    [Fact]
     public void TheReserveIsSaved()
     {
         var vm = Valid();

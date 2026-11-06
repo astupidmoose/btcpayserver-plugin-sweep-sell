@@ -31,6 +31,17 @@ public class KrakenWithdrawalsTests
         Assert.NotEqual(kraken.AssetKey("USD"), kraken.AssetKey("CAD"));
     }
 
+    [Theory]
+    [InlineData("BTC")]
+    [InlineData("XBT")]
+    [InlineData("xxbt")]
+    public async Task BalanceIsReadUnderAnyNameOfTheAsset(string asset)
+    {
+        var (http, kraken) = Setup();
+        http.Responses["/0/private/BalanceEx"] = """{"error":[],"result":{"XXBT":{"balance":"0.5"},"XBT.F":{"balance":"0.25"}}}""";
+        Assert.Equal(0.75m, await kraken.GetAvailableBalanceAsync(Credentials, asset, Ct));
+    }
+
     [Fact]
     public async Task QuoteRoundsDownAndReadsFeeLimitAndTheMethodsMinimum()
     {

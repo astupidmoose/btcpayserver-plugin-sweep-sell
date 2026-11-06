@@ -650,6 +650,28 @@ public class PayoutTests
     }
 
     [Fact]
+    public async Task AnotherStorePayingOutTheReserveFromTheAccountStopsPayout()
+    {
+        // Its withdrawals take no lock of this store's, so they could empty the reserve while this payout is sent.
+        Configure(reserveAsset: "USDC", reserveMinimum: 10000m);
+        _exchange.Balance = 500m;
+        _exchange.OtherBalances["USDC"] = 20000m;
+        _main.Settings["test-store-2"] = Copy(_main.Settings[StoreId]);
+        _payouts.Settings["test-store-2"] = Copy(_payouts.Settings[StoreId]);
+        _payouts.Settings["test-store-2"].Asset = "USDC";
+        _payouts.Settings["test-store-2"].ReserveAsset = "";
+        _payouts.Settings["test-store-2"].ReserveMinimum = 0;
+        await Service().RunAsync(StoreId, Ct);
+        Assert.Empty(_exchange.Withdrawals);
+        Assert.Equal(ActivityOutcome.Failed, State.Activity[0].Outcome);
+        Assert.Contains("pays out USDC live from the same Fake Exchange account, and USDC is the reserve this payout waits on", State.Activity[0].Message);
+
+        _payouts.Settings["test-store-2"].DryRun = true;
+        await Service().RunAsync(StoreId, Ct);
+        Assert.Equal("USD", Assert.Single(_exchange.Withdrawals).Asset);
+    }
+
+    [Fact]
     public async Task AnotherStoresUnresolvedWithdrawalUnderAnotherNameForTheAssetBlocksPayout()
     {
         Configure();
