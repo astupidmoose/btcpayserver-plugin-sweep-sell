@@ -110,6 +110,9 @@ public class AwaitingDeposit
     /// <summary>When the wallet last said whether <see cref="Txid"/> was replaced.</summary>
     public DateTimeOffset? ReplacementCheckedAt { get; set; }
 
+    /// <summary>The activity already says the sweep is still unconfirmed past the watch limit.</summary>
+    public bool StillUnconfirmedShown { get; set; }
+
     /// <summary>The wallet couldn't say whether the sweep was replaced; recorded once when it starts failing.</summary>
     public bool ReplacementCheckFailing { get; set; }
 }

@@ -728,6 +728,7 @@ public class SweepService(ISweepSellRepository repository, SecretProtector prote
                             // The new transaction gets a full watch; the exchange is still searched from when the first was signed.
                             awaiting.SignedAt ??= awaiting.SentAt;
                             awaiting.SentAt = now;
+                            awaiting.StillUnconfirmedShown = false;
                             continue;
                         }
                     }
@@ -749,6 +750,28 @@ public class SweepService(ISweepSellRepository repository, SecretProtector prote
                         default:
                             if (now - awaiting.SentAt >= DepositWatchLimit)
                             {
+                                // A sweep still waiting to confirm hasn't reached the exchange yet: it stays watched, so its fee
+                                // can still be bumped here, rather than the coin being stopped.
+                                TransactionStatus onChain;
+                                try
+                                {
+                                    onChain = await wallets.GetStatusAsync(awaiting.Asset, awaiting.Txid, cancellationToken);
+                                }
+                                catch (Exception e) when (IsRecordedFailure(e, cancellationToken))
+                                {
+                                    break; // not known: never expired on a failed check
+                                }
+                                if (onChain == TransactionStatus.Unconfirmed)
+                                {
+                                    if (!awaiting.StillUnconfirmedShown)
+                                    {
+                                        awaiting.StillUnconfirmedShown = true;
+                                        Record(storeId, state, awaiting.Asset, ActivityOutcome.Waiting,
+                                            $"The {Amount(awaiting.Amount)} {awaiting.Asset} sweep ({awaiting.Txid}) still isn't confirmed after {DepositWatchLimit.TotalHours:0} hours. " +
+                                            "It stays watched until it confirms; to speed it up, bump its fee under Waiting for the exchange.");
+                                    }
+                                    break;
+                                }
                                 state.Awaiting.Remove(awaiting);
                                 // No longer watched, so a later return couldn't be seen: stopped like a failed deposit.
                                 Stop(state, awaiting, now);
@@ -875,6 +898,7 @@ public class SweepService(ISweepSellRepository repository, SecretProtector prote
             awaiting.SentAt = now;
             awaiting.ReplacementCheckedAt = now;
             awaiting.ReplacementCheckFailing = false;
+            awaiting.StillUnconfirmedShown = false;
             await repository.SaveSweepStateAsync(storeId, state);
             return (true, $"Fee bumped. The sweep is now {replacement.Txid}, at {Amount(replacement.FeeRate ?? feeRate)} {RateUnit(code)}.");
         }

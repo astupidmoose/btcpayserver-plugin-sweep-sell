@@ -1323,6 +1323,38 @@ public class SweepServiceTests
     }
 
     [Fact]
+    public async Task SweepStillUnconfirmedAfterTheWatchLimitStaysWatched()
+    {
+        Configure();
+        Awaiting("BTC", "sweep-tx", SweepService.DepositWatchLimit);
+        _wallets.Statuses["sweep-tx"] = TransactionStatus.Unconfirmed;
+        var service = Service();
+        await service.WatchDepositsAsync(Ct);
+        Assert.Single(State.Awaiting);
+        Assert.Empty(State.Stopped);
+        Assert.Contains("still isn't confirmed after 24 hours", Assert.Single(State.Activity).Message);
+
+        _clock.Advance(TimeSpan.FromMinutes(1));
+        await service.WatchDepositsAsync(Ct);
+        Assert.Single(State.Activity); // said once
+
+        var (done, _) = await service.BumpFeeAsync(_storeId, "sweep-tx", 3, Ct);
+        Assert.True(done);
+        Assert.False(Assert.Single(State.Awaiting).StillUnconfirmedShown);
+    }
+
+    [Fact]
+    public async Task ConfirmedSweepNotCreditedWithinTheLimitStillStopsTheCoin()
+    {
+        Configure();
+        Awaiting("BTC", "sweep-tx", SweepService.DepositWatchLimit);
+        _wallets.Statuses["sweep-tx"] = TransactionStatus.Confirmed;
+        await Service().WatchDepositsAsync(Ct);
+        Assert.Empty(State.Awaiting);
+        Assert.True(State.Stopped.ContainsKey("BTC"));
+    }
+
+    [Fact]
     public async Task SweepTheExchangeCreditedIsNotFollowedToAReplacement()
     {
         Configure();
