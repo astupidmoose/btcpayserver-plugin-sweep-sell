@@ -195,6 +195,9 @@ public class PayoutService(IPayoutRepository payouts, ISweepSellRepository repos
             return;
         }
 
+        if (!await ReserveHeldAsync(storeId, state, asset, payout, connector, credentials, "", cancellationToken))
+            return;
+
         decimal balance;
         try
         {
@@ -315,6 +318,9 @@ public class PayoutService(IPayoutRepository payouts, ISweepSellRepository repos
                 Record(storeId, state, asset, ActivityOutcome.Failed, $"{shared} Nothing was withdrawn.");
                 return;
             }
+            // The reserve too: it may have been moved or spent since it was read.
+            if (!await ReserveHeldAsync(storeId, state, asset, payout, connector, credentials, " Nothing was withdrawn.", cancellationToken))
+                return;
             // The balance and withdrawals are read again under the lock: a convert sell or another withdrawal of this asset
             // since they were first read must not eat into what is kept, and every withdrawal that could be confused with this
             // one is known.
@@ -711,7 +717,36 @@ public class PayoutService(IPayoutRepository payouts, ISweepSellRepository repos
         now.Enabled && now.DryRun == planned.DryRun && now.ExchangeId == connector.Id &&
         credentials.Equals(protector.Credentials(now)) && // the whole key: a replaced secret must not be used either
         now.Asset == planned.Asset && now.Destination == planned.Destination && now.Minimum == planned.Minimum &&
-        now.KeepBalance == planned.KeepBalance && now.DailyCap == planned.DailyCap && now.MaxFee == planned.MaxFee;
+        now.KeepBalance == planned.KeepBalance && now.DailyCap == planned.DailyCap && now.MaxFee == planned.MaxFee &&
+        now.ReserveAsset == planned.ReserveAsset && now.ReserveMinimum == planned.ReserveMinimum;
+
+    /// <summary>
+    /// Whether the exchange holds at least the reserve the owner set (always, when none is set). Records why not, ending
+    /// with <paramref name="suffix"/>.
+    /// </summary>
+    async Task<bool> ReserveHeldAsync(string storeId, PayoutState state, string asset, PayoutSettings payout, IWithdrawalConnector connector,
+        ExchangeCredentials credentials, string suffix, CancellationToken cancellationToken)
+    {
+        if (!payout.HasReserve)
+            return true;
+        var reserve = payout.ReserveAsset;
+        decimal held;
+        try
+        {
+            held = await connector.GetAvailableBalanceAsync(credentials, reserve, cancellationToken);
+        }
+        catch (Exception e) when (IsRecordedFailure(e, cancellationToken))
+        {
+            Record(storeId, state, asset, ActivityOutcome.Failed,
+                $"Could not read the {reserve} balance from {connector.Name}, which must be at least {Amount(payout.ReserveMinimum)} before {asset} is paid out: {e.Message}.{suffix}");
+            return false;
+        }
+        if (held >= payout.ReserveMinimum)
+            return true;
+        Record(storeId, state, asset, ActivityOutcome.Waiting,
+            $"The {reserve} balance is {Amount(held)}, below the {Amount(payout.ReserveMinimum)} {reserve} required before {asset} is paid out. Waiting.{suffix}");
+        return false;
+    }
 
     /// <summary>Whether <paramref name="payoutKey"/> is the store's trading key: payout must have its own.</summary>
     public bool IsTradingKey(SweepSellSettings settings, ExchangeCredentials payoutKey) =>

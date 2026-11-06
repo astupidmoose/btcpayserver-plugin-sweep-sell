@@ -109,6 +109,18 @@
                 <span asp-validation-for="KeepBalance" class="text-danger"></span>
             </div>
             <div class="form-group">
+                <label asp-for="ReserveAsset" class="form-label"></label>
+                <input asp-for="ReserveAsset" class="form-control" placeholder="USDC" spellcheck="false" />
+                <div class="form-text">Optional. Another asset that must stay on the exchange: nothing is paid out while its spendable balance is below the amount below. Leave empty for no check.</div>
+                <span asp-validation-for="ReserveAsset" class="text-danger"></span>
+            </div>
+            <div class="form-group">
+                <label asp-for="ReserveMinimum" class="form-label"></label>
+                <input asp-for="ReserveMinimum" type="number" step="any" min="0" class="form-control" />
+                <div class="form-text">In that asset. Read with the payout key every run, and again just before a withdrawal.</div>
+                <span asp-validation-for="ReserveMinimum" class="text-danger"></span>
+            </div>
+            <div class="form-group">
                 <label asp-for="DailyCap" class="form-label"></label>
                 <input asp-for="DailyCap" type="number" step="any" min="0" class="form-control" />
                 <div class="form-text">The most to withdraw per day (UTC), fees included, in the asset. Required.</div>

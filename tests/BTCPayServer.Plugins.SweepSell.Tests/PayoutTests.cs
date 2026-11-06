@@ -25,7 +25,7 @@ public class PayoutTests
         new(_payouts, _main, Protector, new WithdrawalRegistry([_exchange]), _clock, NullLogger<PayoutService>.Instance);
 
     void Configure(bool dryRun = false, bool paused = false, bool enabled = true, decimal minimum = 50m, decimal keep = 0m, decimal cap = 1000m,
-        decimal maxFee = 2m, string payoutKey = "test-payout-key")
+        decimal maxFee = 2m, string payoutKey = "test-payout-key", string reserveAsset = "", decimal reserveMinimum = 0m)
     {
         _main.Settings[StoreId] = new SweepSellSettings
         {
@@ -47,6 +47,8 @@ public class PayoutTests
             KeepBalance = keep,
             DailyCap = cap,
             MaxFee = maxFee,
+            ReserveAsset = reserveAsset,
+            ReserveMinimum = reserveMinimum,
             IntervalMinutes = 1440
         };
     }
@@ -83,6 +85,73 @@ public class PayoutTests
         await Service().RunAsync(StoreId, Ct);
         Assert.Equal(100m, Assert.Single(_exchange.Withdrawals).Amount);
         Assert.Equal(100m, State.WithdrawnOn(_clock.GetUtcNow(), "USD")); // the next run sees the new day's cap partly used
+    }
+
+    [Fact]
+    public async Task NothingIsPaidOutWhileTheReserveIsBelowItsMinimum()
+    {
+        Configure(reserveAsset: "USDC", reserveMinimum: 10000m);
+        _exchange.Balance = 500m;
+        _exchange.OtherBalances["USDC"] = 9999.99m;
+        await Service().RunAsync(StoreId, Ct);
+        Assert.Empty(_exchange.Withdrawals);
+        Assert.DoesNotContain("quote", _exchange.Calls);
+        Assert.Equal(ActivityOutcome.Waiting, State.Activity[0].Outcome);
+        Assert.Contains("The USDC balance is 9999.99, below the 10000 USDC required before USD is paid out", State.Activity[0].Message);
+
+        _exchange.OtherBalances["USDC"] = 10000m;
+        await Service().RunAsync(StoreId, Ct);
+        Assert.Equal(500m, Assert.Single(_exchange.Withdrawals).Amount);
+    }
+
+    [Fact]
+    public async Task NoReserveSetNeverReadsAnotherBalance()
+    {
+        Configure(reserveAsset: "USDC"); // an asset without an amount is no check
+        _exchange.Balance = 500m;
+        _exchange.OtherBalances["USDC"] = 0m;
+        await Service().RunAsync(StoreId, Ct);
+        Assert.Single(_exchange.Withdrawals);
+        Assert.DoesNotContain(_exchange.Calls, c => c.StartsWith("balance "));
+    }
+
+    [Fact]
+    public async Task AReserveThatCantBeReadStopsPayout()
+    {
+        Configure(reserveAsset: "USDC", reserveMinimum: 10000m);
+        _exchange.Balance = 500m;
+        _exchange.OtherBalances["USDC"] = 20000m;
+        _exchange.OtherBalanceError = new HttpRequestException("timeout");
+        await Service().RunAsync(StoreId, Ct);
+        Assert.Empty(_exchange.Withdrawals);
+        Assert.Equal(ActivityOutcome.Failed, State.Activity[0].Outcome);
+        Assert.Contains("Could not read the USDC balance", State.Activity[0].Message);
+    }
+
+    [Fact]
+    public async Task AReserveThatDropsDuringTheRunStopsTheWithdrawal()
+    {
+        Configure(reserveAsset: "USDC", reserveMinimum: 10000m);
+        _exchange.Balance = 500m;
+        _exchange.OtherBalances["USDC"] = 12000m;
+        _exchange.OnQuote = () => _exchange.OtherBalances["USDC"] = 5000m; // moved off the exchange meanwhile
+        await Service().RunAsync(StoreId, Ct);
+        Assert.Empty(_exchange.Withdrawals);
+        Assert.Equal(ActivityOutcome.Waiting, State.Activity[0].Outcome);
+        Assert.Contains("The USDC balance is 5000", State.Activity[0].Message);
+        Assert.Contains("Nothing was withdrawn.", State.Activity[0].Message);
+    }
+
+    [Fact]
+    public async Task AReserveChangedDuringTheRunStopsTheWithdrawal()
+    {
+        Configure(reserveAsset: "USDC", reserveMinimum: 10000m);
+        _exchange.Balance = 500m;
+        _exchange.OtherBalances["USDC"] = 12000m;
+        _exchange.OnQuote = () => _payouts.Settings[StoreId].ReserveMinimum = 20000m;
+        await Service().RunAsync(StoreId, Ct);
+        Assert.Empty(_exchange.Withdrawals);
+        Assert.Contains("settings changed during the run", State.Activity[0].Message);
     }
 
     [Fact]
@@ -1011,8 +1080,21 @@ public class PayoutTests
                 Records[i] = Records[i] with { Status = WithdrawalStatus.Succeeded };
         }
 
+        /// <summary>Balances of assets other than <see cref="Balance"/>'s, e.g. a reserve; any other asset reads Balance.</summary>
+        public Dictionary<string, decimal> OtherBalances { get; } = [];
+        public Exception? OtherBalanceError { get; set; }
+        public Action? OnOtherBalance { get; set; }
+
         public Task<decimal> GetAvailableBalanceAsync(ExchangeCredentials credentials, string asset, CancellationToken cancellationToken)
         {
+            if (OtherBalances.ContainsKey(asset))
+            {
+                Calls.Add($"balance {asset}");
+                OnOtherBalance?.Invoke();
+                if (OtherBalanceError is not null)
+                    throw OtherBalanceError;
+                return Task.FromResult(OtherBalances.GetValueOrDefault(asset));
+            }
             Calls.Add("balance");
             return Task.FromResult(Balance);
         }

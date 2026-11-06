@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.1.7 (beta)
+
+- **Payout reserve:** payout can wait while the exchange holds less than a set amount of another asset, e.g. no
+  USD paid out while the USDC balance is under 10,000. Set the asset and the amount on the payout page (empty for no
+  check). The reserve's spendable balance is read with the payout key every run and again right before a withdrawal;
+  if it can't be read, nothing is withdrawn.
+
 ## 0.1.5 (beta)
 
 - **Sweeps signal replace-by-fee** (BIP 125), so a sweep stuck below the going fee can be bumped from the wallet.

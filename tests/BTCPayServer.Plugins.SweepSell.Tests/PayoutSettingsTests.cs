@@ -100,6 +100,38 @@ public class PayoutSettingsTests
         Assert.Contains(field, Errors(vm));
     }
 
+    [Theory]
+    [InlineData(" usdc ", 10000, null)]
+    [InlineData("", 0, null)]
+    [InlineData("US$C", 10000, "ReserveAsset")]
+    [InlineData("usd", 10000, "ReserveAsset")] // the asset paid out: that's "Always keep on the exchange"
+    [InlineData("USDC", 0, "ReserveMinimum")]
+    [InlineData("USDC", -1, "ReserveMinimum")]
+    [InlineData("", 10000, "ReserveAsset")]
+    public void TheReserveNeedsAnotherAssetAndAnAmount(string asset, decimal minimum, string? error)
+    {
+        var vm = Valid();
+        vm.ReserveAsset = asset;
+        vm.ReserveMinimum = minimum;
+        var errors = Errors(vm);
+        if (error is null)
+            Assert.Empty(errors);
+        else
+            Assert.Contains(error, errors);
+    }
+
+    [Fact]
+    public void TheReserveIsSaved()
+    {
+        var vm = Valid();
+        vm.ReserveAsset = " usdc ";
+        vm.ReserveMinimum = 10000m;
+        var settings = UISweepSellPayoutController.Apply(Saved(), vm, Protector);
+        Assert.Equal(("USDC", 10000m), (settings.ReserveAsset, settings.ReserveMinimum));
+        Assert.True(settings.HasReserve);
+        Assert.False(UISweepSellPayoutController.Apply(Saved(), Valid(), Protector).HasReserve);
+    }
+
     [Fact]
     public void PayoutKeyMustNotBeTheTradingKey()
     {
