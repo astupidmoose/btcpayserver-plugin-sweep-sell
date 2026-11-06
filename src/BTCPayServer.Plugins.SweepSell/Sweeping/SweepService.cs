@@ -527,6 +527,7 @@ public class SweepService(ISweepSellRepository repository, SecretProtector prote
             Amount = pending.ToExchange,
             ExchangeAddress = string.IsNullOrEmpty(pending.ExchangeAddress) ? null : pending.ExchangeAddress,
             ExchangeId = pending.ExchangeId,
+            KeyFingerprint = pending.KeyFingerprint,
             // Watched from when it is known sent, so a sweep settled late still gets the full watch, but searched for
             // from when it was signed: a broadcast found late may have been credited long before.
             SentAt = now,
@@ -772,8 +773,18 @@ public class SweepService(ISweepSellRepository repository, SecretProtector prote
                                 }
                                 catch (Exception e) when (IsRecordedFailure(e, cancellationToken))
                                 {
-                                    break; // not known: never expired on a failed check
+                                    // Not known: never expired on a failed check. Shown once, until a check succeeds again.
+                                    logger.LogWarning(e, "Sweep & Sell store {StoreId}: could not read the status of {Asset} sweep {Txid}", storeId, awaiting.Asset, awaiting.Txid);
+                                    if (!awaiting.StatusCheckFailing)
+                                    {
+                                        awaiting.StatusCheckFailing = true;
+                                        Record(storeId, state, awaiting.Asset, ActivityOutcome.Waiting,
+                                            $"The {Amount(awaiting.Amount)} {awaiting.Asset} deposit ({awaiting.Txid}) wasn't credited within {DepositWatchLimit.TotalHours:0} hours, and the wallet " +
+                                            $"couldn't say whether the sweep has confirmed: {e.Message}. It stays watched and is checked again each minute.");
+                                    }
+                                    break;
                                 }
+                                awaiting.StatusCheckFailing = false;
                                 if (onChain == TransactionStatus.Unconfirmed)
                                 {
                                     if (!awaiting.StillUnconfirmedShown)
@@ -885,7 +896,8 @@ public class SweepService(ISweepSellRepository repository, SecretProtector prote
                 // The extra fee comes out of the deposit, which must stay at or above the exchange's minimum to be credited.
                 var exchange = exchanges.Find(settings.ExchangeId);
                 var credentials = protector.Credentials(settings);
-                if (exchange is null || credentials is null || awaiting.ExchangeId is { } sentTo && sentTo != exchange.Id)
+                if (exchange is null || credentials is null || awaiting.ExchangeId is { } sentTo && sentTo != exchange.Id ||
+                    awaiting.KeyFingerprint is { } sentWith && sentWith != credentials.Fingerprint())
                     return (false, "The exchange or its key changed since this sweep was sent, so its minimum deposit can't be checked and the fee isn't bumped.");
                 var wallet = await wallets.GetWalletAsync(storeId, code, cancellationToken);
                 if (wallet is null)

@@ -1422,6 +1422,53 @@ public class SweepServiceTests
     }
 
     [Fact]
+    public async Task FailedStatusCheckAtTheWatchLimitIsShownOnceAndKeepsWatching()
+    {
+        Configure();
+        Awaiting("BTC", "sweep-tx", SweepService.DepositWatchLimit);
+        _wallets.StatusError = new HttpRequestException("node unreachable");
+        var service = Service();
+        await service.WatchDepositsAsync(Ct);
+        Assert.Single(State.Awaiting);
+        Assert.Empty(State.Stopped);
+        Assert.Contains("couldn't say whether the sweep has confirmed: node unreachable", Assert.Single(State.Activity).Message);
+
+        _clock.Advance(TimeSpan.FromMinutes(1));
+        await service.WatchDepositsAsync(Ct);
+        Assert.Single(State.Activity); // not again every minute
+
+        _wallets.StatusError = null;
+        _wallets.Statuses["sweep-tx"] = TransactionStatus.Unconfirmed;
+        _clock.Advance(TimeSpan.FromMinutes(1));
+        await service.WatchDepositsAsync(Ct);
+        Assert.False(Assert.Single(State.Awaiting).StatusCheckFailing);
+    }
+
+    [Fact]
+    public async Task BumpIsRefusedAfterTheExchangeKeyChanged()
+    {
+        Configure();
+        Awaiting("BTC", "sweep-tx", TimeSpan.FromHours(1));
+        State.Awaiting[0].KeyFingerprint = "fingerprint-of-an-older-key";
+        var (done, message) = await Service().BumpFeeAsync(_storeId, "sweep-tx", 3, Ct);
+        Assert.False(done);
+        Assert.Contains("exchange or its key changed", message);
+        Assert.Empty(_wallets.Replacing);
+    }
+
+    [Fact]
+    public async Task SentSweepIsWatchedWithItsKeyAndBumpedWithTheSameKey()
+    {
+        Configure();
+        var service = Service();
+        await service.RunAsync(_storeId, wait: false, Ct);
+        var awaiting = Assert.Single(State.Awaiting);
+        Assert.NotNull(awaiting.KeyFingerprint);
+        var (done, message) = await service.BumpFeeAsync(_storeId, awaiting.Txid, 3, Ct);
+        Assert.True(done, message);
+    }
+
+    [Fact]
     public async Task SweepStillUnconfirmedAfterTheWatchLimitStaysWatched()
     {
         Configure();

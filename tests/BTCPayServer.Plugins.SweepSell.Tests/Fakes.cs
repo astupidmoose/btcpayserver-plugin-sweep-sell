@@ -282,8 +282,10 @@ sealed class FakeWallets : IStoreWallets
         return Task.FromResult(outcome);
     }
 
+    public Exception? StatusError { get; set; }
+
     public Task<TransactionStatus> GetStatusAsync(string cryptoCode, string txid, CancellationToken cancellationToken) =>
-        Task.FromResult(Statuses.GetValueOrDefault(txid, TransactionStatus.Unknown));
+        StatusError is not null ? Task.FromException<TransactionStatus>(StatusError) : Task.FromResult(Statuses.GetValueOrDefault(txid, TransactionStatus.Unknown));
 
     /// <summary>Replaced transaction to the one that replaced it, as the wallet would report it after following every bump.</summary>
     public Dictionary<string, string> Replacements { get; } = new();

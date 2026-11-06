@@ -98,6 +98,15 @@ public class AwaitingDeposit
     /// </summary>
     public string? ExchangeAddress { get; set; }
 
+    /// <summary>
+    /// Fingerprint of the exchange key the deposit address was read with: a bump's minimum deposit must be read for the same
+    /// account. Null for sweeps sent by earlier versions.
+    /// </summary>
+    public string? KeyFingerprint { get; set; }
+
+    /// <summary>Whether the last on-chain status check, made once the watch limit passed, failed (shown once).</summary>
+    public bool StatusCheckFailing { get; set; }
+
     /// <summary>The exchange the sweep went to: its deposits are only looked up there.</summary>
     public string? ExchangeId { get; set; }
 
