@@ -44,6 +44,15 @@ public class KrakenConnector(HttpClient http, TimeProvider? clock = null) : IExc
     public string Id => "kraken";
     public string Name => "Kraken";
 
+    // Every name Kraken has for an asset (USD, ZUSD; BTC, XBT, XXBT) gives the same key, as the balances are read.
+    public string AssetKey(string asset) => ToKraken(Ticker(asset));
+
+    /// <summary>
+    /// The ticker for any name Kraken has for an asset (XBT and XXBT are BTC, ZUSD is USD), as balances and listed
+    /// withdrawals and destinations are read, so an asset entered under another name still matches them.
+    /// </summary>
+    public static string Ticker(string asset) => FromKrakenAsset(asset) ?? asset.ToUpperInvariant();
+
     public string KeyPermissionsHelp =>
         "In Kraken: Settings > API > Create key. Tick only Query Funds, Deposit Funds, Query Open Orders & Trades, " +
         "Query Closed Orders & Trades and Create & Modify Orders. Never tick Withdraw Funds: this key never withdraws " +

@@ -19,7 +19,7 @@ public class KrakenWithdrawals(KrakenConnector kraken) : IWithdrawalConnector
     public string Id => kraken.Id;
     public string Name => kraken.Name;
 
-    public string AssetKey(string asset) => ToKraken(asset);
+    public string AssetKey(string asset) => kraken.AssetKey(asset);
 
     public string KeyPermissionsHelp =>
         "In Kraken: Settings > API > Create key. Use a separate key from the trading key, and tick only Query Funds and Withdraw Funds. " +
@@ -27,7 +27,7 @@ public class KrakenWithdrawals(KrakenConnector kraken) : IWithdrawalConnector
         "enter its name exactly as Kraken shows it.";
 
     public async Task<decimal> GetAvailableBalanceAsync(ExchangeCredentials credentials, string asset, CancellationToken cancellationToken) =>
-        (await kraken.GetAvailableBalancesAsync(credentials, cancellationToken)).GetValueOrDefault(asset.ToUpperInvariant());
+        (await kraken.GetAvailableBalancesAsync(credentials, cancellationToken)).GetValueOrDefault(Ticker(asset));
 
     public async Task<IReadOnlyList<WithdrawalDestination>> GetDestinationsAsync(ExchangeCredentials credentials, string asset,
         CancellationToken cancellationToken) =>
@@ -129,7 +129,7 @@ public class KrakenWithdrawals(KrakenConnector kraken) : IWithdrawalConnector
                 throw new ExchangeException("Kraken sent an unexpected withdrawal entry.");
             // Kraken filtered by asset already; an entry of another asset is not counted.
             if (Text(entry["asset"]) is { } entryAsset && FromKrakenAsset(entryAsset) is { } ticker &&
-                !string.Equals(ticker, asset, StringComparison.OrdinalIgnoreCase))
+                !string.Equals(ticker, Ticker(asset), StringComparison.OrdinalIgnoreCase))
                 continue;
             var refid = Text(entry["refid"]) is { Length: > 0 } r ? r : throw new ExchangeException("Kraken sent a withdrawal without a reference.");
             if (entry["time"] is not JValue { Type: JTokenType.Integer or JTokenType.Float } time ||
@@ -216,7 +216,7 @@ public class KrakenWithdrawals(KrakenConnector kraken) : IWithdrawalConnector
 
     static List<WithdrawalDestination> Destinations(JArray addresses, string asset) =>
         addresses.OfType<JObject>()
-            .Where(a => Text(a["asset"]) is not { } listed || string.Equals(FromKrakenAsset(listed), asset, StringComparison.OrdinalIgnoreCase))
+            .Where(a => Text(a["asset"]) is not { } listed || string.Equals(FromKrakenAsset(listed), Ticker(asset), StringComparison.OrdinalIgnoreCase))
             .Where(a => !string.IsNullOrEmpty(Text(a["key"])))
             .Select(a => new WithdrawalDestination(Text(a["key"])!, Text(a["method"]) ?? "", IsTrue(a["verified"])))
             .ToList();

@@ -35,6 +35,19 @@ public class PayoutSettings
     /// <summary>Always left on the exchange, in <see cref="Asset"/>.</summary>
     public decimal KeepBalance { get; set; }
 
+    /// <summary>
+    /// Another asset that must be held on the exchange for payout to run, e.g. a USDC reserve. Empty for no such check.
+    /// </summary>
+    public string ReserveAsset { get; set; } = "";
+
+    /// <summary>
+    /// Payout waits while the spendable balance of <see cref="ReserveAsset"/> is below this, in that asset. 0 for no check.
+    /// </summary>
+    public decimal ReserveMinimum { get; set; }
+
+    /// <summary>Whether payout waits on <see cref="ReserveAsset"/>.</summary>
+    public bool HasReserve => !string.IsNullOrEmpty(ReserveAsset) && ReserveMinimum > 0;
+
     /// <summary>Most withdrawn per UTC day, in <see cref="Asset"/>. Required: payout never runs without a cap.</summary>
     public decimal DailyCap { get; set; }
 

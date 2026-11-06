@@ -381,17 +381,31 @@ public class HedgeService(ISweepSellRepository repository, SecretProtector prote
                         "The settings changed during the run (paused, hedging or its options changed, or another key); nothing more is sent this run.");
                     return;
                 }
-                // Saved before sending: if the response is lost or the server stops, the next run looks the order up first.
-                // Stamped once the lock is held, just before sending: the fill's day and the lookup grace count from here.
-                pending.SentAt = clock.GetUtcNow();
-                state.Pending.Add(pending);
-                await repository.SaveHedgeStateAsync(storeId, state);
+                // A payout waiting on a reserve of this asset, in any store, reads it and withdraws with no sale of it running.
+                // Taken before the order is saved as pending, so waiting here never leaves an order pending that wasn't sent.
+                var sale = await AssetGate.For(exchange.Id, exchange.AssetKey(Asset)).SaleAsync(cancellationToken);
+                try
+                {
+                    // Saved before sending: if the response is lost or the server stops, the next run looks the order up first.
+                    // Stamped once the lock is held, just before sending: the fill's day and the lookup grace count from here.
+                    pending.SentAt = clock.GetUtcNow();
+                    state.Pending.Add(pending);
+                    await repository.SaveHedgeStateAsync(storeId, state);
+                }
+                catch
+                {
+                    sale.Dispose(); // nothing was sent
+                    throw;
+                }
+                var outcomeKnown = false;
                 try
                 {
                     result = await exchange.SellAsync(credentials, Asset, market, amount, limitPrice, pending.ClientOrderId, validateOnly: false, cancellationToken);
+                    outcomeKnown = true;
                 }
                 catch (ExchangeException e) when (e.Rejected)
                 {
+                    outcomeKnown = true;
                     state.Pending.Remove(pending);
                     Record(storeId, state, Asset, ActivityOutcome.Failed,
                         $"{exchange.Name} refused selling {Amount(amount)} BTC for {market}: {e.Message}. Nothing was sold.");
@@ -402,6 +416,15 @@ public class HedgeService(ISweepSellRepository repository, SecretProtector prote
                     Record(storeId, state, Asset, ActivityOutcome.Failed,
                         $"Selling {Amount(amount)} BTC for {market} failed or got no answer: {e.Message}. The next run checks {exchange.Name} for the order before selling again.");
                     return;
+                }
+                finally
+                {
+                    // An order whose outcome isn't known may still execute until its deadline: until then no reserve of
+                    // the asset is read for a payout.
+                    if (outcomeKnown)
+                        sale.Dispose();
+                    else
+                        AssetGate.ReleaseAfter(sale, pending.SentAt + PendingOrders.MaxExecutionDelay - clock.GetUtcNow());
                 }
             }
             finally

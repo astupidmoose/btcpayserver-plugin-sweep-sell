@@ -48,7 +48,20 @@ public class PayoutState
     /// <summary>Newest first.</summary>
     public List<ActivityEntry> Activity { get; set; } = [];
 
-    public decimal WithdrawnOn(DateTimeOffset now, string asset) => WithdrawnDay == Day(now) ? Withdrawn.GetValueOrDefault(asset) : 0;
+    /// <summary>
+    /// Amount of <paramref name="asset"/> withdrawn on the day of <paramref name="now"/>. With <paramref name="key"/> (the
+    /// exchange's name for an asset), every name of the same asset counts, so changing the ticker to another name for it
+    /// doesn't start a new cap.
+    /// </summary>
+    public decimal WithdrawnOn(DateTimeOffset now, string asset, Func<string, string>? key = null)
+    {
+        if (WithdrawnDay != Day(now))
+            return 0;
+        if (key is null)
+            return Withdrawn.GetValueOrDefault(asset);
+        var wanted = key(asset);
+        return Withdrawn.Where(w => key(w.Key) == wanted).Sum(w => w.Value);
+    }
 
     /// <summary>Adds a withdrawal made at <paramref name="at"/>. One from a day before the one being counted is left out.</summary>
     public void AddWithdrawn(DateTimeOffset at, string asset, decimal amount)

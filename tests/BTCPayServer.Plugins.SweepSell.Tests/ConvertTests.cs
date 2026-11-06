@@ -346,6 +346,23 @@ public class ConvertTests
     }
 
     [Fact]
+    public async Task ALiveSaleHoldsTheLockReservePayoutsTake()
+    {
+        // A payout waiting on a reserve of the asset, in any store, reads it and withdraws under the same lock.
+        Configure();
+        _exchange.Balances["DOGE"] = 300m;
+        var gate = AssetGate.For(FakeExchange.ExchangeId, "DOGE");
+        var live = new List<bool>();
+        _exchange.OnSell = () =>
+        {
+            if (!_exchange.Orders[^1].ValidateOnly)
+                live.Add(gate.Held);
+        };
+        await Service().RunAsync(StoreId, Ct);
+        Assert.Equal([true], live);
+    }
+
+    [Fact]
     public async Task PendingOrderIsSavedBeforeSending()
     {
         Configure();
@@ -353,6 +370,44 @@ public class ConvertTests
         _exchange.OnSell = () => Assert.Single(_repository.States[StoreId].Pending); // already saved when the order goes out
         await Service().RunAsync(StoreId, Ct);
         Assert.Single(_exchange.Orders);
+    }
+
+    [Fact]
+    public async Task ASaleWaitingBehindAReservePayoutIsNotSavedAsPending()
+    {
+        // Stopped while it waits, it was never sent, so it must not be looked up as an order whose outcome is unknown.
+        Configure(assets: "ADA");
+        _exchange.Balances["ADA"] = 300m;
+        var priced = new TaskCompletionSource();
+        _exchange.OnPrice = () => priced.TrySetResult();
+        using (await AssetGate.For(FakeExchange.ExchangeId, "ADA").ReserveAsync(Ct))
+        {
+            using var cts = CancellationTokenSource.CreateLinkedTokenSource(Ct);
+            var run = Service().RunAsync(StoreId, cts.Token);
+            await priced.Task.WaitAsync(TimeSpan.FromSeconds(10), Ct);
+            await Task.Delay(200, Ct); // now waiting for the lock
+            Assert.False(run.IsCompleted);
+            await cts.CancelAsync();
+            await Assert.ThrowsAnyAsync<OperationCanceledException>(() => run);
+        }
+        Assert.DoesNotContain(_exchange.Orders, o => !o.ValidateOnly);
+        Assert.Empty(_repository.States.GetValueOrDefault(StoreId)?.Pending ?? []);
+    }
+
+    [Fact]
+    public async Task ASaleWithALostResponseKeepsReservePayoutsWaiting()
+    {
+        // The order may still execute until its deadline, so no reserve of the asset is read before then.
+        Configure(assets: "XLM");
+        _exchange.Balances["XLM"] = 300m;
+        _exchange.OnSell = () =>
+        {
+            if (!_exchange.Orders[^1].ValidateOnly)
+                throw new HttpRequestException("connection reset");
+        };
+        await Service().RunAsync(StoreId, Ct);
+        Assert.Single(State.Pending);
+        Assert.True(AssetGate.For(FakeExchange.ExchangeId, "XLM").Held);
     }
 
     [Fact]

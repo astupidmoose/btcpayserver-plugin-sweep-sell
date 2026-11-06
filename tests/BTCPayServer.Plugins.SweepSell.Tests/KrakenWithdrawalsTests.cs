@@ -28,7 +28,20 @@ public class KrakenWithdrawalsTests
         var (_, kraken) = Setup();
         Assert.Equal(kraken.AssetKey("XBT"), kraken.AssetKey("btc"));
         Assert.Equal(kraken.AssetKey("XDG"), kraken.AssetKey("DOGE"));
+        Assert.Equal(kraken.AssetKey("XXBT"), kraken.AssetKey("btc"));
+        Assert.Equal(kraken.AssetKey("ZUSD"), kraken.AssetKey("usd"));
         Assert.NotEqual(kraken.AssetKey("USD"), kraken.AssetKey("CAD"));
+    }
+
+    [Theory]
+    [InlineData("BTC")]
+    [InlineData("XBT")]
+    [InlineData("xxbt")]
+    public async Task BalanceIsReadUnderAnyNameOfTheAsset(string asset)
+    {
+        var (http, kraken) = Setup();
+        http.Responses["/0/private/BalanceEx"] = """{"error":[],"result":{"XXBT":{"balance":"0.5"},"XBT.F":{"balance":"0.25"}}}""";
+        Assert.Equal(0.75m, await kraken.GetAvailableBalanceAsync(Credentials, asset, Ct));
     }
 
     [Fact]
@@ -125,6 +138,23 @@ public class KrakenWithdrawalsTests
         http.Responses["/0/private/Withdraw"] = """{"error":["EService:Unavailable"]}""";
         e = await Assert.ThrowsAsync<ExchangeException>(() => kraken.WithdrawAsync(Credentials, "USD", "test-bank", 100m, 1m, Ct));
         Assert.False(e.Rejected); // may have gone through: looked up, never retried
+    }
+
+    [Theory]
+    [InlineData("USD")]
+    [InlineData("ZUSD")]
+    [InlineData("zusd")]
+    public async Task WithdrawalsAndDestinationsMatchAnyNameOfTheAsset(string asset)
+    {
+        var (http, kraken) = Setup();
+        http.Responses["/0/private/WithdrawStatus"] = """
+            {"error":[],"result":[
+              {"asset":"ZUSD","refid":"R1","amount":"99.00","fee":"1.00","time":1893456000,"status":"Success","key":"test-bank"},
+              {"asset":"XXBT","refid":"R2","amount":"1","fee":"0","time":1893456100,"status":"Pending"}]}
+            """;
+        var records = await kraken.GetRecentWithdrawalsAsync(Credentials, asset, DateTimeOffset.FromUnixTimeSeconds(1893400000), Ct);
+        Assert.Equal(["R1"], records.Select(r => r.Reference));
+        Assert.Equal(["test-bank"], (await kraken.GetDestinationsAsync(Credentials, asset, Ct)).Select(d => d.Name));
     }
 
     [Fact]

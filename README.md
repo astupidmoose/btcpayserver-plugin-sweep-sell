@@ -31,7 +31,8 @@ Sweep your store's wallets to your exchange and sell what comes in, automaticall
 - **Payout (optional):** on a schedule, withdraw one asset (e.g. the currency you convert to) to a
   withdrawal destination you already saved and verified in your exchange, such as your bank account. It
   uses its own withdraw-only key and can't add or change destinations: you enter the name of one that is
-  already there. Required daily cap, minimum, an amount to keep and a highest fee. Starts in dry run,
+  already there. Required daily cap, minimum, an amount to keep and a highest fee; optionally, it waits
+  while the exchange holds less than a set amount of another asset (e.g. a stablecoin reserve). Starts in dry run,
   where the exchange quotes each withdrawal but nothing is sent. Lives on its own page, linked from the
   settings page.
 - **Safety:** dry run for every feature, daily caps, a pause switch per store, and an activity log for

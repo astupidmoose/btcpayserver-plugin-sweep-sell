@@ -205,6 +205,18 @@ public class UISweepSellPayoutController(IPayoutRepository payouts, ISweepSellRe
             yield return (nameof(vm.Minimum), "The minimum can't be negative.");
         if (vm.KeepBalance < 0)
             yield return (nameof(vm.KeepBalance), "The amount to keep can't be negative.");
+        var reserve = Clean(vm.ReserveAsset)?.ToUpperInvariant();
+        if (reserve is not null && !Ticker.IsMatch(reserve))
+            yield return (nameof(vm.ReserveAsset), $"\"{reserve}\" isn't a ticker. Use letters and digits, e.g. USDC.");
+        else if (reserve is not null && asset is not null &&
+                 (withdrawals.Find(vm.ExchangeId) is { } exchange ? exchange.AssetKey(reserve) == exchange.AssetKey(asset) : reserve == asset))
+            yield return (nameof(vm.ReserveAsset), "Use another asset than the one paid out. To leave some of it on the exchange, use \"Always keep on the exchange\".");
+        if (vm.ReserveMinimum < 0)
+            yield return (nameof(vm.ReserveMinimum), "The amount to hold can't be negative.");
+        else if (reserve is not null && vm.ReserveMinimum == 0)
+            yield return (nameof(vm.ReserveMinimum), $"Enter how much {reserve} must be held, or clear the asset for no check.");
+        else if (reserve is null && vm.ReserveMinimum > 0)
+            yield return (nameof(vm.ReserveAsset), "Enter the asset that must be held, e.g. USDC, or set the amount to 0 for no check.");
         if (vm.DailyCap < 0)
             yield return (nameof(vm.DailyCap), "The daily cap can't be negative.");
         if (vm.MaxFee < 0)
@@ -252,6 +264,8 @@ public class UISweepSellPayoutController(IPayoutRepository payouts, ISweepSellRe
             Destination = Clean(vm.Destination) ?? "",
             Minimum = vm.Minimum,
             KeepBalance = vm.KeepBalance,
+            ReserveAsset = Clean(vm.ReserveAsset)?.ToUpperInvariant() ?? "",
+            ReserveMinimum = vm.ReserveMinimum,
             DailyCap = vm.DailyCap,
             MaxFee = vm.MaxFee,
             IntervalMinutes = vm.IntervalMinutes
@@ -280,6 +294,8 @@ public class UISweepSellPayoutController(IPayoutRepository payouts, ISweepSellRe
         Destination = posted?.Destination ?? settings.Destination,
         Minimum = posted?.Minimum ?? settings.Minimum,
         KeepBalance = posted?.KeepBalance ?? settings.KeepBalance,
+        ReserveAsset = posted?.ReserveAsset ?? settings.ReserveAsset,
+        ReserveMinimum = posted?.ReserveMinimum ?? settings.ReserveMinimum,
         DailyCap = posted?.DailyCap ?? settings.DailyCap,
         MaxFee = posted?.MaxFee ?? settings.MaxFee,
         IntervalMinutes = posted?.IntervalMinutes ?? settings.IntervalMinutes,
@@ -325,6 +341,12 @@ public class PayoutSettingsViewModel
 
     [Display(Name = "Always keep on the exchange")]
     public decimal KeepBalance { get; set; }
+
+    [Display(Name = "Pay out only while the exchange holds this asset")]
+    public string? ReserveAsset { get; set; }
+
+    [Display(Name = "At least this much of it")]
+    public decimal ReserveMinimum { get; set; }
 
     [Display(Name = "Daily cap")]
     public decimal DailyCap { get; set; }
