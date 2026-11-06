@@ -721,6 +721,27 @@ public class PayoutTests
     }
 
     [Fact]
+    public async Task ASaleOfTheReserveThatMayStillExecuteHoldsPayoutBack()
+    {
+        // Saved as pending by another store, e.g. before a restart that dropped the lock: it may still execute until its deadline.
+        Configure(reserveAsset: "USDC", reserveMinimum: 10000m);
+        _exchange.Balance = 500m;
+        _exchange.OtherBalances["USDC"] = 20000m;
+        _main.Settings["test-store-2"] = Copy(_main.Settings[StoreId]);
+        var sent = _clock.GetUtcNow() - TimeSpan.FromSeconds(10);
+        var order = new PendingOrder { ExchangeId = FakeWithdrawals.ExchangeId, Asset = "usdc", TargetAsset = "BTC", Amount = 5000m, SentAt = sent };
+        _main.States["test-store-2"] = new ConvertState { Pending = [order] };
+        await Service().RunAsync(StoreId, Ct);
+        Assert.Empty(_exchange.Withdrawals);
+        Assert.Equal(ActivityOutcome.Waiting, State.Activity[0].Outcome);
+        Assert.Contains("A sale of USDC on Fake Exchange whose outcome isn't known yet may still execute until", State.Activity[0].Message);
+
+        _clock.Advance(PendingOrders.MaxExecutionDelay); // it can't execute any more, whether or not it has been looked up
+        await Service().RunAsync(StoreId, Ct);
+        Assert.Single(_exchange.Withdrawals);
+    }
+
+    [Fact]
     public async Task NoSaleOfTheReserveCanLandBetweenItsLastReadAndTheWithdrawal()
     {
         // Every store's sale of the reserve asset takes this lock, so none can run while it is held.

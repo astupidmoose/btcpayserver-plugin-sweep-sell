@@ -333,6 +333,15 @@ public class PayoutService(IPayoutRepository payouts, ISweepSellRepository repos
             // starts between the reserve read below and the withdrawal. Held until the withdrawal is sent.
             if (payout.HasReserve)
                 reserveGate = await AssetGate.For(connector.Id, connector.AssetKey(payout.ReserveAsset)).ReserveAsync(cancellationToken);
+            // A sale whose response was lost may still execute until its deadline; the lock covers that only while the
+            // server runs, so a sale saved as pending by any store counts too (e.g. after a restart).
+            if (payout.HasReserve && await SaleMayStillExecuteAsync(connector, payout.ReserveAsset) is { } until)
+            {
+                Record(storeId, state, asset, ActivityOutcome.Waiting,
+                    $"A sale of {payout.ReserveAsset} on {connector.Name} whose outcome isn't known yet may still execute until {until:u}, so the " +
+                    $"{payout.ReserveAsset} reserve isn't read before then. Nothing was withdrawn; the next run checks again.");
+                return;
+            }
             // The reserve too: it may have been moved or spent since it was read.
             if (!await ReserveHeldAsync(storeId, state, asset, payout, connector, credentials, account, " Nothing was withdrawn.", cancellationToken))
                 return;
@@ -675,6 +684,28 @@ public class PayoutService(IPayoutRepository payouts, ISweepSellRepository repos
                 return $"pays out {asset} live from";
         }
         return null;
+    }
+
+    /// <summary>
+    /// The latest time a sale of <paramref name="asset"/> on the exchange, saved as pending by any store's convert or
+    /// hedging, may still execute, or null when none can any more.
+    /// </summary>
+    async Task<DateTimeOffset?> SaleMayStillExecuteAsync(IWithdrawalConnector connector, string asset)
+    {
+        var key = connector.AssetKey(asset);
+        var now = clock.GetUtcNow();
+        DateTimeOffset? until = null;
+        foreach (var otherId in (await repository.GetAllAsync()).Keys)
+        {
+            var pending = (await repository.GetConvertStateAsync(otherId)).Pending.Concat((await repository.GetHedgeStateAsync(otherId)).Pending);
+            foreach (var order in pending)
+            {
+                var deadline = order.SentAt + PendingOrders.MaxExecutionDelay;
+                if (order.ExchangeId == connector.Id && connector.AssetKey(order.Asset) == key && deadline > now && (until is null || deadline > until))
+                    until = deadline;
+            }
+        }
+        return until;
     }
 
     /// <summary>Whether another store pays out live from the account only while it holds a reserve of <paramref name="asset"/>.</summary>
