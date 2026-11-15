@@ -210,13 +210,17 @@ public class PayoutService(IPayoutRepository payouts, ISweepSellRepository repos
         }
         // A withdrawal still in progress may not have left the balance yet. Leaving its amount on the exchange means nothing
         // is ever paid out twice; if it had already left, this run withdraws that much less and a later run sends the rest.
-        var available = balance - payout.KeepBalance - inProgress;
+        // An exchange that takes withdrawals off the balance when it accepts them has already left them out of it: taking
+        // them off again would hold back their amount for as long as they stay in progress (days, for a bank wire).
+        // Withdrawals sent but not listed yet never get here (Reconcile waits for them).
+        var heldBack = connector.ListedWithdrawalsLeftBalance ? 0m : inProgress;
+        var available = balance - payout.KeepBalance - heldBack;
         var amount = Math.Min(available, left);
         if (amount <= 0 || amount < payout.Minimum)
         {
             Record(storeId, state, asset, ActivityOutcome.Waiting, available < payout.Minimum || available <= 0
                 ? $"{Amount(Math.Max(available, 0))} {asset} can be withdrawn ({Amount(balance)} available, {Amount(payout.KeepBalance)} kept" +
-                  (inProgress > 0 ? $", {Amount(inProgress)} in withdrawals still in progress" : "") +
+                  (heldBack > 0 ? $", {Amount(heldBack)} in withdrawals still in progress" : "") +
                   $"). Waiting until at least {Amount(payout.Minimum)} {asset} can be withdrawn."
                 : $"What today's cap still allows ({Amount(left)} {asset}) is below your minimum of {Amount(payout.Minimum)} {asset}. Payout resumes tomorrow (UTC).");
             return;
@@ -366,7 +370,9 @@ public class PayoutService(IPayoutRepository payouts, ISweepSellRepository repos
             pending.SentAt = clock.GetUtcNow();
             pending.SeenBefore = recent.Concat(before).Where(r => r.RequestedAt >= pending.SentAt - MatchBefore - TimeSpan.FromMinutes(1))
                 .Select(r => r.Reference).Distinct().ToList();
-            var availableNow = balanceNow - payout.KeepBalance - Track(state, list, before, sinceNow);
+            // Same rule as the plan: withdrawals still in progress are held back only where they may still be in the balance.
+            var inProgressNow = Track(state, list, before, sinceNow);
+            var availableNow = balanceNow - payout.KeepBalance - (connector.ListedWithdrawalsLeftBalance ? 0m : inProgressNow);
             var leftNow = payout.DailyCap - state.WithdrawnOn(pending.SentAt, asset, connector.AssetKey);
             if (quote.Amount > availableNow || quote.Amount > leftNow)
             {
@@ -831,7 +837,8 @@ public class PayoutService(IPayoutRepository payouts, ISweepSellRepository repos
         decimal held, inProgress = 0;
         try
         {
-            if (state.Unsettled.Any(list.Holds))
+            // Listed withdrawals only matter where they may still be in the balance (see ListedWithdrawalsLeftBalance).
+            if (!connector.ListedWithdrawalsLeftBalance && state.Unsettled.Any(list.Holds))
             {
                 var since = Since(state, list);
                 inProgress = Track(state, list, await connector.GetRecentWithdrawalsAsync(credentials, reserve, since, cancellationToken), since);

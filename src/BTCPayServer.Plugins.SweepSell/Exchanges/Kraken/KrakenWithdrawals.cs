@@ -21,6 +21,10 @@ public class KrakenWithdrawals(KrakenConnector kraken) : IWithdrawalConnector
 
     public string AssetKey(string asset) => kraken.AssetKey(asset);
 
+    // Kraken takes a withdrawal off the balance when it accepts it; it stays listed as in progress (a bank wire for days)
+    // after that. Seen live: right after a wire, the balance was already short of it, and short of all wires in progress.
+    public bool ListedWithdrawalsLeftBalance => true;
+
     public string KeyPermissionsHelp =>
         "In Kraken: Settings > API > Create key. Use a separate key from the trading key, and tick only Query Funds and Withdraw Funds. " +
         "Tick nothing else: payout refuses a key with any other permission, such as an order permission or Add or Update Withdrawal Addresses. Payouts only go to a withdrawal destination you already saved and verified in Kraken; " +

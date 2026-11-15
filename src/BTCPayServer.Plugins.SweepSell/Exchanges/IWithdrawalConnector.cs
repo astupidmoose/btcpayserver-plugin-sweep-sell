@@ -29,6 +29,14 @@ public interface IWithdrawalConnector
     /// </summary>
     string AssetKey(string asset) => asset.ToUpperInvariant();
 
+    /// <summary>
+    /// True when the exchange takes a withdrawal off the balance <see cref="GetAvailableBalanceAsync"/> reads as soon as it
+    /// accepts it, so a withdrawal it lists (<see cref="GetRecentWithdrawalsAsync"/>) is already out of that balance however
+    /// long it stays in progress. False (the default) keeps listed withdrawals in progress off the amount paid out, in case
+    /// they haven't left the balance yet.
+    /// </summary>
+    bool ListedWithdrawalsLeftBalance => false;
+
     /// <summary>Spendable balance of <paramref name="asset"/>: the total minus anything held by open orders.</summary>
     Task<decimal> GetAvailableBalanceAsync(ExchangeCredentials credentials, string asset, CancellationToken cancellationToken);
 

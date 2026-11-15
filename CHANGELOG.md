@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.1.8 (beta)
+
+- **Payout fix: withdrawals in progress no longer block payouts on Kraken.** Payout took every withdrawal Kraken still
+  listed as in progress off the available balance, but Kraken takes a withdrawal off the balance as soon as it accepts it.
+  Each bank wire was counted twice for as long as it stayed in progress (days), so payout waited although the money was
+  there (e.g. "0 CAD can be withdrawn (2,000 available, 0 kept, 3,000 in withdrawals still in progress)"). On Kraken, listed
+  withdrawals are no longer taken off again, in the plan, the check right before withdrawing, and the reserve check.
+  A withdrawal sent but not listed yet still holds payout back, and other exchanges keep the old, cautious behaviour.
+
 ## 0.1.7 (beta)
 
 - **Payout reserve:** payout can wait while the exchange holds less than a set amount of another asset, e.g. no
