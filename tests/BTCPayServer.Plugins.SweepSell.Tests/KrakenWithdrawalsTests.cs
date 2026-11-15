@@ -347,4 +347,8 @@ public class KrakenWithdrawalsTests
         Assert.DoesNotContain(typeof(IExchangeConnector).GetMethods(), m => m.Name.Contains("Withdraw", StringComparison.OrdinalIgnoreCase));
         Assert.DoesNotContain(typeof(KrakenConnector).GetMethods(BindingFlags.Public | BindingFlags.Instance), m => m.Name.Contains("Withdraw", StringComparison.OrdinalIgnoreCase));
     }
+
+    [Fact]
+    public void KrakenTakesAcceptedWithdrawalsOffTheBalance() =>
+        Assert.True(((IWithdrawalConnector)Setup().Kraken).ListedWithdrawalsLeftBalance);
 }

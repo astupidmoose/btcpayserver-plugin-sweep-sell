@@ -366,6 +366,55 @@ public class PayoutTests
     }
 
     [Fact]
+    public async Task WithdrawalsInProgressAreNotTakenOffAgainWhereTheExchangeAlreadyDid()
+    {
+        // Like Kraken: a bank wire stays in progress for days, but left the balance when it was accepted.
+        Configure(minimum: 10m);
+        _exchange.ListedWithdrawalsLeftBalance = true;
+        _exchange.Balance = 500m;
+        _exchange.Records.Add(new WithdrawalRecord("OTHER-1", "test-bank", 149m, 1m, Start.AddDays(-1), WithdrawalStatus.InProgress));
+        await Service().RunAsync(StoreId, Ct);
+        Assert.Equal(500m, _exchange.Withdrawals.Single().Amount);
+        // Still tracked, so it counts again if the exchange ever stops taking withdrawals off the balance.
+        Assert.Contains(State.Unsettled, u => u.Reference == "OTHER-1");
+    }
+
+    [Fact]
+    public async Task WhereTheExchangeAlreadyTookThemOffAWaitingRunDoesNotCountWithdrawalsInProgress()
+    {
+        Configure(minimum: 400m);
+        _exchange.ListedWithdrawalsLeftBalance = true;
+        _exchange.Balance = 300m;
+        _exchange.Records.Add(new WithdrawalRecord("OTHER-1", "test-bank", 999m, 1m, Start.AddDays(-1), WithdrawalStatus.InProgress));
+        await Service().RunAsync(StoreId, Ct);
+        Assert.Empty(_exchange.Withdrawals);
+        Assert.Equal(ActivityOutcome.Waiting, State.Activity[0].Outcome);
+        Assert.StartsWith("300 USD can be withdrawn (300 available, 0 kept).", State.Activity[0].Message);
+    }
+
+    [Fact]
+    public async Task TheReserveIsNotReducedByListedWithdrawalsWhereTheExchangeAlreadyTookThemOff()
+    {
+        Configure();
+        _exchange.ListedWithdrawalsLeftBalance = true;
+        _payouts.Settings[StoreId].Asset = "USDC";
+        _exchange.Balance = 500m;
+        await Service().RunAsync(StoreId, Ct);
+        _clock.Advance(TimeSpan.FromMinutes(1));
+        await Service().RunAsync(StoreId, Ct); // listed, still in progress
+        Assert.Equal("USDC", Assert.Single(State.Unsettled).Asset);
+
+        _payouts.Settings[StoreId].Asset = "USD";
+        _payouts.Settings[StoreId].ReserveAsset = "USDC";
+        _payouts.Settings[StoreId].ReserveMinimum = 10000m;
+        _exchange.OtherBalances["USDC"] = 10200m;
+        _exchange.Balance = 500m;
+        _clock.Advance(TimeSpan.FromDays(1));
+        await Service().RunAsync(StoreId, Ct);
+        Assert.Equal(("USD", 500m), (_exchange.Withdrawals[1].Asset, _exchange.Withdrawals[1].Amount));
+    }
+
+    [Fact]
     public async Task ExchangeLimitIsRequotedAtTheLimit()
     {
         Configure();
@@ -1193,6 +1242,9 @@ public class PayoutTests
 
         // Like an exchange with two names for one asset.
         public string AssetKey(string asset) => asset.ToUpperInvariant() is "ZUSD" ? "USD" : asset.ToUpperInvariant();
+
+        /// <summary>Like Kraken: a withdrawal it lists is already off the balance.</summary>
+        public bool ListedWithdrawalsLeftBalance { get; set; }
 
         public decimal Balance { get; set; }
         public decimal Fee { get; set; } = 1m;
