@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.1.9 (beta)
+
+- **Fix: sweeps stayed under "Waiting for the exchange" forever, and were never converted on credit.** Kraken's paged deposit list names its entries `deposits`, while its documentation (which the plugin followed) says `deposit`. Every deposit check failed with "Kraken sent an unexpected DepositStatus response", so no sweep was ever marked credited, and a failed check never gives a deposit up. The list is now read whatever Kraken names it, as withdrawals already were. On the first run after updating, every waiting sweep Kraken shows as credited leaves the list and the convert runs.
+- A deposit Kraken credits through its own sweeping transaction is found by the sending transaction it lists (`originators`) as well as by its own transaction ID.
+
 ## 0.1.8 (beta)
 
 - **Payout fix: withdrawals in progress no longer block payouts on Kraken.** Payout took every withdrawal Kraken still
