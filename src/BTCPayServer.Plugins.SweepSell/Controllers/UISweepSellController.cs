@@ -336,6 +336,20 @@ public class UISweepSellController(ISweepSellRepository repository, IPayoutRepos
         return RedirectToAction(nameof(Settings), new { storeId });
     }
 
+    [HttpPost("sweep/awaiting/{txid}/remove")]
+    public async Task<IActionResult> RemoveAwaitingSweep(string storeId, string txid, CancellationToken cancellationToken)
+    {
+        if (!await CanSpendAsync(storeId))
+            return Forbid();
+        var removed = await sweep.RemoveAwaitingAsync(storeId, txid, cancellationToken);
+        TempData.SetStatusMessageModel(new StatusMessageModel
+        {
+            Severity = removed ? StatusMessageModel.StatusSeverity.Success : StatusMessageModel.StatusSeverity.Warning,
+            Message = removed ? "Sweep removed from Waiting for the exchange. It is no longer watched." : "That sweep isn't waiting for the exchange any more."
+        });
+        return RedirectToAction(nameof(Settings), new { storeId });
+    }
+
     [HttpPost("sweep/awaiting/{txid}/bump")]
     public async Task<IActionResult> BumpSweepFee(string storeId, string txid, decimal feeRate, CancellationToken cancellationToken)
     {
