@@ -883,6 +883,35 @@ public class SweepService(ISweepSellRepository repository, SecretProtector prote
     }
 
     /// <summary>
+    /// Stops watching a sweep the owner has checked on the exchange and found never arrived (for example, its coins were spent
+    /// by another transaction). Only the owner can know that: the wallet can't prove where a sweep's coins went. Nothing else
+    /// changes: a stopped coin stays stopped, and today's cap isn't given back. False when no such sweep is waiting.
+    /// </summary>
+    public async Task<bool> RemoveAwaitingAsync(string storeId, string txid, CancellationToken cancellationToken)
+    {
+        var storeLock = StoreLock(storeId);
+        await storeLock.WaitAsync(cancellationToken);
+        try
+        {
+            var state = await repository.GetSweepStateAsync(storeId);
+            var awaiting = state.Awaiting.FirstOrDefault(a => string.Equals(a.Txid, txid, StringComparison.OrdinalIgnoreCase));
+            if (awaiting is null)
+                return false;
+            state.Awaiting.Remove(awaiting);
+            var replaced = awaiting.ReplacedTxids.Count > 0 ? $", which replaced {string.Join(", ", awaiting.ReplacedTxids)}" : "";
+            Record(storeId, state, awaiting.Asset, ActivityOutcome.Changed,
+                $"The {Amount(awaiting.Amount)} {awaiting.Asset} sweep ({awaiting.Txid}{replaced}) was removed from Waiting for the exchange by hand. " +
+                $"It is no longer watched: if it does reach the exchange, the scheduled convert still sells it, but a return wouldn't stop {awaiting.Asset}.");
+            await repository.SaveSweepStateAsync(storeId, state);
+            return true;
+        }
+        finally
+        {
+            storeLock.Release();
+        }
+    }
+
+    /// <summary>
     /// The owner raises the fee of a sent sweep that is stuck unconfirmed: it is replaced (BIP 125) by the same transaction at
     /// <paramref name="feeRate"/> (smallest unit per vB), the extra fee coming out of what the exchange gets, and its deposit is
     /// then watched by the new transaction. Returns what happened, for the page.

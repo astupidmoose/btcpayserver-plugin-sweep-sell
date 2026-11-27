@@ -1041,6 +1041,32 @@ public class SweepServiceTests
     }
 
     [Fact]
+    public async Task TheOwnerRemovesAWaitingSweepTheyFoundNeverArrived()
+    {
+        Configure();
+        Awaiting("BTC", "sweep-a", TimeSpan.FromHours(2));
+        Awaiting("BTC", "sweep-b", TimeSpan.FromHours(3));
+        State.Awaiting[0].ReplacedTxids.Add("sweep-a-earlier");
+        State.Stopped["BTC"] = new StoppedSweep { Txid = "other-sweep", At = _clock.GetUtcNow() };
+        var service = Service();
+
+        // Matched whatever the case, as the page shows it.
+        Assert.True(await service.RemoveAwaitingAsync(_storeId, "SWEEP-A", Ct));
+        Assert.Equal("sweep-b", Assert.Single(State.Awaiting).Txid);
+        var entry = Assert.Single(State.Activity);
+        Assert.Equal(ActivityOutcome.Changed, entry.Outcome);
+        Assert.Contains("The 0.5 BTC sweep (sweep-a, which replaced sweep-a-earlier) was removed from Waiting for the exchange by hand", entry.Message);
+        // Nothing else changes: a stopped coin stays stopped until the owner resumes it.
+        Assert.Equal("other-sweep", State.Stopped["BTC"].Txid);
+
+        // Gone: not watched any more, so not looked up, and removing it again does nothing.
+        await service.WatchDepositsAsync(Ct);
+        Assert.DoesNotContain(_exchange.DepositLookups.SelectMany(l => l.Txids), t => t.StartsWith("sweep-a"));
+        Assert.False(await service.RemoveAwaitingAsync(_storeId, "sweep-a", Ct));
+        Assert.False(await service.RemoveAwaitingAsync(_storeId, "never-sent", Ct));
+    }
+
+    [Fact]
     public async Task BumpedSweepIsFollowedToItsReplacement()
     {
         Configure();

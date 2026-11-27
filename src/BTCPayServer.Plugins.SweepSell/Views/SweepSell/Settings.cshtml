@@ -451,12 +451,13 @@
             <p class="text-secondary">
                 Sent and not credited yet. Each is converted as soon as the exchange credits it. One stuck unconfirmed can have its
                 fee raised: it is replaced by the same transaction at the rate you enter (per vB), and the extra fee comes out of what
-                the exchange gets.
+                the exchange gets. Remove one only after checking on the exchange that it never arrived (for example, its coins were
+                spent by another transaction): it is then no longer watched, so a return wouldn't stop the coin.
             </p>
             <div class="table-responsive">
                 <table class="table">
                     <thead>
-                        <tr><th>Sent (UTC)</th><th>Amount</th><th>Transaction ID</th><th>Bump fee</th></tr>
+                        <tr><th>Sent (UTC)</th><th>Amount</th><th>Transaction ID</th><th>Bump fee</th><th></th></tr>
                     </thead>
                     <tbody>
                         @foreach (var awaiting in Model.SweepAwaiting)
@@ -470,6 +471,14 @@
                                         <input name="feeRate" type="number" step="any" min="0" max="@SweepSettings.MaxMinimumFeeRate" required class="form-control form-control-sm" style="max-width:7rem" placeholder="per vB" aria-label="New fee rate per vB" />
                                         <button type="submit" class="btn btn-sm btn-outline-primary text-nowrap">Bump fee</button>
                                     </form>
+                                </td>
+                                <td>
+                                    @if (Model.CanSpend)
+                                    {
+                                    <form method="post" asp-action="RemoveAwaitingSweep" asp-route-storeId="@storeId" asp-route-txid="@awaiting.Txid">
+                                        <button type="submit" class="btn btn-sm btn-outline-danger">Remove</button>
+                                    </form>
+                                    }
                                 </td>
                             </tr>
                         }

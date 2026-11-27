@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.1.11 (beta)
+
+- **Remove a sweep from "Waiting for the exchange" by hand.** A sweep that never reached the exchange (for example, its coins were spent by another transaction, which the plugin can take for a fee bump) stayed listed until its watch ran out and then stopped the coin. The wallet can't prove where a sweep's coins went, so only the owner can say it never arrived: each waiting sweep now has a Remove button. It is then no longer watched, which the activity log records; a stopped coin stays stopped until resumed, and today's cap isn't given back. Remove one only after checking on the exchange.
+
 ## 0.1.10 (beta)
 
 - **Fix: deposit checks failed with "EGeneral:Invalid arguments:invalid cursor request".** Once 0.1.9 could read Kraken's first page of deposits, asking for the next page failed: Kraken refuses a page cursor sent together with the first page's filters (asset, method, start), as its newer Funding API documents. A later page now sends only its cursor; should Kraken refuse that instead, the page is asked once more with the filters. Withdrawal history for payout pages the same way, so payout doesn't fail like this once there is more than one page of withdrawals.
