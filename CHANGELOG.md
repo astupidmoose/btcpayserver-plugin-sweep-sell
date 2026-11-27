@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.1.10 (beta)
+
+- **Fix: deposit checks failed with "EGeneral:Invalid arguments:invalid cursor request".** Once 0.1.9 could read Kraken's first page of deposits, asking for the next page failed: Kraken refuses a page cursor sent together with the first page's filters (asset, method, start), as its newer Funding API documents. A later page now sends only its cursor; should Kraken refuse that instead, the page is asked once more with the filters. Withdrawal history for payout pages the same way, so payout doesn't fail like this once there is more than one page of withdrawals.
+- A deposit Kraken lists under another asset or deposit method is never counted as a sweep's.
+
 ## 0.1.9 (beta)
 
 - **Fix: sweeps stayed under "Waiting for the exchange" forever, and were never converted on credit.** Kraken's paged deposit list names its entries `deposits`, while its documentation (which the plugin followed) says `deposit`. Every deposit check failed with "Kraken sent an unexpected DepositStatus response", so no sweep was ever marked credited, and a failed check never gives a deposit up. The list is now read whatever Kraken names it, as withdrawals already were. On the first run after updating, every waiting sweep Kraken shows as credited leaves the list and the convert runs.

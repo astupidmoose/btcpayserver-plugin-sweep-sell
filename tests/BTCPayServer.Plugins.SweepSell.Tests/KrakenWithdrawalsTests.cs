@@ -188,13 +188,18 @@ public class KrakenWithdrawalsTests
     }
 
     /// <summary>Kraken's paged WithdrawStatus: each page names the next, and an endless one never stops naming one.</summary>
-    sealed class PagedWithdrawals(bool endless) : FakeHttp
+    sealed class PagedWithdrawals(bool endless, KrakenCursorRule rule = KrakenCursorRule.FiltersRefused) : FakeHttp
     {
         protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
         {
             if (request.RequestUri!.AbsolutePath == "/0/private/WithdrawStatus")
             {
                 var body = await request.Content!.ReadAsStringAsync(cancellationToken);
+                if (KrakenCursor.Refuses(rule, body))
+                {
+                    Responses["/0/private/WithdrawStatus"] = KrakenCursor.Refusal;
+                    return await base.SendAsync(request, cancellationToken);
+                }
                 var page = body.Contains("cursor=true") ? 1 : int.Parse(body.Split("cursor=page")[1].Split('&')[0]);
                 var next = endless || page < 3 ? $"page{page + 1}" : "";
                 Responses["/0/private/WithdrawStatus"] = $$$"""
@@ -219,6 +224,21 @@ public class KrakenWithdrawalsTests
             new KrakenWithdrawals(new KrakenConnector(endless.Client()) { RateLimit = null }).GetRecentWithdrawalsAsync(Credentials, "USD", DateTimeOffset.UnixEpoch, Ct));
         Assert.Contains("can be accounted for", e.Message);
         Assert.Equal(KrakenWithdrawals.MaxWithdrawalPages, endless.Sent.Count(s => s.Request.RequestUri!.AbsolutePath == "/0/private/WithdrawStatus"));
+    }
+
+    [Theory]
+    [InlineData(KrakenCursorRule.FiltersRefused)] // live Kraken: a later page sends only its cursor
+    [InlineData(KrakenCursorRule.BareRefused)] // asked again with the filters
+    public async Task RecentWithdrawalsReadEveryPageWhicheverWayKrakenTakesTheCursor(KrakenCursorRule rule)
+    {
+        var http = new PagedWithdrawals(endless: false, rule);
+        var kraken = new KrakenWithdrawals(new KrakenConnector(http.Client()) { RateLimit = null });
+        var records = await kraken.GetRecentWithdrawalsAsync(Credentials, "USD", DateTimeOffset.UnixEpoch, Ct);
+        Assert.Equal(["R1", "R2", "R3"], records.Select(r => r.Reference));
+        var pages = http.Sent.Where(s => s.Request.RequestUri!.AbsolutePath == "/0/private/WithdrawStatus").ToList();
+        Assert.Equal(rule == KrakenCursorRule.FiltersRefused ? 3 : 5, pages.Count);
+        if (rule == KrakenCursorRule.FiltersRefused)
+            Assert.All(pages.Skip(1), p => Assert.Equal(["cursor", "nonce"], p.Body.Split('&').Select(f => f.Split('=')[0]).Order()));
     }
 
     [Theory]

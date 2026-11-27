@@ -648,7 +648,7 @@ public class KrakenTests
     }
 
     /// <summary>Two pages of invented deposits; the sweep's is on the second.</summary>
-    class PagedDeposits : FakeHttp
+    class PagedDeposits(KrakenCursorRule rule = KrakenCursorRule.FiltersRefused) : FakeHttp
     {
         public List<string> Cursors { get; } = [];
 
@@ -659,6 +659,11 @@ public class KrakenTests
             if (request.RequestUri!.AbsolutePath == "/0/private/DepositStatus")
             {
                 var body = await request.Content!.ReadAsStringAsync(cancellationToken);
+                if (KrakenCursor.Refuses(rule, body))
+                {
+                    Responses["/0/private/DepositStatus"] = KrakenCursor.Refusal;
+                    return await base.SendAsync(request, cancellationToken);
+                }
                 var cursor = body.Split('&').Single(p => p.StartsWith("cursor="));
                 Cursors.Add(cursor);
                 Responses["/0/private/DepositStatus"] = cursor == "cursor=true"
@@ -704,6 +709,46 @@ public class KrakenTests
         http.Responses["/0/private/DepositStatus"] = response;
         await Assert.ThrowsAsync<ExchangeException>(() =>
             new KrakenConnector(http.Client()).FindDepositAsync(Credentials, "BTC", DepositTxid, SweptAt, TestContext.Current.CancellationToken));
+    }
+
+    [Fact]
+    public async Task ALaterDepositPageSendsOnlyItsCursor()
+    {
+        // Kraken refuses a cursor sent with the asset, method and start of the first page ("invalid cursor request").
+        var http = new PagedDeposits(KrakenCursorRule.FiltersRefused);
+        var deposit = await new KrakenConnector(http.Client()).FindDepositAsync(Credentials, "BTC", DepositTxid, SweptAt, TestContext.Current.CancellationToken);
+        Assert.Equal(new DepositStatus(DepositState.Credited, 0.25m), deposit);
+        var pages = http.Sent.Where(s => s.Request.RequestUri!.AbsolutePath == "/0/private/DepositStatus").Select(s => s.Body).ToList();
+        Assert.Equal(2, pages.Count); // nothing refused, nothing asked twice
+        Assert.Contains("asset=XBT", pages[0]);
+        Assert.Contains("method=Bitcoin", pages[0]);
+        Assert.Contains("start=", pages[0]);
+        Assert.Equal(["cursor", "nonce"], pages[1].Split('&').Select(p => p.Split('=')[0]).Order());
+    }
+
+    [Fact]
+    public async Task ALaterDepositPageIsAskedWithItsFiltersIfKrakenRefusesABareCursor()
+    {
+        var http = new PagedDeposits(KrakenCursorRule.BareRefused);
+        var deposit = await new KrakenConnector(http.Client()) { RateLimit = null }
+            .FindDepositAsync(Credentials, "BTC", DepositTxid, SweptAt, TestContext.Current.CancellationToken);
+        Assert.Equal(new DepositStatus(DepositState.Credited, 0.25m), deposit);
+        Assert.Equal(3, http.Sent.Count(s => s.Request.RequestUri!.AbsolutePath == "/0/private/DepositStatus"));
+    }
+
+    [Fact]
+    public async Task ADepositOfAnotherAssetOrMethodOnALaterPageIsNotCounted()
+    {
+        var http = new FakeHttp();
+        http.Responses["/0/private/DepositMethods"] = """{"error":[],"result":[{"method":"Bitcoin","gen-address":true,"minimum":"0.0001"}]}""";
+        http.Responses["/0/private/DepositStatus"] = $$$"""
+            {"error":[],"result":{"deposits":[
+              {"asset":"XLTC","method":"Litecoin","txid":"{{{DepositTxid}}}","amount":"9","status":"Success"},
+              {"asset":"XXBT","method":"Bitcoin Lightning","txid":"{{{DepositTxid}}}","amount":"8","status":"Success"},
+              {"asset":"XXBT","method":"Bitcoin","txid":"{{{DepositTxid}}}","amount":"0.25","status":"Success"}],"next_cursor":null}}
+            """;
+        var deposit = await new KrakenConnector(http.Client()).FindDepositAsync(Credentials, "BTC", DepositTxid, SweptAt, TestContext.Current.CancellationToken);
+        Assert.Equal(new DepositStatus(DepositState.Credited, 0.25m), deposit);
     }
 
     [Fact]

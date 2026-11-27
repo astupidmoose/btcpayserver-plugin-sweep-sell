@@ -149,6 +149,38 @@ public class KrakenConnector(HttpClient http, TimeProvider? clock = null) : IExc
         return (await FindDepositsAsync(credentials, asset, [txid], since, cancellationToken)).GetValueOrDefault(txid);
     }
 
+    /// <summary>
+    /// One page of a paged Kraken list (DepositStatus, WithdrawStatus): its entries and the cursor of the next page, if any.
+    /// The first page (<paramref name="cursor"/> null) sends <paramref name="filters"/> and asks for pages. A later page sends
+    /// only its cursor, which already carries the filters: Kraken refuses a cursor sent with them ("EGeneral:Invalid
+    /// arguments:invalid cursor request"). Should Kraken refuse a bare cursor instead, the page is asked once more with the
+    /// filters. The entries are the single array beside next_cursor, whatever Kraken names it ("deposits", "withdrawals").
+    /// </summary>
+    internal async Task<(JArray Entries, string? Next)> PageAsync(ExchangeCredentials credentials, string method,
+        IReadOnlyList<KeyValuePair<string, string>> filters, string? cursor, CancellationToken cancellationToken)
+    {
+        JToken result;
+        if (cursor is null)
+            result = await PrivateAsync(credentials, method, [.. filters, new("cursor", "true")], cancellationToken);
+        else
+        {
+            try
+            {
+                result = await PrivateAsync(credentials, method, [new("cursor", cursor)], cancellationToken);
+            }
+            catch (ExchangeException e) when (e.Message.Contains("EGeneral:Invalid arguments", StringComparison.Ordinal))
+            {
+                result = await PrivateAsync(credentials, method, [.. filters, new("cursor", cursor)], cancellationToken);
+            }
+        }
+        return result switch
+        {
+            JArray list => (list, null),
+            JObject paged when paged.Properties().Select(p => p.Value).OfType<JArray>().ToList() is [var list] => (list, Text(paged["next_cursor"])),
+            _ => throw new ExchangeException($"Kraken sent an unexpected {method} response.")
+        };
+    }
+
     public async Task<IReadOnlyDictionary<string, DepositStatus>> FindDepositsAsync(ExchangeCredentials credentials, string asset,
         IReadOnlyCollection<string> txids, DateTimeOffset since, CancellationToken cancellationToken)
     {
@@ -160,24 +192,21 @@ public class KrakenConnector(HttpClient http, TimeProvider? clock = null) : IExc
         // Kraken lists deposits newest first, a page at a time: follow the pages back to when the earliest sweep was sent,
         // reading each page once for every deposit looked for. An hour of slack covers a difference between our clock and Kraken's.
         var start = since.AddHours(-1).ToUnixTimeSeconds().ToString(CultureInfo.InvariantCulture);
-        var cursor = "true";
+        string? cursor = null;
         for (var page = 0; page < MaxDepositPages; page++)
         {
-            var result = await PrivateAsync(credentials, "DepositStatus",
-                [new("asset", ToKraken(asset)), new("method", method), new("start", start), new("cursor", cursor)], cancellationToken);
-            var (deposits, next) = result switch
-            {
-                JArray list => (list, null),
-                // The paged shape: the entries' array beside next_cursor, whatever Kraken names it. Its documentation says
-                // "deposit"; the live API sends "deposits". Reading only "deposit" failed every lookup.
-                JObject paged when paged.Properties().Select(p => p.Value).OfType<JArray>().ToList() is [var list] => (list, Text(paged["next_cursor"])),
-                _ => throw new ExchangeException("Kraken sent an unexpected DepositStatus response.")
-            };
+            var (deposits, next) = await PageAsync(credentials, "DepositStatus",
+                [new("asset", ToKraken(asset)), new("method", method), new("start", start)], cursor, cancellationToken);
             // Every entry is checked: one that can't be read could be a deposit looked for, so it is never taken as "not there".
             if (deposits.Any(d => d is not JObject o || o["txid"]?.Type != JTokenType.String || string.IsNullOrWhiteSpace(Text(o["txid"]))))
                 throw new ExchangeException("Kraken sent a deposit without a usable transaction ID.");
             foreach (var entry in deposits.Cast<JObject>())
             {
+                // Kraken filtered by asset and method already; an entry of another one is not counted.
+                if (Text(entry["asset"]) is { } entryAsset && FromKrakenAsset(entryAsset) is { } ticker &&
+                    !string.Equals(ticker, Ticker(asset), StringComparison.OrdinalIgnoreCase) ||
+                    Text(entry["method"]) is { } entryMethod && !string.Equals(entryMethod, method, StringComparison.OrdinalIgnoreCase))
+                    continue;
                 // A deposit Kraken credits through its own sweeping transaction lists the sender's transaction under
                 // "originators", with Kraken's transaction as its txid: either one finds it.
                 var ids = (entry["originators"] as JArray)?.Where(o => o.Type == JTokenType.String).Select(o => Text(o)!) ?? [];
