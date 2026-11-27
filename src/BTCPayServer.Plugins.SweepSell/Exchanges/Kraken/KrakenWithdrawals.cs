@@ -107,20 +107,13 @@ public class KrakenWithdrawals(KrakenConnector kraken) : IWithdrawalConnector
         // that was left out wouldn't be held back from the balance, and could be paid out again.
         var start = since.ToUnixTimeSeconds().ToString(CultureInfo.InvariantCulture);
         var entries = new List<JToken>();
-        var cursor = "true";
+        string? cursor = null;
         for (var page = 0; ; page++)
         {
             if (page == MaxWithdrawalPages)
                 throw new ExchangeException($"Kraken lists more than {MaxWithdrawalPages} pages of {asset} withdrawals, so not all of them can be accounted for. Nothing is withdrawn.");
-            var result = await kraken.PrivateAsync(credentials, "WithdrawStatus",
-                [new("asset", ToKraken(asset)), new("start", start), new("cursor", cursor)], cancellationToken);
-            var (list, next) = result switch
-            {
-                JArray array => (array, null),
-                // The paged shape: the entries' array beside next_cursor, whatever Kraken names it.
-                JObject paged when paged.Properties().Select(p => p.Value).OfType<JArray>().ToList() is [var array] => (array, Text(paged["next_cursor"])),
-                _ => throw new ExchangeException("Kraken sent an unexpected WithdrawStatus response.")
-            };
+            var (list, next) = await kraken.PageAsync(credentials, "WithdrawStatus",
+                [new("asset", ToKraken(asset)), new("start", start)], cursor, cancellationToken);
             entries.AddRange(list);
             if (list.Count == 0 || string.IsNullOrEmpty(next) || next == cursor)
                 break;
