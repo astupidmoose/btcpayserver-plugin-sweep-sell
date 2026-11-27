@@ -168,7 +168,9 @@ public class KrakenConnector(HttpClient http, TimeProvider? clock = null) : IExc
             var (deposits, next) = result switch
             {
                 JArray list => (list, null),
-                JObject paged when paged["deposit"] is JArray list => (list, Text(paged["next_cursor"])),
+                // The paged shape: the entries' array beside next_cursor, whatever Kraken names it. Its documentation says
+                // "deposit"; the live API sends "deposits". Reading only "deposit" failed every lookup.
+                JObject paged when paged.Properties().Select(p => p.Value).OfType<JArray>().ToList() is [var list] => (list, Text(paged["next_cursor"])),
                 _ => throw new ExchangeException("Kraken sent an unexpected DepositStatus response.")
             };
             // Every entry is checked: one that can't be read could be a deposit looked for, so it is never taken as "not there".
@@ -176,9 +178,14 @@ public class KrakenConnector(HttpClient http, TimeProvider? clock = null) : IExc
                 throw new ExchangeException("Kraken sent a deposit without a usable transaction ID.");
             foreach (var entry in deposits.Cast<JObject>())
             {
-                var txid = Text(entry["txid"])!;
-                if (wanted.Contains(txid) && !found.ContainsKey(txid))
-                    found[txid] = Deposit(entry, asset);
+                // A deposit Kraken credits through its own sweeping transaction lists the sender's transaction under
+                // "originators", with Kraken's transaction as its txid: either one finds it.
+                var ids = (entry["originators"] as JArray)?.Where(o => o.Type == JTokenType.String).Select(o => Text(o)!) ?? [];
+                foreach (var txid in ids.Prepend(Text(entry["txid"])!))
+                {
+                    if (wanted.Contains(txid) && !found.ContainsKey(txid))
+                        found[txid] = Deposit(entry, asset);
+                }
             }
             if (found.Count == wanted.Count || deposits.Count == 0 || string.IsNullOrEmpty(next) || next == cursor)
                 break;
